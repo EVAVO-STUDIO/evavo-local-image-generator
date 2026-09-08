@@ -27,8 +27,11 @@ EXPECTED_TOOLS = {
     "discover_backends",
     "list_checkpoints",
     "generate_image",
+    "generate_batch",
     "generation_status",
     "collect_generation",
+    "task_history",
+    "task_statistics",
     "stop_managed_backend",
 }
 
@@ -141,7 +144,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
         anyio.run(exercise)
 
-    def test_mcp_streamable_http_generates_and_downloads_image(self) -> None:
+    def test_mcp_streamable_http_generates_batch_and_persists_history(self) -> None:
         native_endpoint = f"http://127.0.0.1:{NATIVE_MCP_PORT}"
         native = subprocess.Popen(
             [sys.executable, str(ROOT / "mock-comfyui-server.py"), "--port", str(NATIVE_MCP_PORT), "--native-only"],
@@ -151,44 +154,48 @@ class AgentIntegrationTests(unittest.TestCase):
         )
         wait_port(NATIVE_MCP_PORT)
 
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(ROOT)
-        env["PYTHONUNBUFFERED"] = "1"
-        env["EVAVO_COMFYUI_ENDPOINT"] = native_endpoint
-        process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "evavo_local_image_generator.mcp_server",
-                "--transport",
-                "streamable-http",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(HTTP_PORT),
-                "--path",
-                "/mcp",
-                "--json-response",
-            ],
-            cwd=str(ROOT),
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        try:
-            wait_port(HTTP_PORT)
-            self.assertIsNone(process.poll(), "HTTP MCP server exited unexpectedly")
+        with tempfile.TemporaryDirectory() as state_directory, tempfile.TemporaryDirectory() as output_directory:
+            history_file = Path(state_directory) / "agent-task-history.json"
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(ROOT)
+            env["PYTHONUNBUFFERED"] = "1"
+            env["EVAVO_COMFYUI_ENDPOINT"] = native_endpoint
+            env["EVAVO_TASK_HISTORY"] = str(history_file)
 
-            with tempfile.TemporaryDirectory() as output_directory:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "evavo_local_image_generator.mcp_server",
+                    "--transport",
+                    "streamable-http",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(HTTP_PORT),
+                    "--path",
+                    "/mcp",
+                    "--json-response",
+                ],
+                cwd=str(ROOT),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                wait_port(HTTP_PORT)
+                self.assertIsNone(process.poll(), "HTTP MCP server exited unexpectedly")
+
                 async def exercise() -> None:
                     async with Client(f"http://127.0.0.1:{HTTP_PORT}/mcp") as client:
                         names = tool_names(await client.list_tools())
                         self.assertTrue(EXPECTED_TOOLS.issubset(names), names)
-                        result = await client.call_tool(
+
+                        single = await client.call_tool(
                             "generate_image",
                             {
                                 "prompt": "EVAVO MCP end-to-end image test",
-                                "project_name": "mcp_test",
+                                "project_name": "mcp_single",
                                 "width": 512,
                                 "height": 512,
                                 "steps": 2,
@@ -197,22 +204,60 @@ class AgentIntegrationTests(unittest.TestCase):
                                 "output_dir": output_directory,
                             },
                         )
-                        payload = result.structured_content
-                        self.assertIsInstance(payload, dict)
-                        assert isinstance(payload, dict)
-                        self.assertEqual(payload.get("status"), "completed")
-                        downloaded = payload.get("downloaded_files")
-                        self.assertIsInstance(downloaded, list)
-                        self.assertTrue(downloaded)
-                        for file_name in downloaded:
-                            path = Path(str(file_name))
-                            self.assertTrue(path.is_file(), path)
-                            self.assertGreater(path.stat().st_size, 0)
+                        single_payload = single.structured_content
+                        self.assertIsInstance(single_payload, dict)
+                        assert isinstance(single_payload, dict)
+                        self.assertEqual(single_payload.get("status"), "completed")
+                        self.assertTrue(single_payload.get("downloaded_files"))
+
+                        batch = await client.call_tool(
+                            "generate_batch",
+                            {
+                                "prompts": ["agent batch one", "agent batch two"],
+                                "project_name": "mcp_batch_test",
+                                "width": 512,
+                                "height": 512,
+                                "steps": 2,
+                                "wait": True,
+                                "auto_start": False,
+                                "output_dir": output_directory,
+                                "concurrency": 2,
+                            },
+                        )
+                        batch_payload = batch.structured_content
+                        self.assertIsInstance(batch_payload, dict)
+                        assert isinstance(batch_payload, dict)
+                        self.assertTrue(batch_payload.get("ok"), batch_payload)
+                        self.assertEqual(batch_payload.get("successful"), 2)
+                        self.assertEqual(batch_payload.get("failed"), 0)
+                        for item in batch_payload.get("results", []):
+                            self.assertEqual(item.get("status"), "completed")
+                            for file_name in item.get("downloaded_files", []):
+                                path = Path(str(file_name))
+                                self.assertTrue(path.is_file(), path)
+                                self.assertGreater(path.stat().st_size, 0)
+
+                        history = await client.call_tool("task_history", {"limit": 10})
+                        history_payload = history.structured_content
+                        self.assertIsInstance(history_payload, list)
+                        assert isinstance(history_payload, list)
+                        self.assertGreaterEqual(len(history_payload), 3)
+                        self.assertTrue(all(item.get("status") == "completed" for item in history_payload[-3:]))
+
+                        stats = await client.call_tool("task_statistics", {})
+                        stats_payload = stats.structured_content
+                        self.assertIsInstance(stats_payload, dict)
+                        assert isinstance(stats_payload, dict)
+                        self.assertGreaterEqual(int(stats_payload.get("completed", 0)), 3)
 
                 anyio.run(exercise)
-        finally:
-            stop_process(process)
-            stop_process(native)
+
+                persisted = json.loads(history_file.read_text(encoding="utf-8"))
+                self.assertGreaterEqual(len(persisted), 3)
+                self.assertTrue(all(item.get("status") == "completed" for item in persisted[-3:]))
+            finally:
+                stop_process(process)
+                stop_process(native)
 
 
 if __name__ == "__main__":
