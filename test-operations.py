@@ -145,16 +145,80 @@ class OperationsIntegrationTests(unittest.TestCase):
             self.assertEqual(payload["queued"], 2)
             self.assertEqual(len(json.loads(history.read_text(encoding="utf-8"))), 2)
 
-    def test_batch_is_tracked_native(self) -> None:
+    def test_batch_native_wait_persists_rich_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             history = Path(directory) / "task_history.json"
+            outputs = Path(directory) / "outputs"
             env = os.environ.copy()
             env["EVAVO_TASK_HISTORY"] = str(history)
-            result = run_python("generate-batch.py", "--prompts", "native one", "native two", "--project", "native_batch", "--endpoint", NATIVE_ENDPOINT, "--concurrency", "2", "--json", timeout=20, env=env)
+            result = run_python(
+                "generate-batch.py",
+                "--prompts",
+                "native one",
+                "native two",
+                "--project",
+                "native_batch",
+                "--endpoint",
+                NATIVE_ENDPOINT,
+                "--concurrency",
+                "2",
+                "--wait",
+                "--wait-timeout",
+                "5",
+                "--output-dir",
+                str(outputs),
+                "--json",
+                timeout=20,
+                env=env,
+            )
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             payload = json.loads(result.stdout)
-            self.assertEqual(payload["queued"], 2)
+            self.assertEqual(payload["completed"], 2)
             self.assertTrue(all(item.get("backend_mode") == "native-comfyui" for item in payload["results"]))
+
+            records = json.loads(history.read_text(encoding="utf-8"))
+            self.assertEqual(len(records), 2)
+            for record in records:
+                self.assertEqual(record["status"], "completed")
+                self.assertEqual(record["backend_mode"], "native-comfyui")
+                self.assertEqual(record["checkpoint"], "evavo-test-model.safetensors")
+                self.assertEqual(Path(record["output_dir"]), outputs.resolve())
+                self.assertEqual(len(record["output_uris"]), 1)
+                output = Path(record["output_uris"][0])
+                self.assertTrue(output.is_file())
+                self.assertGreater(output.stat().st_size, 0)
+
+    def test_task_tracker_loads_legacy_and_preserves_rich_metadata(self) -> None:
+        from evavo_operations import TaskTracker
+
+        with tempfile.TemporaryDirectory() as directory:
+            history = Path(directory) / "history.json"
+            history.write_text(json.dumps([{"task_id": "legacy-1", "prompt": "old", "project_name": "legacy", "status": "queued"}]), encoding="utf-8")
+            tracker = TaskTracker(history)
+            self.assertEqual(tracker.get_task("legacy-1")["prompt"], "old")
+
+            tracker.add_task(
+                "rich-1",
+                "new",
+                "queued",
+                project_name="rich",
+                backend_mode="native-comfyui",
+                checkpoint="model.safetensors",
+                workflow_path="workflow.json",
+            )
+            tracker.update_task(
+                "rich-1",
+                "completed",
+                output_dir=str(Path(directory) / "outputs"),
+                output_uris=[str(Path(directory) / "outputs" / "a.png"), str(Path(directory) / "outputs" / "b.png")],
+            )
+            rich = tracker.get_task("rich-1")
+            assert rich is not None
+            self.assertEqual(rich["backend_mode"], "native-comfyui")
+            self.assertEqual(rich["checkpoint"], "model.safetensors")
+            self.assertEqual(rich["workflow_path"], "workflow.json")
+            self.assertEqual(len(rich["output_uris"]), 2)
+            self.assertEqual(rich["output_uri"], rich["output_uris"][0])
 
     def test_offline_monitor_returns_nonzero(self) -> None:
         result = run_python("monitor-evavo.py", "--endpoint", "http://127.0.0.1:18189", "--json", timeout=10)
