@@ -23,7 +23,7 @@ By default it:
 9. runs `agent-doctor.py --repair` as a strict real-generation readiness gate;
 10. verifies final backend status.
 
-Use `-SkipAgentInstall` only when intentionally troubleshooting without changing local agent configuration.
+Use `-SkipAgentConfiguration` only when intentionally troubleshooting without changing local agent configuration.
 
 ## Automation contract
 
