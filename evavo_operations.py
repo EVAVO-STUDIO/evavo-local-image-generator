@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Shared operational primitives for the EVAVO local image generator.
+
+This module intentionally uses only the Python standard library so the
+operational utilities can run immediately after a normal Python install.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional
+
+ROOT = Path(__file__).resolve().parent
+DEFAULT_ENDPOINT = os.environ.get("COMFYUI_ENDPOINT", "http://127.0.0.1:8188").rstrip("/")
+SERVICE_NAME = "evavo-local-image-generator"
+PROTOCOL_VERSION = 1
+HISTORY_FILE = Path(os.environ.get("EVAVO_TASK_HISTORY", str(ROOT / "task_history.json"))).expanduser().resolve()
+VALID_STATUSES = {"queued", "running", "completed", "failed", "cancelled", "unknown"}
+
+
+def now_iso() -> str:
+    """Return a timezone-aware local ISO-8601 timestamp."""
+    return datetime.now().astimezone().isoformat()
+
+
+def normalize_status(status: str) -> str:
+    value = str(status or "unknown").strip().lower()
+    return value if value in VALID_STATUSES else "unknown"
+
+
+def request_json(
+    url: str,
+    *,
+    method: str = "GET",
+    payload: Optional[Dict[str, Any]] = None,
+    timeout: float = 5.0,
+) -> Dict[str, Any]:
+    """Perform an HTTP request and require a JSON object response.
+
+    Raises RuntimeError with a stable, human-readable category so all CLI
+    utilities report network and protocol failures consistently.
+    """
+    body = None
+    headers = {"Accept": "application/json", "User-Agent": "EVAVO-Operations/1"}
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = getattr(response, "status", 200)
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"HTTP_ERROR:{exc.code}:{detail or exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        raise RuntimeError(f"CONNECTION_ERROR:{reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError("TIMEOUT:request timed out") from exc
+    except OSError as exc:
+        raise RuntimeError(f"CONNECTION_ERROR:{exc}") from exc
+
+    if not 200 <= int(status) < 300:
+        raise RuntimeError(f"HTTP_ERROR:{status}:unexpected response status")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("INVALID_JSON:service did not return valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("INVALID_RESPONSE:expected a JSON object")
+    return parsed
+
+
+def validate_health(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate the EVAVO health identity/protocol contract."""
+    if payload.get("service") != SERVICE_NAME:
+        raise RuntimeError("WRONG_SERVICE:port 8188 is not the EVAVO service")
+    if payload.get("protocol_version") != PROTOCOL_VERSION:
+        raise RuntimeError("PROTOCOL_MISMATCH:unsupported EVAVO service protocol")
+    if payload.get("status") not in {"ready", "ok"}:
+        raise RuntimeError(f"NOT_READY:{payload.get('status', 'unknown')}")
+    return payload
+
+
+@contextmanager
+def _interprocess_lock(lock_path: Path, timeout: float = 10.0) -> Iterator[None]:
+    """Acquire a tiny cross-platform advisory lock using only stdlib APIs."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+b")
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() == 0:
+        handle.write(b"0")
+        handle.flush()
+    deadline = time.monotonic() + timeout
+
+    while True:
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except (OSError, BlockingIOError):
+            if time.monotonic() >= deadline:
+                handle.close()
+                raise TimeoutError(f"Timed out acquiring task-history lock: {lock_path}")
+            time.sleep(0.05)
+
+    try:
+        yield
+    finally:
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+class TaskTracker:
+    """Atomic, lock-protected JSON task history used by all operation tools."""
+
+    def __init__(self, history_file: Path | str = HISTORY_FILE):
+        self.history_file = Path(history_file).expanduser().resolve()
+        self.lock_file = self.history_file.with_suffix(self.history_file.suffix + ".lock")
+        self.tasks: List[Dict[str, Any]] = []
+        self.load_history()
+
+    def _read_unlocked(self) -> List[Dict[str, Any]]:
+        if not self.history_file.exists():
+            return []
+        try:
+            with self.history_file.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"CORRUPT_HISTORY:{self.history_file}:{exc}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"HISTORY_READ_ERROR:{self.history_file}:{exc}") from exc
+        if not isinstance(data, list):
+            raise RuntimeError(f"CORRUPT_HISTORY:{self.history_file}:root must be a JSON array")
+        return [item for item in data if isinstance(item, dict)]
+
+    def _write_unlocked(self, tasks: List[Dict[str, Any]]) -> None:
+        self.history_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=self.history_file.name + ".",
+            suffix=".tmp",
+            dir=str(self.history_file.parent),
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(tasks, handle, indent=2, ensure_ascii=False)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, self.history_file)
+        except Exception:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
+
+    def load_history(self) -> List[Dict[str, Any]]:
+        with _interprocess_lock(self.lock_file):
+            self.tasks = self._read_unlocked()
+        return list(self.tasks)
+
+    def add_task(
+        self,
+        task_id: str,
+        prompt: str,
+        status: str = "queued",
+        *,
+        project_name: str = "batch_gen",
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise ValueError("task_id must be a non-empty string")
+        timestamp = now_iso()
+        record = {
+            "task_id": task_id.strip(),
+            "prompt": str(prompt),
+            "project_name": str(project_name),
+            "status": normalize_status(status),
+            "timestamp": timestamp,
+            "updated": timestamp,
+        }
+        if error_code:
+            record["error_code"] = str(error_code)
+        if error_message:
+            record["error_message"] = str(error_message)
+
+        with _interprocess_lock(self.lock_file):
+            tasks = self._read_unlocked()
+            existing = next((item for item in tasks if item.get("task_id") == record["task_id"]), None)
+            if existing is None:
+                tasks.append(record)
+            else:
+                existing.update(record)
+                record = existing
+            self._write_unlocked(tasks)
+            self.tasks = tasks
+        return dict(record)
+
+    def update_task(self, task_id: str, status: str, **fields: Any) -> Dict[str, Any]:
+        with _interprocess_lock(self.lock_file):
+            tasks = self._read_unlocked()
+            target = next((item for item in tasks if item.get("task_id") == task_id), None)
+            if target is None:
+                raise KeyError(task_id)
+            target["status"] = normalize_status(status)
+            target["updated"] = now_iso()
+            for key in ("error_code", "error_message", "output_uri"):
+                if key in fields and fields[key] is not None:
+                    target[key] = fields[key]
+            self._write_unlocked(tasks)
+            self.tasks = tasks
+            return dict(target)
+
+    def list_tasks(self, limit: int = 20, project: Optional[str] = None) -> List[Dict[str, Any]]:
+        self.load_history()
+        tasks = self.tasks
+        if project:
+            tasks = [task for task in tasks if task.get("project_name") == project]
+        if limit < 1:
+            return []
+        return [dict(item) for item in tasks[-limit:]]
+
+    def get_statistics(self) -> Dict[str, int]:
+        self.load_history()
+        stats = {status: 0 for status in sorted(VALID_STATUSES)}
+        for task in self.tasks:
+            stats[normalize_status(task.get("status", "unknown"))] += 1
+        return {"total_tasks": len(self.tasks), **stats}
+
+    def clear_history(self) -> None:
+        with _interprocess_lock(self.lock_file):
+            self._write_unlocked([])
+            self.tasks = []
