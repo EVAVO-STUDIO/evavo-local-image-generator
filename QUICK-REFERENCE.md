@@ -18,7 +18,7 @@ That single script now:
 5. bootstraps/selects the EVAVO generation backend;
 6. installs/updates Claude Desktop stdio MCP configuration;
 7. installs and starts per-user HTTP MCP autostart on `127.0.0.1:8765`;
-8. runs `agent-doctor.py --repair`;
+8. runs strict `agent-doctor.py --repair` real-generation readiness checks;
 9. performs a final backend status check.
 
 Skip automatic Claude/HTTP configuration only when troubleshooting:
@@ -41,7 +41,7 @@ Machine-readable diagnosis with safe backend repair:
 python agent-doctor.py --repair --json
 ```
 
-Checks include Python, MCP SDK, local ComfyUI discovery, native backend health, checkpoint availability, output-directory writability, Claude configuration, HTTP MCP listener, HTTP autostart and negotiated MCP protocol tests.
+With `--repair`, native ComfyUI and at least one checkpoint are blocking requirements. The deterministic mock cannot satisfy the readiness gate.
 
 ## Claude Desktop
 
@@ -85,7 +85,7 @@ Remove the login autostart:
 .\INSTALL-AGENT-MCP-AUTOSTART.ps1 -Uninstall
 ```
 
-The listener remains loopback-only. Do not publicly expose it merely to make a cloud client reach workstation localhost.
+The listener remains loopback-only and uses exact host/origin allowlists for its configured port. Do not publicly expose it merely to make a cloud client reach workstation localhost.
 
 ## MCP tools
 
@@ -95,12 +95,38 @@ discover_backends
 health_check
 list_checkpoints
 generate_image
+generate_batch
 generation_status
 collect_generation
+task_history
+task_statistics
 stop_managed_backend
 ```
 
-`generate_image` defaults to automatically ensuring native ComfyUI is running, waiting for completion and returning downloaded local file paths.
+`generate_image` and `generate_batch` default to automatically ensuring native ComfyUI is running, waiting for completion, downloading real outputs and persisting task state.
+
+## Shared history
+
+CLI and MCP generation share the same atomic lock-protected task history:
+
+```text
+task_history.json
+```
+
+Override it:
+
+```powershell
+$env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\image-generation-history.json"
+```
+
+This means agent-generated work appears in:
+
+```powershell
+python evavo.py tasks
+python evavo.py stats
+```
+
+and CLI-generated work appears through MCP `task_history` / `task_statistics`.
 
 ## Real image generation
 
@@ -113,19 +139,25 @@ python evavo.py generate --prompts "PS1 horror corridor" --project ps1
 Render, wait and download the actual image:
 
 ```powershell
-python generate-batch.py --prompts "PS1 horror corridor" --project ps1 --wait
+python evavo.py generate --prompts "PS1 horror corridor" --project ps1 --wait
+```
+
+Multiple prompts:
+
+```powershell
+python evavo.py generate --prompts "corridor one" "corridor two" --project ps1 --wait
 ```
 
 Custom output directory:
 
 ```powershell
-python generate-batch.py --prompts "PS1 horror corridor" --project ps1 --wait --output-dir "C:\EVAVO\Generated"
+python evavo.py generate --prompts "PS1 horror corridor" --project ps1 --wait --output-dir "C:\EVAVO\Generated"
 ```
 
 Custom API workflow:
 
 ```powershell
-python generate-batch.py --prompts "PS1 horror corridor" --workflow "C:\EVAVO\workflows\workflow-api.json" --wait
+python evavo.py generate --prompts "PS1 horror corridor" --workflow "C:\EVAVO\workflows\workflow-api.json" --wait
 ```
 
 ## Controller
@@ -133,17 +165,18 @@ python generate-batch.py --prompts "PS1 horror corridor" --workflow "C:\EVAVO\wo
 | Operation | Command |
 |---|---|
 | Diagnose operations | `python evavo.py doctor` |
-| Diagnose agents | `python agent-doctor.py --repair` |
+| Diagnose/repair agents | `python agent-doctor.py --repair` |
 | Sync `main` | `python evavo.py sync` |
 | Full bootstrap | `python evavo.py bootstrap` |
-| Start/select backend | `python evavo.py start` |
+| Start/select backend | `python evavo.py start --no-mock` |
 | Backend status | `python evavo.py status` |
 | Queue batch | `python evavo.py generate --prompts "one" "two" --project demo` |
+| Render batch | `python evavo.py generate --prompts "one" "two" --project demo --wait` |
 | Tasks | `python evavo.py tasks --limit 20` |
 | Statistics | `python evavo.py stats` |
 | Operational tests | `python evavo.py test` |
 | Agent/MCP tests | `python test-agent-integration.py` |
-| Stop EVAVO-owned fallback | `python evavo.py stop` |
+| Stop EVAVO-owned processes | `python evavo.py stop` |
 
 ## Direct generation/wrapper operations
 
@@ -165,10 +198,18 @@ Default ComfyUI endpoint:
 http://127.0.0.1:8188
 ```
 
-Agent generation requires a **real native ComfyUI**. EVAVO can discover and start source or Windows-portable installations automatically. Set a non-standard install explicitly with:
+Agent generation requires a **real native ComfyUI**. EVAVO can discover and start source or Windows-portable installations automatically.
+
+Non-standard install:
 
 ```powershell
 $env:EVAVO_COMFYUI_HOME = "D:\AI\ComfyUI"
+```
+
+Explicit source-checkout interpreter:
+
+```powershell
+$env:EVAVO_COMFYUI_PYTHON = "D:\AI\ComfyUI\.venv\Scripts\python.exe"
 ```
 
 Native routes used by EVAVO:
@@ -181,7 +222,7 @@ GET  /history/{prompt_id}
 GET  /view?filename=...&subfolder=...&type=...
 ```
 
-The deterministic EVAVO mock is used for operational validation/fallback only and is explicitly rejected by the agent lifecycle manager as a native renderer.
+The deterministic EVAVO mock is operational-test/fallback infrastructure only and is explicitly rejected by the agent lifecycle manager as a native renderer.
 
 ## Model/workflow configuration
 
@@ -219,7 +260,7 @@ Template placeholders:
 .evavo/native-comfyui-service.json   native ComfyUI PID/state when EVAVO started it
 .evavo/native-comfyui.log            native ComfyUI startup log
 .evavo/outputs/                      default downloaded images
-task_history.json                    generation history
+task_history.json                    shared CLI + MCP generation history
 task_history.json.lock               inter-process lock
 ```
 
