@@ -46,16 +46,31 @@ def _candidate_roots() -> List[Path]:
         candidates.append(Path(configured).expanduser())
 
     home = Path.home()
+    repo_parent = ROOT.parent
+    local_appdata = Path(os.getenv("LOCALAPPDATA", str(home / "AppData" / "Local")))
     candidates.extend([
+        # EVAVO sibling repositories are preferred because this is the user's
+        # common local development layout.
+        repo_parent / "ComfyUI",
+        repo_parent / "comfyui",
+        repo_parent / "ComfyUI_windows_portable",
         Path("C:/ComfyUI"),
         Path("C:/Gitrepos/ComfyUI"),
         Path("C:/GitRepos/ComfyUI"),
+        Path("C:/Gitrepos/ComfyUI_windows_portable"),
+        Path("C:/GitRepos/ComfyUI_windows_portable"),
         Path("C:/AI/ComfyUI"),
+        Path("C:/AI/ComfyUI_windows_portable"),
         Path("C:/ComfyUI_windows_portable"),
         home / "ComfyUI",
         home / "Documents" / "ComfyUI",
+        home / "Documents" / "ComfyUI_windows_portable",
+        home / "Downloads" / "ComfyUI",
         home / "Downloads" / "ComfyUI_windows_portable",
         home / "Desktop" / "ComfyUI",
+        home / "Desktop" / "ComfyUI_windows_portable",
+        local_appdata / "ComfyUI",
+        local_appdata / "Programs" / "ComfyUI",
     ])
 
     extra = os.getenv("EVAVO_COMFYUI_SEARCH_PATHS", "")
@@ -77,17 +92,29 @@ def _candidate_roots() -> List[Path]:
     return unique
 
 
+def _configured_python() -> Optional[Path]:
+    raw = os.getenv("EVAVO_COMFYUI_PYTHON")
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser().resolve()
+    if not candidate.is_file():
+        raise RuntimeError(f"COMFYUI_PYTHON_NOT_FOUND:{candidate}")
+    return candidate
+
+
 def inspect_install(root: Path) -> Optional[ComfyUIInstall]:
     root = root.expanduser().resolve()
     main_py = root / "main.py"
     if main_py.is_file():
+        configured_python = _configured_python()
         python_candidates = [
             root / ".venv" / "Scripts" / "python.exe",
             root / "venv" / "Scripts" / "python.exe",
+            root / "python_embeded" / "python.exe",
             root / ".venv" / "bin" / "python",
             root / "venv" / "bin" / "python",
         ]
-        python = next((candidate for candidate in python_candidates if candidate.is_file()), Path(sys.executable))
+        python = configured_python or next((candidate for candidate in python_candidates if candidate.is_file()), Path(sys.executable))
         return ComfyUIInstall(root=root, python=python, main_py=main_py, portable=False)
 
     portable_main = root / "ComfyUI" / "main.py"
@@ -99,10 +126,14 @@ def inspect_install(root: Path) -> Optional[ComfyUIInstall]:
 
 def discover_comfyui() -> List[ComfyUIInstall]:
     installs: List[ComfyUIInstall] = []
+    seen = set()
     for candidate in _candidate_roots():
         install = inspect_install(candidate)
         if install is not None:
-            installs.append(install)
+            key = os.path.normcase(str(install.root))
+            if key not in seen:
+                seen.add(key)
+                installs.append(install)
     return installs
 
 
