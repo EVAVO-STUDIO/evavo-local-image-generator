@@ -1,112 +1,124 @@
 #!/usr/bin/env python3
-"""
-Task history tracking for EVAVO Local Image Generator.
-Maintains persistent log of all generation tasks.
-"""
+"""CLI for the shared EVAVO task history."""
 
+from __future__ import annotations
+
+import argparse
 import json
-import os
-from datetime import datetime
-from pathlib import Path
-from typing import List, Dict, Any
+import sys
+from typing import Any, Dict
 
-HISTORY_FILE = "task_history.json"
+from evavo_operations import HISTORY_FILE, TaskTracker
 
-class TaskTracker:
-    """Track and manage generation task history."""
-    
-    def __init__(self, history_file: str = HISTORY_FILE):
-        self.history_file = history_file
-        self.load_history()
-    
-    def load_history(self):
-        """Load task history from file."""
-        if os.path.exists(self.history_file):
-            try:
-                with open(self.history_file, 'r') as f:
-                    self.tasks = json.load(f)
-            except Exception:
-                self.tasks = []
-        else:
-            self.tasks = []
-    
-    def save_history(self):
-        """Save task history to file."""
-        with open(self.history_file, 'w') as f:
-            json.dump(self.tasks, f, indent=2)
-    
-    def add_task(self, task_id: str, prompt: str, status: str = "queued"):
-        """Add a new task to history."""
-        task = {
-            "task_id": task_id,
-            "prompt": prompt,
-            "status": status,
-            "timestamp": datetime.now().isoformat()
-        }
-        self.tasks.append(task)
-        self.save_history()
-    
-    def update_task(self, task_id: str, status: str):
-        """Update task status."""
-        for task in self.tasks:
-            if task["task_id"] == task_id:
-                task["status"] = status
-                task["updated"] = datetime.now().isoformat()
-                break
-        self.save_history()
-    
-    def list_tasks(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """List recent tasks."""
-        return self.tasks[-limit:]
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get task statistics."""
-        total = len(self.tasks)
-        queued = sum(1 for t in self.tasks if t.get("status") == "queued")
-        completed = sum(1 for t in self.tasks if t.get("status") == "completed")
-        failed = sum(1 for t in self.tasks if t.get("status") == "failed")
-        
-        return {
-            "total_tasks": total,
-            "queued": queued,
-            "completed": completed,
-            "failed": failed
-        }
-    
-    def clear_history(self):
-        """Clear task history."""
-        self.tasks = []
-        self.save_history()
 
-def main():
-    """Main entry point."""
-    import argparse
-    
+def task_line(task: Dict[str, Any]) -> str:
+    task_id = str(task.get("task_id", "N/A"))
+    status = str(task.get("status", "unknown"))
+    project = str(task.get("project_name", ""))
+    prompt = str(task.get("prompt", "")).replace("\n", " ")
+    return f"  {task_id[:18]:<18} {status:<10} {project[:18]:<18} {prompt[:50]}"
+
+
+def main() -> int:
     parser = argparse.ArgumentParser(description="Track EVAVO generation tasks")
-    parser.add_argument("action", choices=["list", "stats", "clear"], help="Action to perform")
-    parser.add_argument("--limit", type=int, default=20, help="Number of tasks to list")
-    
+    subparsers = parser.add_subparsers(dest="action", required=True)
+
+    list_parser = subparsers.add_parser("list", help="List recent tasks")
+    list_parser.add_argument("--limit", type=int, default=20, help="Number of tasks to list")
+    list_parser.add_argument("--project", help="Filter by project name")
+    list_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    stats_parser = subparsers.add_parser("stats", help="Display statistics")
+    stats_parser.add_argument("--json", action="store_true", help="Emit JSON")
+
+    clear_parser = subparsers.add_parser("clear", help="Clear history")
+    clear_parser.add_argument("--yes", action="store_true", help="Required confirmation for non-interactive clearing")
+
+    add_parser = subparsers.add_parser("add", help="Add or upsert a task")
+    add_parser.add_argument("task_id")
+    add_parser.add_argument("prompt")
+    add_parser.add_argument("--project", default="manual")
+    add_parser.add_argument("--status", default="queued")
+
+    update_parser = subparsers.add_parser("update", help="Update an existing task")
+    update_parser.add_argument("task_id")
+    update_parser.add_argument("status")
+    update_parser.add_argument("--error-code")
+    update_parser.add_argument("--error-message")
+    update_parser.add_argument("--output-uri")
+
     args = parser.parse_args()
-    
-    tracker = TaskTracker()
-    
-    if args.action == "list":
-        tasks = tracker.list_tasks(args.limit)
-        print(f"\nLast {len(tasks)} tasks:\n")
-        for task in tasks:
-            print(f"  {task['task_id'][:8]}... {task['status']:<10} {task['prompt'][:40]}")
-        print()
-    
-    elif args.action == "stats":
-        stats = tracker.get_statistics()
-        print("\nTask Statistics:")
-        for key, value in stats.items():
-            print(f"  {key}: {value}")
-        print()
-    
-    elif args.action == "clear":
-        tracker.clear_history()
-        print("Task history cleared.")
+
+    try:
+        tracker = TaskTracker()
+        if args.action == "list":
+            if args.limit < 1:
+                parser.error("--limit must be at least 1")
+            tasks = tracker.list_tasks(args.limit, project=args.project)
+            if args.json:
+                print(json.dumps({"history_file": str(HISTORY_FILE), "tasks": tasks}, ensure_ascii=False, indent=2))
+            else:
+                print(f"\nTask history: {HISTORY_FILE}")
+                print(f"Last {len(tasks)} task(s):\n")
+                if tasks:
+                    print(f"  {'Task ID':<18} {'Status':<10} {'Project':<18} Prompt")
+                    print("  " + "-" * 100)
+                    for task in tasks:
+                        print(task_line(task))
+                else:
+                    print("  No tasks recorded.")
+                print()
+            return 0
+
+        if args.action == "stats":
+            stats = tracker.get_statistics()
+            if args.json:
+                print(json.dumps({"history_file": str(HISTORY_FILE), **stats}, indent=2))
+            else:
+                print(f"\nTask Statistics ({HISTORY_FILE}):")
+                for key, value in stats.items():
+                    print(f"  {key}: {value}")
+                print()
+            return 0
+
+        if args.action == "clear":
+            if not args.yes:
+                print("Refusing to clear task history without --yes.", file=sys.stderr)
+                return 2
+            tracker.clear_history()
+            print(f"Task history cleared: {HISTORY_FILE}")
+            return 0
+
+        if args.action == "add":
+            task = tracker.add_task(
+                args.task_id,
+                args.prompt,
+                args.status,
+                project_name=args.project,
+            )
+            print(json.dumps(task, ensure_ascii=False, indent=2))
+            return 0
+
+        if args.action == "update":
+            task = tracker.update_task(
+                args.task_id,
+                args.status,
+                error_code=args.error_code,
+                error_message=args.error_message,
+                output_uri=args.output_uri,
+            )
+            print(json.dumps(task, ensure_ascii=False, indent=2))
+            return 0
+
+    except KeyError as exc:
+        print(f"Task not found: {exc.args[0]}", file=sys.stderr)
+        return 4
+    except (RuntimeError, OSError, TimeoutError, ValueError) as exc:
+        print(f"Task tracker error: {exc}", file=sys.stderr)
+        return 1
+
+    return 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
