@@ -1,1 +1,0 @@
-0000000000000000000000000000000000000000 af7b225f863dde1e91d7e3fffdf7e70d16ebace5 Claude Haiku 4.5 <noreply@anthropic.com> 1788849906 +0000	commit (initial): feat(evavo-local-image-generator): Establish proper module structure and digest-bound task manifest

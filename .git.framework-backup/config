@@ -1,8 +1,0 @@
-[core]
-	repositoryformatversion = 0
-	filemode = true
-	bare = false
-	logallrefupdates = true
-[user]
-	name = Claude Haiku 4.5
-	email = noreply@anthropic.com
