@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal local ComfyUI-compatible HTTP service for EVAVO operations.
-
-This is intentionally a mock queue service: it validates request shape,
-issues task IDs, exposes deterministic health/status endpoints and never binds
-outside loopback unless the operator explicitly edits the script.
-"""
+"""Local deterministic EVAVO/native-ComfyUI simulator for operational tests."""
 
 from __future__ import annotations
 
@@ -15,6 +10,7 @@ import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict
+from urllib.parse import urlparse
 
 from evavo_operations import PROTOCOL_VERSION, SERVICE_NAME, now_iso
 
@@ -24,7 +20,11 @@ STARTED_AT = now_iso()
 
 
 class EvavoMockHandler(BaseHTTPRequestHandler):
-    server_version = "EVAVOMockComfyUI/1.0"
+    server_version = "EVAVOMockComfyUI/2.0"
+
+    @property
+    def native_only(self) -> bool:
+        return bool(getattr(self.server, "native_only", False))
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[{datetime.now().astimezone().isoformat()}] {self.client_address[0]} {fmt % args}")
@@ -39,18 +39,16 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self, max_bytes: int = 1024 * 1024) -> Dict[str, Any]:
-        raw_length = self.headers.get("Content-Length", "0")
         try:
-            length = int(raw_length)
+            length = int(self.headers.get("Content-Length", "0"))
         except ValueError as exc:
             raise ValueError("invalid Content-Length") from exc
         if length <= 0:
             raise ValueError("request body is required")
         if length > max_bytes:
             raise OverflowError("request body exceeds 1 MiB")
-        raw = self.rfile.read(length)
         try:
-            payload = json.loads(raw.decode("utf-8"))
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("request body must be valid UTF-8 JSON") from exc
         if not isinstance(payload, dict):
@@ -58,47 +56,42 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
         return payload
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/system":
-            self._send_json(
-                200,
-                {
-                    "service": SERVICE_NAME,
-                    "protocol_version": PROTOCOL_VERSION,
-                    "status": "ready",
-                    "mode": "mock",
-                    "started_at": STARTED_AT,
-                    "timestamp": now_iso(),
-                },
-            )
+        path = urlparse(self.path).path
+        if path == "/system" and not self.native_only:
+            self._send_json(200, {"service": SERVICE_NAME, "protocol_version": PROTOCOL_VERSION, "status": "ready", "mode": "mock", "started_at": STARTED_AT, "timestamp": now_iso()})
             return
-
-        if self.path == "/api/status":
+        if path == "/api/status" and not self.native_only:
             with TASKS_LOCK:
-                counts: Dict[str, int] = {}
-                for task in TASKS.values():
-                    state = str(task.get("status", "unknown"))
-                    counts[state] = counts.get(state, 0) + 1
                 total = len(TASKS)
-            self._send_json(
-                200,
-                {
-                    "service": SERVICE_NAME,
-                    "protocol_version": PROTOCOL_VERSION,
-                    "status": "ready",
-                    "mode": "mock",
-                    "queue": {"total": total, "by_status": counts},
-                    "timestamp": now_iso(),
-                },
-            )
+            self._send_json(200, {"service": SERVICE_NAME, "protocol_version": PROTOCOL_VERSION, "status": "ready", "mode": "mock", "queue": {"total": total}, "timestamp": now_iso()})
             return
-
-        self._send_json(404, {"status": "failed", "error_code": "NOT_FOUND", "path": self.path})
+        if path == "/system_stats":
+            self._send_json(200, {"system": {"comfyui_version": "test-native-1.0", "python_version": "test"}, "devices": [{"name": "EVAVO Test GPU", "vram_total": 8589934592, "vram_free": 6442450944}]})
+            return
+        if path in {"/object_info", "/object_info/CheckpointLoaderSimple"}:
+            nodes = {
+                "CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [["evavo-test-model.safetensors"], {}]}}},
+                "CLIPTextEncode": {"input": {"required": {}}},
+                "EmptyLatentImage": {"input": {"required": {}}},
+                "KSampler": {"input": {"required": {}}},
+                "VAEDecode": {"input": {"required": {}}},
+                "SaveImage": {"input": {"required": {}}},
+            }
+            self._send_json(200, nodes if path == "/object_info" else {"CheckpointLoaderSimple": nodes["CheckpointLoaderSimple"]})
+            return
+        if path.startswith("/history/"):
+            prompt_id = path.rsplit("/", 1)[-1]
+            with TASKS_LOCK:
+                task = TASKS.get(prompt_id)
+            if task is None:
+                self._send_json(200, {})
+            else:
+                self._send_json(200, {prompt_id: {"status": {"completed": True}, "outputs": {"7": {"images": [{"filename": f"{prompt_id}.png", "subfolder": "EVAVO/test", "type": "output"}]}}}})
+            return
+        self._send_json(404, {"status": "failed", "error_code": "NOT_FOUND", "path": path})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/api/prompt":
-            self._send_json(404, {"status": "failed", "error_code": "NOT_FOUND", "path": self.path})
-            return
-
+        path = urlparse(self.path).path
         try:
             payload = self._read_json()
         except OverflowError as exc:
@@ -108,59 +101,49 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"status": "failed", "error_code": "INVALID_REQUEST", "message": str(exc)})
             return
 
-        prompt = payload.get("prompt")
-        project_name = payload.get("project_name", "default")
-        if not isinstance(prompt, str) or not prompt.strip():
-            self._send_json(400, {"status": "failed", "error_code": "INVALID_PROMPT", "message": "prompt must be a non-empty string"})
-            return
-        if len(prompt) > 100_000:
-            self._send_json(400, {"status": "failed", "error_code": "PROMPT_TOO_LONG", "message": "prompt exceeds 100000 characters"})
-            return
-        if not isinstance(project_name, str) or not project_name.strip():
-            self._send_json(400, {"status": "failed", "error_code": "INVALID_PROJECT", "message": "project_name must be a non-empty string"})
+        if path == "/api/prompt" and not self.native_only:
+            prompt = payload.get("prompt")
+            project_name = payload.get("project_name", "default")
+            if not isinstance(prompt, str) or not prompt.strip():
+                self._send_json(400, {"status": "failed", "error_code": "INVALID_PROMPT", "message": "prompt must be a non-empty string"})
+                return
+            task_id = f"evavo_{uuid.uuid4().hex}"
+            with TASKS_LOCK:
+                TASKS[task_id] = {"task_id": task_id, "status": "queued", "prompt": prompt, "project_name": project_name, "created_at": now_iso()}
+            self._send_json(202, {"service": SERVICE_NAME, "protocol_version": PROTOCOL_VERSION, "status": "queued", "task_id": task_id, "project_name": project_name, "timestamp": now_iso()})
             return
 
-        task_id = f"evavo_{uuid.uuid4().hex}"
-        task = {
-            "task_id": task_id,
-            "status": "queued",
-            "prompt": prompt,
-            "project_name": project_name,
-            "created_at": now_iso(),
-        }
-        with TASKS_LOCK:
-            TASKS[task_id] = task
+        if path == "/prompt":
+            workflow = payload.get("prompt")
+            if not isinstance(workflow, dict) or "1" not in workflow or "7" not in workflow:
+                self._send_json(400, {"error": "invalid_prompt", "node_errors": {"workflow": "missing expected standard nodes"}})
+                return
+            prompt_id = str(uuid.uuid4())
+            with TASKS_LOCK:
+                TASKS[prompt_id] = {"task_id": prompt_id, "status": "completed", "workflow": workflow, "created_at": now_iso()}
+            self._send_json(200, {"prompt_id": prompt_id, "number": 1, "node_errors": {}})
+            return
 
-        self._send_json(
-            202,
-            {
-                "service": SERVICE_NAME,
-                "protocol_version": PROTOCOL_VERSION,
-                "status": "queued",
-                "task_id": task_id,
-                "project_name": project_name,
-                "timestamp": now_iso(),
-            },
-        )
+        self._send_json(404, {"status": "failed", "error_code": "NOT_FOUND", "path": path})
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="EVAVO local mock ComfyUI service")
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: loopback only)")
-    parser.add_argument("--port", type=int, default=8188, help="Bind port")
+    parser = argparse.ArgumentParser(description="EVAVO local ComfyUI simulator")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8188)
+    parser.add_argument("--native-only", action="store_true", help="Expose only native ComfyUI routes")
     args = parser.parse_args()
-
     if args.host not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("mock service is restricted to loopback; use 127.0.0.1")
     if not 1 <= args.port <= 65535:
         parser.error("port must be between 1 and 65535")
-
     server = ThreadingHTTPServer((args.host, args.port), EvavoMockHandler)
-    print(f"EVAVO mock ComfyUI service ready at http://{args.host}:{args.port}")
+    server.native_only = args.native_only  # type: ignore[attr-defined]
+    print(f"EVAVO ComfyUI simulator ready at http://{args.host}:{args.port} native_only={args.native_only}")
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
-        print("\nStopping EVAVO mock ComfyUI service...")
+        pass
     finally:
         server.server_close()
     return 0
