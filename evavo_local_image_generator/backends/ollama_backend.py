@@ -1,18 +1,24 @@
-"""
-Backend integration for ollama_backend.
+"""Minimal Ollama backend integration."""
 
-This module provides abstraction for interacting with the ollama_backend service.
-"""
+from __future__ import annotations
 
-class ollama_backendBackend:
-    """Backend adapter for ollama_backend service."""
-    
-    def __init__(self, endpoint: str = None):
-        self.endpoint = endpoint
-    
+import json
+import urllib.error
+import urllib.request
+from typing import Optional
+
+
+class OllamaBackend:
+    def __init__(self, endpoint: Optional[str] = None):
+        self.endpoint = (endpoint or "http://127.0.0.1:11434").rstrip("/")
+
     def health_check(self) -> bool:
-        """Check if the backend service is running."""
-        raise NotImplementedError
-    
-    def __repr__(self):
-        return f"ollama_backendBackend(endpoint={self.endpoint!r})"
+        try:
+            with urllib.request.urlopen(f"{self.endpoint}/api/tags", timeout=3.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            return isinstance(payload, dict)
+        except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+            return False
+
+    def __repr__(self) -> str:
+        return f"OllamaBackend(endpoint={self.endpoint!r})"
