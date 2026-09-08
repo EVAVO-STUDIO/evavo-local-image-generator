@@ -46,16 +46,31 @@ Multiple additional search roots can be supplied with `EVAVO_COMFYUI_SEARCH_PATH
 
 ## Claude: stdio MCP
 
-Claude/desktop/IDE clients can spawn the server directly:
+The preferred Windows setup is fully automated:
 
-```text
-command: python
-args: -m evavo_local_image_generator.mcp_server
+```powershell
+.\INSTALL-CLAUDE-MCP.ps1
 ```
 
-The repository `.mcp.json` contains this profile.
+The installer:
 
-No MCP listening port is required for stdio operation.
+- runs the MCP integration tests first;
+- resolves the actual Python executable;
+- uses the absolute repository path via `PYTHONPATH`;
+- backs up an existing `claude_desktop_config.json`;
+- preserves other MCP servers;
+- adds/updates only `evavo-local-image-generator`;
+- configures stdio MCP and the local ComfyUI endpoint.
+
+Restart Claude Desktop after installation so it reloads its MCP configuration.
+
+The underlying server command is:
+
+```text
+python -m evavo_local_image_generator.mcp_server --transport stdio
+```
+
+The repository `.mcp.json` also contains a portable stdio profile for hosts that resolve the repository working directory themselves.
 
 ## ChatGPT/local MCP clients: Streamable HTTP
 
@@ -146,19 +161,19 @@ Full workstation update and validation:
 .\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-This runs both:
+This installs dependencies and runs:
 
 ```powershell
 python test-agent-integration.py
 python evavo.py bootstrap --skip-pull
 ```
 
-Agent transport tests verify:
+Agent tests verify actual MCP negotiation and tool discovery through:
 
-- MCP package import/server registration;
-- ComfyUI installation discovery;
-- stdio MCP process startup;
-- loopback Streamable HTTP MCP startup.
+- an in-process MCP v2 client;
+- a real stdio client/server subprocess handshake;
+- a real Streamable HTTP client/server handshake;
+- ComfyUI installation discovery.
 
 Operational tests separately verify mock/native health, native workflow submission, output history and file downloads, batch tracking, offline behavior and controller lifecycle.
 
