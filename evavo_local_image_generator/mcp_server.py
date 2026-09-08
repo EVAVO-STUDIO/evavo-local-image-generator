@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     from mcp.server import MCPServer
+    from mcp.server.transport_security import TransportSecuritySettings
 except ImportError as exc:  # pragma: no cover
     raise RuntimeError('MCP SDK is required. Install with: python -m pip install "mcp[cli]>=2,<3"') from exc
 
@@ -138,6 +139,21 @@ async def stop_managed_backend() -> Dict[str, Any]:
     return await asyncio.to_thread(stop_managed_comfyui)
 
 
+def _transport_security(host: str, port: int) -> TransportSecuritySettings:
+    """Use exact localhost host/origin allowlists instead of wildcard ports."""
+    if host == "::1":
+        allowed_hosts = [f"[::1]:{port}"]
+        allowed_origins = [f"http://[::1]:{port}"]
+    else:
+        allowed_hosts = [f"127.0.0.1:{port}", f"localhost:{port}"]
+        allowed_origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=allowed_origins,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="EVAVO MCP image-generation server")
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default=os.getenv("EVAVO_MCP_TRANSPORT", "stdio"))
@@ -162,6 +178,7 @@ def main() -> None:
         port=args.port,
         streamable_http_path=args.path,
         json_response=args.json_response,
+        transport_security=_transport_security(args.host, args.port),
     )
 
 
