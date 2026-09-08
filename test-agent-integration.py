@@ -13,8 +13,21 @@ import time
 import unittest
 from pathlib import Path
 
+import anyio
+from mcp import Client, StdioServerParameters
+
 ROOT = Path(__file__).resolve().parent
 HTTP_PORT = 18192
+EXPECTED_TOOLS = {
+    "ensure_backend",
+    "health_check",
+    "discover_backends",
+    "list_checkpoints",
+    "generate_image",
+    "generation_status",
+    "collect_generation",
+    "stop_managed_backend",
+}
 
 
 def wait_port(port: int, timeout: float = 10.0) -> None:
@@ -28,11 +41,23 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
     raise RuntimeError(f"port {port} did not become ready")
 
 
+def tool_names(result: object) -> set[str]:
+    tools = getattr(result, "tools", [])
+    return {str(getattr(tool, "name", "")) for tool in tools}
+
+
 class AgentIntegrationTests(unittest.TestCase):
-    def test_mcp_module_imports_and_registers_server(self) -> None:
+    def test_mcp_module_imports_and_inprocess_client_lists_tools(self) -> None:
         module = importlib.import_module("evavo_local_image_generator.mcp_server")
         self.assertTrue(hasattr(module, "mcp"))
         self.assertTrue(callable(module.main))
+
+        async def exercise() -> None:
+            async with Client(module.mcp) as client:
+                names = tool_names(await client.list_tools())
+                self.assertTrue(EXPECTED_TOOLS.issubset(names), names)
+
+        anyio.run(exercise)
 
     def test_comfyui_source_install_discovery_from_environment(self) -> None:
         from evavo_local_image_generator import comfyui_runtime
@@ -53,26 +78,21 @@ class AgentIntegrationTests(unittest.TestCase):
             self.assertEqual(installs[0].root, root.resolve())
             self.assertFalse(installs[0].portable)
 
-    def test_mcp_stdio_process_stays_alive(self) -> None:
-        process = subprocess.Popen(
-            [sys.executable, "-m", "evavo_local_image_generator.mcp_server", "--transport", "stdio"],
-            cwd=str(ROOT),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+    def test_mcp_stdio_client_negotiates_and_lists_tools(self) -> None:
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "evavo_local_image_generator.mcp_server", "--transport", "stdio"],
+            env={"PYTHONPATH": str(ROOT), "PYTHONUNBUFFERED": "1"},
         )
-        try:
-            time.sleep(0.75)
-            self.assertIsNone(process.poll(), "stdio MCP server exited unexpectedly")
-        finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
 
-    def test_mcp_streamable_http_starts_on_loopback(self) -> None:
+        async def exercise() -> None:
+            async with Client(params) as client:
+                names = tool_names(await client.list_tools())
+                self.assertTrue(EXPECTED_TOOLS.issubset(names), names)
+
+        anyio.run(exercise)
+
+    def test_mcp_streamable_http_client_negotiates_and_lists_tools(self) -> None:
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -95,6 +115,13 @@ class AgentIntegrationTests(unittest.TestCase):
         try:
             wait_port(HTTP_PORT)
             self.assertIsNone(process.poll(), "HTTP MCP server exited unexpectedly")
+
+            async def exercise() -> None:
+                async with Client(f"http://127.0.0.1:{HTTP_PORT}/mcp") as client:
+                    names = tool_names(await client.list_tools())
+                    self.assertTrue(EXPECTED_TOOLS.issubset(names), names)
+
+            anyio.run(exercise)
         finally:
             process.terminate()
             try:
