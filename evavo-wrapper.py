@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Stable CLI wrapper around the EVAVO local ComfyUI-compatible HTTP service.
-
-Backwards-compatible commands:
-  python evavo-wrapper.py generate_image '{"prompt":"...","project_name":"..."}'
-  python evavo-wrapper.py health_check '{}'
-
-The wrapper always writes exactly one JSON object to stdout so it can be safely
-consumed by automation and agents.
-"""
+"""Stable machine-readable wrapper for EVAVO mock or native ComfyUI."""
 
 from __future__ import annotations
 
@@ -17,16 +9,11 @@ import sys
 from typing import Any, Dict
 
 from evavo_operations import DEFAULT_ENDPOINT, SERVICE_NAME, now_iso, request_json, validate_health
+from evavo_local_image_generator.backends import ComfyUIBackend
 
 
 def error_payload(code: str, message: str) -> Dict[str, Any]:
-    return {
-        "ok": False,
-        "status": "failed",
-        "error_code": code,
-        "message": message,
-        "timestamp": now_iso(),
-    }
+    return {"ok": False, "status": "failed", "error_code": code, "message": message, "timestamp": now_iso()}
 
 
 def parse_payload(raw: str) -> Dict[str, Any]:
@@ -39,15 +26,43 @@ def parse_payload(raw: str) -> Dict[str, Any]:
     return payload
 
 
+def detect_backend(endpoint: str) -> Dict[str, Any]:
+    """Prefer the EVAVO compatibility service, then native ComfyUI."""
+    endpoint = endpoint.rstrip("/")
+    try:
+        health = validate_health(request_json(f"{endpoint}/system", timeout=2.0))
+        return {
+            "kind": "evavo-service",
+            "mode": health.get("mode", "mock"),
+            "endpoint": endpoint,
+            "health": health,
+        }
+    except RuntimeError as evavo_error:
+        try:
+            native = ComfyUIBackend(endpoint).health()
+            return {
+                "kind": "native-comfyui",
+                "mode": "native-comfyui",
+                "endpoint": endpoint,
+                "health": native,
+            }
+        except RuntimeError as native_error:
+            raise RuntimeError(f"BACKEND_UNAVAILABLE:EVAVO={evavo_error}; ComfyUI={native_error}") from native_error
+
+
 def health_check(endpoint: str) -> Dict[str, Any]:
-    health = validate_health(request_json(f"{endpoint}/system", timeout=5.0))
+    backend = detect_backend(endpoint)
+    health = backend["health"]
     return {
         "ok": True,
         "status": "ready",
         "service": SERVICE_NAME,
-        "protocol_version": health["protocol_version"],
-        "mode": health.get("mode", "unknown"),
-        "endpoint": endpoint,
+        "backend": backend["kind"],
+        "mode": backend["mode"],
+        "endpoint": backend["endpoint"],
+        "protocol_version": health.get("protocol_version"),
+        "comfyui_version": health.get("comfyui_version"),
+        "devices": health.get("devices", []),
         "timestamp": now_iso(),
     }
 
@@ -57,13 +72,32 @@ def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     project_name = payload.get("project_name", "batch_gen")
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
+    if len(prompt) > 100_000:
+        raise ValueError("prompt exceeds 100000 characters")
     if not isinstance(project_name, str) or not project_name.strip():
         raise ValueError("project_name must be a non-empty string")
+
+    backend = detect_backend(endpoint)
+    if backend["kind"] == "native-comfyui":
+        client = ComfyUIBackend(endpoint)
+        response = client.queue_image(
+            prompt.strip(),
+            project_name=project_name.strip(),
+            negative_prompt=str(payload.get("negative_prompt", "")),
+            width=payload.get("width", 1024),
+            height=payload.get("height", 1024),
+            steps=payload.get("steps", 24),
+            cfg_scale=payload.get("cfg_scale", 7.0),
+            seed=payload.get("seed"),
+            checkpoint=payload.get("checkpoint"),
+        )
+        response.update({"ok": True, "endpoint": endpoint, "timestamp": now_iso()})
+        return response
 
     response = request_json(
         f"{endpoint}/api/prompt",
         method="POST",
-        payload={"prompt": prompt, "project_name": project_name},
+        payload={"prompt": prompt.strip(), "project_name": project_name.strip()},
         timeout=30.0,
     )
     task_id = response.get("task_id")
@@ -74,24 +108,50 @@ def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         "status": "queued",
         "task_id": task_id,
         "project_name": response.get("project_name", project_name),
+        "backend_mode": backend["mode"],
         "endpoint": endpoint,
+        "timestamp": now_iso(),
+    }
+
+
+def task_status(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    task_id = payload.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise ValueError("task_id must be a non-empty string")
+    backend = detect_backend(endpoint)
+    if backend["kind"] != "native-comfyui":
+        return {"ok": True, "status": "queued", "task_id": task_id, "backend_mode": backend["mode"], "timestamp": now_iso()}
+    client = ComfyUIBackend(endpoint)
+    history = client.history(task_id)
+    entry = history.get(task_id)
+    outputs = client.outputs(task_id) if isinstance(entry, dict) else []
+    completed = bool(outputs or (isinstance(entry, dict) and entry.get("status")))
+    return {
+        "ok": True,
+        "status": "completed" if completed else "queued",
+        "task_id": task_id,
+        "outputs": outputs,
+        "backend_mode": "native-comfyui",
         "timestamp": now_iso(),
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="EVAVO local image generator wrapper")
-    parser.add_argument("command", choices=["generate_image", "health_check"])
+    parser.add_argument("command", choices=["generate_image", "health_check", "task_status"])
     parser.add_argument("payload", nargs="?", default="{}", help="JSON object payload")
-    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="ComfyUI-compatible endpoint")
+    parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="EVAVO or native ComfyUI endpoint")
     args = parser.parse_args()
 
     try:
         payload = parse_payload(args.payload)
+        endpoint = args.endpoint.rstrip("/")
         if args.command == "health_check":
-            result = health_check(args.endpoint.rstrip("/"))
+            result = health_check(endpoint)
+        elif args.command == "task_status":
+            result = task_status(endpoint, payload)
         else:
-            result = generate_image(args.endpoint.rstrip("/"), payload)
+            result = generate_image(endpoint, payload)
     except ValueError as exc:
         print(json.dumps(error_payload("INVALID_ARGUMENT", str(exc)), ensure_ascii=False))
         return 2
