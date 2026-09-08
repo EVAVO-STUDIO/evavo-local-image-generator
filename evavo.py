@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from evavo_operations import DEFAULT_ENDPOINT, ROOT, now_iso, request_json, validate_health
+from evavo_local_image_generator.backends import ComfyUIBackend
 
 STATE_DIR = ROOT / ".evavo"
 STATE_FILE = STATE_DIR / "operations-service.json"
@@ -30,11 +31,21 @@ REQUIRED_FILES = [
     "monitor-evavo.py",
     "task-tracker.py",
     "test-operations.py",
+    "evavo_local_image_generator/backends/comfyui_backend.py",
 ]
 
 
 def service_health(endpoint: str) -> Dict[str, Any]:
-    return validate_health(request_json(f"{endpoint.rstrip('/')}/system", timeout=2.0))
+    """Return health for EVAVO compatibility service or native ComfyUI."""
+    endpoint = endpoint.rstrip("/")
+    try:
+        health = validate_health(request_json(f"{endpoint}/system", timeout=2.0))
+        return {"healthy": True, "service": health.get("service"), "mode": health.get("mode", "mock"), **health}
+    except RuntimeError as evavo_error:
+        try:
+            return ComfyUIBackend(endpoint).health()
+        except RuntimeError as native_error:
+            raise RuntimeError(f"BACKEND_UNAVAILABLE:EVAVO={evavo_error}; ComfyUI={native_error}") from native_error
 
 
 def parse_managed_endpoint(endpoint: str) -> Tuple[str, int, str]:
@@ -59,10 +70,7 @@ def parse_managed_endpoint(endpoint: str) -> Tuple[str, int, str]:
 
 def save_state(pid: int, endpoint: str) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(
-        json.dumps({"pid": pid, "endpoint": endpoint, "started_at": now_iso()}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    STATE_FILE.write_text(json.dumps({"pid": pid, "endpoint": endpoint, "started_at": now_iso()}, indent=2) + "\n", encoding="utf-8")
 
 
 def load_state() -> Dict[str, Any]:
@@ -86,12 +94,7 @@ def terminate_pid(pid: int) -> None:
     if pid <= 0:
         return
     if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=10)
     else:
         try:
             os.killpg(pid, signal.SIGTERM)
@@ -119,22 +122,14 @@ def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     log_handle = LOG_FILE.open("ab", buffering=0)
-    kwargs: Dict[str, Any] = {
-        "cwd": str(ROOT),
-        "stdin": subprocess.DEVNULL,
-        "stdout": log_handle,
-        "stderr": subprocess.STDOUT,
-    }
+    kwargs: Dict[str, Any] = {"cwd": str(ROOT), "stdin": subprocess.DEVNULL, "stdout": log_handle, "stderr": subprocess.STDOUT}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     else:
         kwargs["start_new_session"] = True
 
     try:
-        process = subprocess.Popen(
-            [sys.executable, str(SERVER), "--host", bind_host, "--port", str(port)],
-            **kwargs,
-        )
+        process = subprocess.Popen([sys.executable, str(SERVER), "--host", bind_host, "--port", str(port)], **kwargs)
     finally:
         log_handle.close()
     save_state(process.pid, endpoint)
@@ -147,19 +142,7 @@ def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
             break
         try:
             health = service_health(endpoint)
-            print(
-                json.dumps(
-                    {
-                        "ok": True,
-                        "status": "started",
-                        "pid": process.pid,
-                        "endpoint": endpoint,
-                        "log_file": str(LOG_FILE),
-                        "health": health,
-                    },
-                    indent=2,
-                )
-            )
+            print(json.dumps({"ok": True, "status": "started", "pid": process.pid, "endpoint": endpoint, "log_file": str(LOG_FILE), "health": health}, indent=2))
             return 0
         except RuntimeError as exc:
             last_error = str(exc)
@@ -179,15 +162,9 @@ def stop_service() -> int:
     if not isinstance(pid, int) or pid <= 0:
         print(json.dumps({"ok": True, "status": "not_managed", "message": "No managed EVAVO service PID is recorded."}, indent=2))
         return 0
-
     try:
         if os.name == "nt":
-            result = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            result = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=10)
             combined = f"{result.stdout}\n{result.stderr}".lower()
             if result.returncode != 0 and not any(text in combined for text in ("not found", "no running instance", "not running")):
                 print(f"ERROR: taskkill failed: {(result.stderr or result.stdout).strip()}", file=sys.stderr)
@@ -215,18 +192,11 @@ def status_service(endpoint: str) -> int:
 
 
 def run_passthrough(script: str, arguments: List[str]) -> int:
-    command = [sys.executable, str(ROOT / script), *arguments]
-    return subprocess.run(command, cwd=str(ROOT)).returncode
+    return subprocess.run([sys.executable, str(ROOT / script), *arguments], cwd=str(ROOT)).returncode
 
 
 def run_git(*arguments: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["git", *arguments],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    return subprocess.run(["git", *arguments], cwd=str(ROOT), capture_output=True, text=True, timeout=timeout)
 
 
 def git_value(*arguments: str) -> str | None:
@@ -239,24 +209,17 @@ def git_value(*arguments: str) -> str | None:
 
 def doctor(endpoint: str, json_output: bool = False) -> int:
     checks: List[Dict[str, Any]] = []
-
     def add(name: str, ok: bool, detail: str, severity: str = "error") -> None:
         checks.append({"name": name, "ok": ok, "severity": severity, "detail": detail})
 
     add("python", sys.version_info >= (3, 10), f"{sys.version.split()[0]} at {sys.executable}")
-
     missing = [name for name in REQUIRED_FILES if not (ROOT / name).is_file()]
     add("required_files", not missing, "all present" if not missing else f"missing: {', '.join(missing)}")
 
     asyncio_spec = importlib.util.find_spec("asyncio")
     asyncio_origin = str(asyncio_spec.origin) if asyncio_spec and asyncio_spec.origin else "unknown"
     asyncio_shadowed = "site-packages" in asyncio_origin.lower()
-    add(
-        "asyncio",
-        not asyncio_shadowed,
-        f"stdlib origin: {asyncio_origin}" if not asyncio_shadowed else f"WARNING: asyncio resolves from site-packages: {asyncio_origin}; uninstall the PyPI asyncio package",
-        severity="warning" if asyncio_shadowed else "info",
-    )
+    add("asyncio", not asyncio_shadowed, f"stdlib origin: {asyncio_origin}" if not asyncio_shadowed else f"WARNING: asyncio resolves from site-packages: {asyncio_origin}; uninstall the PyPI asyncio package", severity="warning" if asyncio_shadowed else "info")
 
     try:
         _, _, normalized_endpoint = parse_managed_endpoint(endpoint)
@@ -284,13 +247,7 @@ def doctor(endpoint: str, json_output: bool = False) -> int:
         add("service", False, str(exc), severity="warning")
 
     hard_failures = [check for check in checks if not check["ok"] and check["severity"] == "error"]
-    payload = {
-        "ok": not hard_failures,
-        "status": "ready_to_operate" if not hard_failures else "needs_attention",
-        "root": str(ROOT),
-        "timestamp": now_iso(),
-        "checks": checks,
-    }
+    payload = {"ok": not hard_failures, "status": "ready_to_operate" if not hard_failures else "needs_attention", "root": str(ROOT), "timestamp": now_iso(), "checks": checks}
     if json_output:
         print(json.dumps(payload, indent=2))
     else:
@@ -334,7 +291,6 @@ def bootstrap(endpoint: str, skip_pull: bool = False) -> int:
         code = sync_main()
         if code != 0:
             return code
-
     controller = str(ROOT / "evavo.py")
     steps = [
         [sys.executable, controller, "doctor", "--endpoint", endpoint],
@@ -355,24 +311,18 @@ def bootstrap(endpoint: str, skip_pull: bool = False) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="EVAVO local image generator operations controller")
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    start = subparsers.add_parser("start", help="Start and verify the managed local service")
+    start = subparsers.add_parser("start", help="Use an existing native ComfyUI or start the managed mock fallback")
     start.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     start.add_argument("--wait", type=float, default=20.0, help="Readiness timeout in seconds")
-
-    subparsers.add_parser("stop", help="Stop the managed local service")
-
-    status = subparsers.add_parser("status", help="Check the service")
+    subparsers.add_parser("stop", help="Stop only the managed mock service")
+    status = subparsers.add_parser("status", help="Check the generation backend")
     status.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
-
-    doctor_parser = subparsers.add_parser("doctor", help="Diagnose Python, files, Git state and local service")
+    doctor_parser = subparsers.add_parser("doctor", help="Diagnose Python, files, Git state and generation backend")
     doctor_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     doctor_parser.add_argument("--json", action="store_true")
-
     bootstrap_parser = subparsers.add_parser("bootstrap", help="Sync main, test, start and verify EVAVO")
     bootstrap_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     bootstrap_parser.add_argument("--skip-pull", action="store_true", help="Do not git pull before validation")
-
     generate = subparsers.add_parser("generate", help="Queue a batch of image prompts")
     generate.add_argument("--prompts", nargs="+")
     generate.add_argument("--examples", action="store_true")
@@ -380,20 +330,16 @@ def main() -> int:
     generate.add_argument("--concurrency", type=int, default=4)
     generate.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     generate.add_argument("--json", action="store_true")
-
     tasks = subparsers.add_parser("tasks", help="List task history")
     tasks.add_argument("--limit", type=int, default=20)
     tasks.add_argument("--project")
     tasks.add_argument("--json", action="store_true")
-
     stats = subparsers.add_parser("stats", help="Show task statistics")
     stats.add_argument("--json", action="store_true")
-
     subparsers.add_parser("test", help="Run operational integration tests")
     subparsers.add_parser("sync", help="Fast-forward the local checkout to origin/main")
 
     args = parser.parse_args()
-
     if args.command == "start":
         if args.wait <= 0:
             parser.error("--wait must be greater than zero")
@@ -427,8 +373,7 @@ def main() -> int:
             forwarded.append("--json")
         return run_passthrough("task-tracker.py", forwarded)
     if args.command == "stats":
-        forwarded = ["stats"] + (["--json"] if args.json else [])
-        return run_passthrough("task-tracker.py", forwarded)
+        return run_passthrough("task-tracker.py", ["stats"] + (["--json"] if args.json else []))
     if args.command == "test":
         return run_passthrough("test-operations.py", [])
     return 1
