@@ -24,14 +24,29 @@ if (-not $Path.StartsWith("/")) {
     throw "Path must start with '/'."
 }
 
+# Avoid duplicate login/manual listeners and never take over an unrelated port.
+$listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($listener) {
+    $owner = Get-CimInstance Win32_Process -Filter "ProcessId=$($listener.OwningProcess)" -ErrorAction SilentlyContinue
+    $commandLine = if ($owner) { [string]$owner.CommandLine } else { "" }
+    if ($commandLine -match "evavo_local_image_generator\.mcp_server") {
+        Write-Host "EVAVO MCP is already listening at http://127.0.0.1:$Port$Path (PID $($listener.OwningProcess))." -ForegroundColor Green
+        exit 0
+    }
+    throw "Port $Port is already owned by PID $($listener.OwningProcess), which is not the EVAVO MCP server. Choose another -Port or stop that process."
+}
+
 Write-Host "Validating EVAVO agent integration..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "test-agent-integration.py")
 if ($LASTEXITCODE -ne 0) {
     throw "Agent integration tests failed."
 }
 
-Write-Host "Ensuring native ComfyUI can be discovered/started when required..." -ForegroundColor Cyan
+Write-Host "Checking EVAVO/ComfyUI environment..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "evavo.py") doctor
+if ($LASTEXITCODE -ne 0) {
+    throw "EVAVO operations doctor found a blocking problem."
+}
 
 $argsList = @(
     "-m", "evavo_local_image_generator.mcp_server",
