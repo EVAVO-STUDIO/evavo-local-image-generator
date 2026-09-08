@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 try:
     from mcp.server import MCPServer
 except ImportError as exc:  # pragma: no cover
-    raise RuntimeError('MCP SDK is required. Install with: python -m pip install "mcp>=2,<3"') from exc
+    raise RuntimeError('MCP SDK is required. Install with: python -m pip install "mcp[cli]>=2,<3"') from exc
 
 from .backends import ComfyUIBackend
 from .comfyui_runtime import discover_comfyui, ensure_comfyui, stop_managed_comfyui
