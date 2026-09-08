@@ -38,6 +38,16 @@ env/
 *~
 .DS_Store
 
+# Never commit copied/backup Git metadata
+.git.backup/
+.git.broken/
+.git.final-backup/
+.git.framework-backup/
+.git.new/
+.git.old.backup/
+.git.test-backup/
+.git.*backup/
+
 # Generation outputs (local scratch)
 evavo-generations/
 evavo-images/
