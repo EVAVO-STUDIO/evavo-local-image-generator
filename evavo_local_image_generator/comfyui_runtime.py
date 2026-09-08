@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -16,6 +18,7 @@ from .backends import ComfyUIBackend
 ROOT = Path(__file__).resolve().parents[1]
 STATE_DIR = ROOT / ".evavo"
 STATE_FILE = STATE_DIR / "native-comfyui-service.json"
+MOCK_STATE_FILE = STATE_DIR / "operations-service.json"
 LOG_FILE = STATE_DIR / "native-comfyui.log"
 
 
@@ -33,12 +36,7 @@ class ComfyUIInstall:
         return command
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "root": str(self.root),
-            "python": str(self.python),
-            "main_py": str(self.main_py),
-            "portable": self.portable,
-        }
+        return {"root": str(self.root), "python": str(self.python), "main_py": str(self.main_py), "portable": self.portable}
 
 
 def _candidate_roots() -> List[Path]:
@@ -48,19 +46,17 @@ def _candidate_roots() -> List[Path]:
         candidates.append(Path(configured).expanduser())
 
     home = Path.home()
-    candidates.extend(
-        [
-            Path("C:/ComfyUI"),
-            Path("C:/Gitrepos/ComfyUI"),
-            Path("C:/GitRepos/ComfyUI"),
-            Path("C:/AI/ComfyUI"),
-            Path("C:/ComfyUI_windows_portable"),
-            home / "ComfyUI",
-            home / "Documents" / "ComfyUI",
-            home / "Downloads" / "ComfyUI_windows_portable",
-            home / "Desktop" / "ComfyUI",
-        ]
-    )
+    candidates.extend([
+        Path("C:/ComfyUI"),
+        Path("C:/Gitrepos/ComfyUI"),
+        Path("C:/GitRepos/ComfyUI"),
+        Path("C:/AI/ComfyUI"),
+        Path("C:/ComfyUI_windows_portable"),
+        home / "ComfyUI",
+        home / "Documents" / "ComfyUI",
+        home / "Downloads" / "ComfyUI_windows_portable",
+        home / "Desktop" / "ComfyUI",
+    ])
 
     extra = os.getenv("EVAVO_COMFYUI_SEARCH_PATHS", "")
     for raw in extra.split(os.pathsep):
@@ -83,20 +79,21 @@ def _candidate_roots() -> List[Path]:
 
 def inspect_install(root: Path) -> Optional[ComfyUIInstall]:
     root = root.expanduser().resolve()
-
-    # Source checkout: <root>/main.py
     main_py = root / "main.py"
     if main_py.is_file():
-        venv_python = root / ".venv" / "Scripts" / "python.exe"
-        python = venv_python if venv_python.is_file() else Path(sys.executable)
+        python_candidates = [
+            root / ".venv" / "Scripts" / "python.exe",
+            root / "venv" / "Scripts" / "python.exe",
+            root / ".venv" / "bin" / "python",
+            root / "venv" / "bin" / "python",
+        ]
+        python = next((candidate for candidate in python_candidates if candidate.is_file()), Path(sys.executable))
         return ComfyUIInstall(root=root, python=python, main_py=main_py, portable=False)
 
-    # Windows portable: <root>/ComfyUI/main.py + python_embeded/python.exe
     portable_main = root / "ComfyUI" / "main.py"
     portable_python = root / "python_embeded" / "python.exe"
     if portable_main.is_file() and portable_python.is_file():
         return ComfyUIInstall(root=root, python=portable_python, main_py=portable_main, portable=True)
-
     return None
 
 
@@ -109,22 +106,23 @@ def discover_comfyui() -> List[ComfyUIInstall]:
     return installs
 
 
-def load_state() -> Dict[str, Any]:
-    if not STATE_FILE.exists():
+def _load_json(path: Path) -> Dict[str, Any]:
+    if not path.exists():
         return {}
     try:
-        payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
 
 
+def load_state() -> Dict[str, Any]:
+    return _load_json(STATE_FILE)
+
+
 def _save_state(pid: int, endpoint: str, install: ComfyUIInstall) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(
-        json.dumps({"pid": pid, "endpoint": endpoint, "install": install.to_dict()}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    STATE_FILE.write_text(json.dumps({"pid": pid, "endpoint": endpoint, "install": install.to_dict()}, indent=2) + "\n", encoding="utf-8")
 
 
 def _clear_state() -> None:
@@ -134,20 +132,50 @@ def _clear_state() -> None:
         pass
 
 
+def _evavo_mock_running(endpoint: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"{endpoint.rstrip('/')}/system", timeout=0.75) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError, TimeoutError):
+        return False
+    return isinstance(payload, dict) and payload.get("service") == "evavo-local-image-generator" and payload.get("mode") == "mock"
+
+
+def _stop_managed_mock() -> bool:
+    state = _load_json(MOCK_STATE_FILE)
+    pid = state.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)
+        else:
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pass
+    finally:
+        try:
+            MOCK_STATE_FILE.unlink()
+        except OSError:
+            pass
+    return True
+
+
 def native_health(endpoint: str = "http://127.0.0.1:8188") -> Optional[Dict[str, Any]]:
+    # The deterministic EVAVO test/mock service intentionally exposes native-like
+    # routes for integration testing; never classify that compatibility service as
+    # a real renderer.
+    if _evavo_mock_running(endpoint):
+        return None
     try:
         return ComfyUIBackend(endpoint).health()
     except RuntimeError:
         return None
 
 
-def ensure_comfyui(
-    endpoint: str = "http://127.0.0.1:8188",
-    *,
-    wait_seconds: float = 90.0,
-    allow_start: bool = True,
-) -> Dict[str, Any]:
-    """Return a healthy native ComfyUI, starting a discovered local install if needed."""
+def ensure_comfyui(endpoint: str = "http://127.0.0.1:8188", *, wait_seconds: float = 90.0, allow_start: bool = True) -> Dict[str, Any]:
+    """Return healthy native ComfyUI, starting a discovered local install if needed."""
     endpoint = endpoint.rstrip("/")
     existing = native_health(endpoint)
     if existing:
@@ -157,13 +185,16 @@ def ensure_comfyui(
 
     installs = discover_comfyui()
     if not installs:
-        raise RuntimeError(
-            "COMFYUI_NOT_FOUND:set EVAVO_COMFYUI_HOME or install ComfyUI in a standard location"
-        )
-
-    # Current automation intentionally manages loopback only.
+        raise RuntimeError("COMFYUI_NOT_FOUND:set EVAVO_COMFYUI_HOME or install ComfyUI in a standard location")
     if endpoint != "http://127.0.0.1:8188":
         raise RuntimeError("COMFYUI_AUTOSTART_ENDPOINT:auto-start currently manages http://127.0.0.1:8188 only")
+
+    # If EVAVO itself started the mock fallback earlier, safely retire only that
+    # managed process before bringing up the real renderer on the same port.
+    if _evavo_mock_running(endpoint):
+        if not _stop_managed_mock():
+            raise RuntimeError("COMFYUI_PORT_OCCUPIED:EVAVO mock is running but is not managed by the current checkout")
+        time.sleep(0.75)
 
     install = installs[0]
     STATE_DIR.mkdir(parents=True, exist_ok=True)
