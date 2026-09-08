@@ -6,6 +6,9 @@
 # task-tracker.py) intentionally uses only the Python standard library.
 # The packages below support the wider generator/tooling repository.
 
+# Agent/MCP integration (current stable v2 line)
+mcp>=2,<3
+
 # Core dependencies
 requests>=2.28.0
 python-dotenv>=0.21.0
