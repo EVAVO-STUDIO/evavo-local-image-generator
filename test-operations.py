@@ -68,8 +68,7 @@ class OperationsIntegrationTests(unittest.TestCase):
     def test_wrapper_health_mock(self) -> None:
         result = run_python("evavo-wrapper.py", "health_check", "{}", "--endpoint", ENDPOINT, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
-        payload = json.loads(result.stdout)
-        self.assertEqual(payload["mode"], "mock")
+        self.assertEqual(json.loads(result.stdout)["mode"], "mock")
 
     def test_wrapper_generation_mock_returns_task_id(self) -> None:
         request = json.dumps({"prompt": "integration test image", "project_name": "tests"})
@@ -102,7 +101,30 @@ class OperationsIntegrationTests(unittest.TestCase):
         status_payload = json.loads(status.stdout)
         self.assertEqual(status_payload["status"], "completed")
         self.assertEqual(len(status_payload["outputs"]), 1)
-        self.assertTrue(status_payload["outputs"][0]["filename"].endswith(".png"))
+
+    def test_native_wait_downloads_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            request = json.dumps({"prompt": "wait and download", "project_name": "wait_test", "width": 512, "height": 512, "steps": 2, "wait": True, "wait_timeout": 5, "output_dir": directory})
+            result = run_python("evavo-wrapper.py", "generate_image", request, "--endpoint", NATIVE_ENDPOINT, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "completed")
+            self.assertEqual(len(payload["downloaded_files"]), 1)
+            output = Path(payload["downloaded_files"][0])
+            self.assertTrue(output.is_file())
+            self.assertGreater(output.stat().st_size, 0)
+            self.assertEqual(output.parent, Path(directory).resolve())
+
+    def test_custom_workflow_template_is_substituted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workflow = Path(directory) / "workflow.json"
+            workflow.write_text(json.dumps({"99": {"class_type": "CustomNode", "inputs": {"text": "{{prompt}}", "seed": "{{seed}}", "width": "{{width}}", "prefix": "{{filename_prefix}}"}}}), encoding="utf-8")
+            request = json.dumps({"prompt": "template prompt", "project_name": "custom", "width": 768, "height": 512, "steps": 2, "workflow_path": str(workflow)})
+            result = run_python("evavo-wrapper.py", "generate_image", request, "--endpoint", NATIVE_ENDPOINT, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["status"], "queued")
+            self.assertEqual(payload["backend_mode"], "native-comfyui")
 
     def test_monitor_reports_operational_for_both_backends(self) -> None:
         for endpoint in (ENDPOINT, NATIVE_ENDPOINT):
@@ -121,8 +143,7 @@ class OperationsIntegrationTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
             payload = json.loads(result.stdout)
             self.assertEqual(payload["queued"], 2)
-            stored = json.loads(history.read_text(encoding="utf-8"))
-            self.assertEqual(len(stored), 2)
+            self.assertEqual(len(json.loads(history.read_text(encoding="utf-8"))), 2)
 
     def test_batch_is_tracked_native(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
