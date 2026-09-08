@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import signal
@@ -19,6 +20,16 @@ STATE_DIR = ROOT / ".evavo"
 STATE_FILE = STATE_DIR / "operations-service.json"
 LOG_FILE = STATE_DIR / "mock-service.log"
 SERVER = ROOT / "mock-comfyui-server.py"
+REQUIRED_FILES = [
+    "evavo.py",
+    "evavo_operations.py",
+    "evavo-wrapper.py",
+    "mock-comfyui-server.py",
+    "generate-batch.py",
+    "monitor-evavo.py",
+    "task-tracker.py",
+    "test-operations.py",
+]
 
 
 def service_health(endpoint: str) -> Dict[str, Any]:
@@ -41,6 +52,32 @@ def load_state() -> Dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def clear_state() -> None:
+    try:
+        STATE_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def terminate_pid(pid: int) -> None:
+    if pid <= 0:
+        return
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    else:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
 
 
 def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
@@ -104,6 +141,9 @@ def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
             last_error = str(exc)
             time.sleep(0.25)
 
+    if process.poll() is None:
+        terminate_pid(process.pid)
+    clear_state()
     print(f"ERROR: EVAVO service failed to become ready: {last_error}", file=sys.stderr)
     print(f"Log: {LOG_FILE}", file=sys.stderr)
     return 3
@@ -124,8 +164,9 @@ def stop_service() -> int:
                 text=True,
                 timeout=10,
             )
-            if result.returncode not in {0, 128} and "not found" not in result.stderr.lower():
-                print(f"ERROR: taskkill failed: {result.stderr.strip()}", file=sys.stderr)
+            combined = f"{result.stdout}\n{result.stderr}".lower()
+            if result.returncode != 0 and not any(text in combined for text in ("not found", "no running instance", "not running")):
+                print(f"ERROR: taskkill failed: {(result.stderr or result.stdout).strip()}", file=sys.stderr)
                 return 1
         else:
             try:
@@ -133,10 +174,7 @@ def stop_service() -> int:
             except ProcessLookupError:
                 pass
     finally:
-        try:
-            STATE_FILE.unlink()
-        except OSError:
-            pass
+        clear_state()
     print(json.dumps({"ok": True, "status": "stopped", "pid": pid}, indent=2))
     return 0
 
@@ -156,6 +194,133 @@ def run_passthrough(script: str, arguments: List[str]) -> int:
     return subprocess.run(command, cwd=str(ROOT)).returncode
 
 
+def run_git(*arguments: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *arguments],
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def git_value(*arguments: str) -> str | None:
+    try:
+        result = run_git(*arguments, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def doctor(endpoint: str, json_output: bool = False) -> int:
+    checks: List[Dict[str, Any]] = []
+
+    def add(name: str, ok: bool, detail: str, severity: str = "error") -> None:
+        checks.append({"name": name, "ok": ok, "severity": severity, "detail": detail})
+
+    version_ok = sys.version_info >= (3, 10)
+    add("python", version_ok, f"{sys.version.split()[0]} at {sys.executable}")
+
+    missing = [name for name in REQUIRED_FILES if not (ROOT / name).is_file()]
+    add("required_files", not missing, "all present" if not missing else f"missing: {', '.join(missing)}")
+
+    asyncio_spec = importlib.util.find_spec("asyncio")
+    asyncio_origin = str(asyncio_spec.origin) if asyncio_spec and asyncio_spec.origin else "unknown"
+    asyncio_shadowed = "site-packages" in asyncio_origin.lower()
+    add(
+        "asyncio",
+        not asyncio_shadowed,
+        f"stdlib origin: {asyncio_origin}" if not asyncio_shadowed else f"WARNING: asyncio resolves from site-packages: {asyncio_origin}; uninstall the PyPI asyncio package",
+        severity="warning" if asyncio_shadowed else "info",
+    )
+
+    git_dir = (ROOT / ".git").exists()
+    add("git_repository", git_dir, str(ROOT))
+    if git_dir:
+        branch = git_value("branch", "--show-current")
+        head = git_value("rev-parse", "HEAD")
+        upstream = git_value("rev-parse", "@{u}")
+        dirty = git_value("status", "--porcelain")
+        add("git_branch", branch == "main", branch or "unknown")
+        if head and upstream:
+            add("git_sync", head == upstream, f"HEAD={head[:12]} upstream={upstream[:12]}", severity="warning")
+        add("git_worktree", dirty == "", "clean" if dirty == "" else "local changes present", severity="warning")
+
+    try:
+        health = service_health(endpoint.rstrip("/"))
+        add("service", True, f"ready ({health.get('mode', 'unknown')}) at {endpoint.rstrip('/')}", severity="info")
+    except RuntimeError as exc:
+        add("service", False, str(exc), severity="warning")
+
+    hard_failures = [check for check in checks if not check["ok"] and check["severity"] == "error"]
+    payload = {
+        "ok": not hard_failures,
+        "status": "ready_to_operate" if not hard_failures else "needs_attention",
+        "root": str(ROOT),
+        "timestamp": now_iso(),
+        "checks": checks,
+    }
+    if json_output:
+        print(json.dumps(payload, indent=2))
+    else:
+        print("EVAVO operations doctor")
+        print("=" * 72)
+        for check in checks:
+            marker = "OK" if check["ok"] else ("WARN" if check["severity"] == "warning" else "FAIL")
+            print(f"[{marker:<4}] {check['name']:<16} {check['detail']}")
+        print("=" * 72)
+        print(payload["status"])
+    return 0 if not hard_failures else 2
+
+
+def sync_main() -> int:
+    try:
+        branch = git_value("branch", "--show-current")
+        if branch != "main":
+            print(f"ERROR: bootstrap requires branch main; current branch is {branch or 'unknown'}.", file=sys.stderr)
+            return 2
+        dirty = git_value("status", "--porcelain")
+        if dirty:
+            print("ERROR: local changes are present; refusing to overwrite them during bootstrap.", file=sys.stderr)
+            print(dirty, file=sys.stderr)
+            return 2
+        result = run_git("pull", "--ff-only", "origin", "main", timeout=120)
+    except FileNotFoundError:
+        print("ERROR: git is not installed or not on PATH.", file=sys.stderr)
+        return 2
+    except subprocess.TimeoutExpired:
+        print("ERROR: git pull timed out.", file=sys.stderr)
+        return 3
+    if result.returncode != 0:
+        print(f"ERROR: git pull failed:\n{(result.stderr or result.stdout).strip()}", file=sys.stderr)
+        return result.returncode or 1
+    print((result.stdout or "Already up to date.").strip())
+    return 0
+
+
+def bootstrap(endpoint: str, skip_pull: bool = False) -> int:
+    if not skip_pull:
+        code = sync_main()
+        if code != 0:
+            return code
+
+    controller = str(ROOT / "evavo.py")
+    steps = [
+        [sys.executable, controller, "doctor", "--endpoint", endpoint],
+        [sys.executable, controller, "test"],
+        [sys.executable, controller, "start", "--endpoint", endpoint],
+        [sys.executable, controller, "status", "--endpoint", endpoint],
+    ]
+    for command in steps:
+        print(f"\n>>> {' '.join(command)}")
+        result = subprocess.run(command, cwd=str(ROOT))
+        if result.returncode != 0:
+            print(f"ERROR: bootstrap stopped because exit code was {result.returncode}.", file=sys.stderr)
+            return result.returncode
+    print("\nEVAVO bootstrap completed successfully.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="EVAVO local image generator operations controller")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -164,10 +329,18 @@ def main() -> int:
     start.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     start.add_argument("--wait", type=float, default=20.0, help="Readiness timeout in seconds")
 
-    stop = subparsers.add_parser("stop", help="Stop the managed local service")
+    subparsers.add_parser("stop", help="Stop the managed local service")
 
     status = subparsers.add_parser("status", help="Check the service")
     status.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+
+    doctor_parser = subparsers.add_parser("doctor", help="Diagnose Python, files, Git state and local service")
+    doctor_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    doctor_parser.add_argument("--json", action="store_true")
+
+    bootstrap_parser = subparsers.add_parser("bootstrap", help="Sync main, test, start and verify EVAVO")
+    bootstrap_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    bootstrap_parser.add_argument("--skip-pull", action="store_true", help="Do not git pull before validation")
 
     generate = subparsers.add_parser("generate", help="Queue a batch of image prompts")
     generate.add_argument("--prompts", nargs="+")
@@ -185,7 +358,8 @@ def main() -> int:
     stats = subparsers.add_parser("stats", help="Show task statistics")
     stats.add_argument("--json", action="store_true")
 
-    tests = subparsers.add_parser("test", help="Run operational integration tests")
+    subparsers.add_parser("test", help="Run operational integration tests")
+    subparsers.add_parser("sync", help="Fast-forward the local checkout to origin/main")
 
     args = parser.parse_args()
 
@@ -197,6 +371,12 @@ def main() -> int:
         return stop_service()
     if args.command == "status":
         return status_service(args.endpoint.rstrip("/"))
+    if args.command == "doctor":
+        return doctor(args.endpoint, args.json)
+    if args.command == "bootstrap":
+        return bootstrap(args.endpoint, args.skip_pull)
+    if args.command == "sync":
+        return sync_main()
     if args.command == "generate":
         forwarded: List[str] = ["--project", args.project, "--concurrency", str(args.concurrency), "--endpoint", args.endpoint]
         if args.prompts:
