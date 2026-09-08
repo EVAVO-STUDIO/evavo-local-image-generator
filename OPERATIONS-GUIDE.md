@@ -1,129 +1,291 @@
 # EVAVO Local Image Generator - Operations Guide
 
-## Quick Start (3 Steps)
+This guide describes the repository's actual local operational control plane. The supported runtime is **Python 3.10+**. The operational scripts use only the Python standard library; install `requirements.txt` for the wider generator/tooling repository.
 
-1. **Start Services**
-   ```batch
-   START-EVAVO-SERVICES.bat
-   ```
+## Recommended workflow
 
-2. **Generate Images**
-   ```bash
-   python generate-batch.py --examples
-   ```
+The preferred entry point for humans and agents is `evavo.py`:
 
-3. **Monitor Status**
-   ```bash
-   python monitor-evavo.py --continuous
-   ```
-
-## Command Reference
-
-### Batch Generation
-Queue multiple images at once:
-```bash
-python generate-batch.py --prompts "sunset landscape" "cyberpunk city" "underwater scene"
-python generate-batch.py --examples              # Use built-in examples
-python generate-batch.py --project my_project    # Specify project name
+```powershell
+python evavo.py start
+python evavo.py status
+python evavo.py generate --prompts "sunset landscape" "cyberpunk city" --project demo
+python evavo.py tasks --limit 20
+python evavo.py stats
+python evavo.py stop
 ```
 
-### System Monitoring
-Check health or monitor continuously:
-```bash
-python monitor-evavo.py                    # Single health check
-python monitor-evavo.py --continuous       # Continuous monitoring every 10s
-python monitor-evavo.py --continuous --interval 5  # Check every 5s
+`START-EVAVO-SERVICES.bat` remains available for Windows operators who prefer a batch launcher.
+
+## Architecture
+
+```text
+Agent / operator
+      |
+      v
+   evavo.py
+      |
+      +------------------------------+
+      |                              |
+      v                              v
+monitor-evavo.py              generate-batch.py
+      |                              |
+      |                       async wrapper processes
+      |                              |
+      +-----------> evavo-wrapper.py +
+                         |
+                         v
+                http://127.0.0.1:8188
+                   /system
+                   /api/status
+                   /api/prompt
+                         |
+                         v
+                mock-comfyui-server.py
+
+All generation results ----------> task_history.json
+                                  atomic + lock protected
 ```
 
-### Task Tracking
-View task history and statistics:
-```bash
-python task-tracker.py list                # Show last 20 tasks
-python task-tracker.py list --limit 50     # Show last 50 tasks
-python task-tracker.py stats               # Display statistics
-python task-tracker.py clear               # Clear history
+The mock server is a reproducible local queue/API surface. It is not a real image renderer. Replace the mock HTTP implementation with the real ComfyUI-compatible backend when connecting production generation, while preserving the same wrapper/health contract.
+
+## Quick start
+
+### 1. Verify Python
+
+```powershell
+python --version
 ```
 
-## Workflow Examples
+Python 3.10 or newer is required.
 
-### Example 1: Quick Batch Generation
-```bash
-# Start services
+Optional virtual environment:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+The operational control plane itself does not need third-party packages.
+
+### 2. Start services
+
+Preferred:
+
+```powershell
+python evavo.py start
+```
+
+Windows batch alternative:
+
+```batch
 START-EVAVO-SERVICES.bat
+```
 
-# Queue 5 images
+The managed Python controller writes service state and logs below `.evavo/`.
+
+### 3. Verify health
+
+```powershell
+python evavo.py status
+python monitor-evavo.py --json
+```
+
+A healthy service must:
+
+- respond with HTTP 2xx;
+- return valid JSON;
+- identify itself as `evavo-local-image-generator`;
+- report protocol version `1`;
+- report `ready`/`ok` health state;
+- pass the wrapper health check.
+
+A one-shot monitor exits nonzero when degraded/offline, making it safe for automation.
+
+### 4. Queue image tasks
+
+```powershell
+python evavo.py generate --prompts "landscape" "portrait" "abstract" --project production_batch
+```
+
+Examples:
+
+```powershell
+python evavo.py generate --examples
 python generate-batch.py --examples
-
-# Check results
-python task-tracker.py stats
+python generate-batch.py --prompts "prompt one" "prompt two" --concurrency 4 --json
 ```
 
-### Example 2: Continuous Monitoring During Generation
-```bash
-# Terminal 1: Start services
-START-EVAVO-SERVICES.bat
+`generate-batch.py` performs a service preflight by default, queues requests concurrently using async subprocesses, validates returned task IDs and writes every result to task history.
 
-# Terminal 2: Monitor system
-python monitor-evavo.py --continuous
+Concurrency is bounded with `--concurrency` (default `4`, allowed `1..64`).
 
-# Terminal 3: Queue generations
-python generate-batch.py --prompts "landscape" "portrait" "abstract"
+### 5. Inspect tasks
+
+```powershell
+python evavo.py tasks
+python evavo.py tasks --limit 100 --project production_batch
+python evavo.py stats
 ```
 
-### Example 3: Production Batch Processing
-```bash
-# Generate large batch with custom prompts
-python generate-batch.py --prompts \
-  "professional headshot" \
-  "product photography" \
-  "architectural render" \
-  --project production_batch
+Direct tracker commands:
 
-# Track task completion
-python task-tracker.py list --limit 100
-
-# Review statistics
-python task-tracker.py stats
+```powershell
+python task-tracker.py list --limit 50
+python task-tracker.py list --project production_batch --json
+python task-tracker.py stats --json
+python task-tracker.py update <TASK_ID> completed --output-uri "bee://primary/EVAVO/ImageGeneration/outputs/example.png"
 ```
+
+Task history defaults to:
+
+```text
+<repository>\task_history.json
+```
+
+Override with:
+
+```powershell
+$env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\task_history.json"
+```
+
+Writes use an inter-process lock and atomic replacement to avoid lost updates/truncated JSON during concurrent operation.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `COMFYUI_ENDPOINT` | `http://127.0.0.1:8188` | Service base URL |
+| `EVAVO_TASK_HISTORY` | `<repo>/task_history.json` | Persistent task history location |
+| `EVAVO_LOCAL_IMAGE_GENERATOR_STORAGE` | `bee://primary/EVAVO/ImageGeneration` | Logical storage root used by package tooling |
+
+## `bee://` storage
+
+`bee://` values are logical resource URIs, not Windows filesystem paths. They should be resolved by the storage layer rather than concatenated directly with `C:\...` paths. Keep path/URI translation centralized and reject traversal outside configured storage roots.
+
+## Monitoring
+
+Single health check:
+
+```powershell
+python monitor-evavo.py
+```
+
+Machine-readable:
+
+```powershell
+python monitor-evavo.py --json
+```
+
+Continuous human display:
+
+```powershell
+python monitor-evavo.py --continuous --interval 10
+```
+
+Continuous JSON lines for agents/log collectors:
+
+```powershell
+python monitor-evavo.py --continuous --interval 10 --json
+```
+
+## Exit codes
+
+Operational scripts use conventional nonzero exit codes rather than silently reporting success:
+
+| Code | Meaning |
+|---:|---|
+| `0` | Requested operation succeeded |
+| `1` | General or partial operation failure |
+| `2` | Invalid CLI/configuration/prerequisite |
+| `3` | Service/wrapper unavailable or degraded |
+| `4` | Task not found (tracker update) |
+| `5` | Windows startup port conflict with a non-EVAVO process |
+
+Do not rely on historical `127`/`255` values from the old quick reference.
+
+## Windows startup behavior
+
+`START-EVAVO-SERVICES.bat`:
+
+1. resolves the repository directory with `%~dp0`;
+2. prefers `.venv\Scripts\python.exe` when present;
+3. verifies required runtime files;
+4. checks port `8188`;
+5. only terminates the existing listener when its command line identifies the EVAVO mock server;
+6. refuses to kill unrelated processes using the port;
+7. starts the service in a minimized window;
+8. runs up to 20 readiness checks using `monitor-evavo.py`;
+9. exits nonzero if readiness fails.
+
+The Python controller is preferred for agent automation because it also records a managed PID and log location.
 
 ## Troubleshooting
 
-### ComfyUI Not Responding
-```bash
-# Check status
-python monitor-evavo.py
+### Service offline
 
-# Restart services
-taskkill /F /IM python.exe
-START-EVAVO-SERVICES.bat
+```powershell
+python evavo.py status
+python evavo.py start
 ```
 
-### Tasks Not Queuing
-- Verify ComfyUI is running: `curl http://127.0.0.1:8188/system`
-- Check task-tracker for errors: `python task-tracker.py list`
-- Review EVAVO wrapper output for detailed errors
+### Port 8188 conflict
 
-### Port 8188 Already in Use
-```batch
-# Kill existing process
-netstat -ano | findstr :8188
-taskkill /PID <PID> /F
-
-# Then restart
-START-EVAVO-SERVICES.bat
+```powershell
+Get-NetTCPConnection -LocalPort 8188 -State Listen
+Get-CimInstance Win32_Process -Filter "ProcessId=<PID>" | Select-Object ProcessId,CommandLine
 ```
 
-## Performance Tips
+Do not use `taskkill /IM python.exe` as a generic fix; it can terminate unrelated Python workloads.
 
-1. **Batch Size**: Queue 5-10 images per batch for optimal throughput
-2. **Monitoring**: Use `--interval 30` for production to reduce overhead
-3. **Storage**: Check bee:// storage paths regularly to manage space
-4. **Concurrent**: Run monitor and tracker in separate terminals
+### Wrapper failure
 
-## Best Practices
+```powershell
+python evavo-wrapper.py health_check "{}"
+```
 
-- Start services before generating
-- Monitor continuously during critical batches
-- Track history for audit and statistics
-- Clear old task history periodically
-- Use project names to organize batches
+Wrapper stdout is exactly one JSON object. Nonzero exit status means the wrapper could not validate the service.
+
+### Task history corruption or permissions
+
+The tracker refuses to silently replace malformed history. If it reports `CORRUPT_HISTORY`, preserve the existing file, repair/restore it, or intentionally move it aside before continuing.
+
+Choose an `EVAVO_TASK_HISTORY` location writable by the current Windows account when the repository itself is read-only.
+
+### Batch partial failure
+
+The table/JSON output includes per-task `error_code` and `message`. The command exits `1` if any requested item failed to queue, while successful items are still tracked.
+
+## Validation
+
+Run the standard-library integration suite:
+
+```powershell
+python evavo.py test
+```
+
+or:
+
+```powershell
+python test-operations.py
+```
+
+It validates:
+
+- mock service startup and health;
+- wrapper health contract;
+- task ID generation;
+- monitor health output;
+- concurrent batch queueing and persistence;
+- nonzero offline monitoring behavior.
+
+## Security baseline
+
+- Service binds to loopback only (`127.0.0.1`) by default.
+- The mock server refuses non-loopback bind values.
+- Request bodies are capped at 1 MiB.
+- Prompts must be non-empty and are capped at 100,000 characters.
+- Startup scripts do not indiscriminately terminate Python processes.
+
+Loopback is not authentication. If the service is ever exposed beyond the local machine, add authentication/authorization and firewall rules before doing so.
