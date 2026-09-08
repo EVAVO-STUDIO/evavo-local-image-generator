@@ -4,6 +4,7 @@
 param(
     [switch]$SkipDependencies,
     [switch]$SkipAgentConfiguration,
+    [switch]$SkipComfyUIProvision,
     [int]$McpPort = 8765
 )
 
@@ -67,6 +68,12 @@ if (-not $SkipDependencies) {
     }
 }
 
+Write-Host "Running provisioning safety tests..." -ForegroundColor Cyan
+& $python (Join-Path $PSScriptRoot "test-provisioning.py")
+if ($LASTEXITCODE -ne 0) {
+    Fail "Provisioning tests failed." 3
+}
+
 Write-Host "Running Claude/ChatGPT MCP transport validation..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "test-agent-integration.py")
 if ($LASTEXITCODE -ne 0) {
@@ -95,9 +102,13 @@ if (-not $SkipAgentConfiguration) {
 }
 
 Write-Host "Running final agent doctor with safe repair enabled..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "agent-doctor.py") --repair --mcp-port $McpPort
+$doctorArgs = @((Join-Path $PSScriptRoot "agent-doctor.py"), "--repair", "--mcp-port", "$McpPort")
+if (-not $SkipComfyUIProvision) {
+    $doctorArgs += "--provision"
+}
+& $python @doctorArgs
 if ($LASTEXITCODE -ne 0) {
-    Fail "Agent doctor found a blocking configuration problem." 3
+    Fail "Agent doctor found a blocking configuration problem. If the only blocker is a missing model, configure EVAVO_CHECKPOINT_FILE or EVAVO_CHECKPOINT_URL and rerun." 3
 }
 
 Write-Host "Running final backend status..." -ForegroundColor Cyan
@@ -109,15 +120,19 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "EVAVO workstation setup completed." -ForegroundColor Green
 Write-Host "  Dependencies: installed/validated" -ForegroundColor Green
+Write-Host "  Provisioning safety tests: passed" -ForegroundColor Green
 Write-Host "  Operational tests: passed" -ForegroundColor Green
-Write-Host "  MCP negotiation tests: passed" -ForegroundColor Green
+Write-Host "  MCP negotiation/generation tests: passed" -ForegroundColor Green
 if (-not $SkipAgentConfiguration) {
     Write-Host "  Claude stdio MCP: installed/updated" -ForegroundColor Green
     Write-Host "  HTTP MCP autostart: installed and started" -ForegroundColor Green
 }
-Write-Host "  Agent doctor: passed blocking checks" -ForegroundColor Green
+if (-not $SkipComfyUIProvision) {
+    Write-Host "  ComfyUI provisioning: enabled when missing" -ForegroundColor Green
+}
+Write-Host "  Agent doctor: real renderer + checkpoint readiness passed" -ForegroundColor Green
 Write-Host ""
 Write-Host "Claude: restart Claude Desktop so it reloads its MCP configuration." -ForegroundColor Yellow
 Write-Host "Local HTTP MCP endpoint: http://127.0.0.1:$McpPort/mcp" -ForegroundColor Green
-Write-Host "Native ComfyUI is reused or auto-started when EVAVO can discover a real installation." -ForegroundColor Green
+Write-Host "Native ComfyUI is reused, auto-started, or provisioned when missing." -ForegroundColor Green
 exit 0
