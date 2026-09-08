@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Tuple
 
 from evavo_operations import DEFAULT_ENDPOINT, ROOT, now_iso, request_json, validate_health
 from evavo_local_image_generator.backends import ComfyUIBackend
+from evavo_local_image_generator.comfyui_runtime import (
+    discover_comfyui,
+    ensure_comfyui,
+    load_state as load_native_state,
+    stop_managed_comfyui,
+)
 
 STATE_DIR = ROOT / ".evavo"
 STATE_FILE = STATE_DIR / "operations-service.json"
@@ -32,6 +38,8 @@ REQUIRED_FILES = [
     "task-tracker.py",
     "test-operations.py",
     "evavo_local_image_generator/backends/comfyui_backend.py",
+    "evavo_local_image_generator/comfyui_runtime.py",
+    "evavo_local_image_generator/mcp_server.py",
 ]
 
 
@@ -49,7 +57,6 @@ def service_health(endpoint: str) -> Dict[str, Any]:
 
 
 def parse_managed_endpoint(endpoint: str) -> Tuple[str, int, str]:
-    """Validate a local-only HTTP endpoint and return host, port, normalized URL."""
     parsed = urllib.parse.urlparse(endpoint.rstrip("/"))
     if parsed.scheme != "http" or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("managed endpoint must be a plain loopback HTTP URL")
@@ -57,7 +64,7 @@ def parse_managed_endpoint(endpoint: str) -> Tuple[str, int, str]:
         raise ValueError("managed endpoint must not contain a path")
     host = parsed.hostname
     if host not in {"127.0.0.1", "localhost"}:
-        raise ValueError("managed mock service is restricted to 127.0.0.1/localhost")
+        raise ValueError("managed service is restricted to 127.0.0.1/localhost")
     try:
         port = parsed.port
     except ValueError as exc:
@@ -86,7 +93,7 @@ def load_state() -> Dict[str, Any]:
 def clear_state() -> None:
     try:
         STATE_FILE.unlink()
-    except (FileNotFoundError, OSError):
+    except OSError:
         pass
 
 
@@ -102,20 +109,8 @@ def terminate_pid(pid: int) -> None:
             pass
 
 
-def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
-    try:
-        bind_host, port, endpoint = parse_managed_endpoint(endpoint)
-    except ValueError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
-
-    try:
-        health = service_health(endpoint)
-        print(json.dumps({"ok": True, "status": "already_running", "endpoint": endpoint, "health": health}, indent=2))
-        return 0
-    except RuntimeError:
-        pass
-
+def _start_mock(endpoint: str, wait_seconds: float) -> int:
+    bind_host, port, endpoint = parse_managed_endpoint(endpoint)
     if not SERVER.exists():
         print(f"ERROR: missing server: {SERVER}", file=sys.stderr)
         return 2
@@ -127,7 +122,6 @@ def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     else:
         kwargs["start_new_session"] = True
-
     try:
         process = subprocess.Popen([sys.executable, str(SERVER), "--host", bind_host, "--port", str(port)], **kwargs)
     finally:
@@ -135,14 +129,14 @@ def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
     save_state(process.pid, endpoint)
 
     deadline = time.monotonic() + wait_seconds
-    last_error = "service not ready"
+    last_error = "mock service not ready"
     while time.monotonic() < deadline:
         if process.poll() is not None:
             last_error = f"server exited with code {process.returncode}"
             break
         try:
             health = service_health(endpoint)
-            print(json.dumps({"ok": True, "status": "started", "pid": process.pid, "endpoint": endpoint, "log_file": str(LOG_FILE), "health": health}, indent=2))
+            print(json.dumps({"ok": True, "status": "started_mock", "pid": process.pid, "endpoint": endpoint, "log_file": str(LOG_FILE), "health": health}, indent=2))
             return 0
         except RuntimeError as exc:
             last_error = str(exc)
@@ -151,32 +145,56 @@ def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
     if process.poll() is None:
         terminate_pid(process.pid)
     clear_state()
-    print(f"ERROR: EVAVO service failed to become ready: {last_error}", file=sys.stderr)
-    print(f"Log: {LOG_FILE}", file=sys.stderr)
+    print(f"ERROR: EVAVO mock failed to become ready: {last_error}", file=sys.stderr)
     return 3
 
 
+def start_service(endpoint: str, wait_seconds: float = 90.0, allow_mock: bool = True) -> int:
+    try:
+        _, _, endpoint = parse_managed_endpoint(endpoint)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        health = service_health(endpoint)
+        print(json.dumps({"ok": True, "status": "already_running", "endpoint": endpoint, "health": health}, indent=2))
+        return 0
+    except RuntimeError:
+        pass
+
+    # Prefer real local ComfyUI. If it is installed, own the lifecycle automatically.
+    try:
+        result = ensure_comfyui(endpoint, wait_seconds=wait_seconds, allow_start=True)
+        print(json.dumps({"ok": True, **result}, indent=2))
+        return 0
+    except RuntimeError as exc:
+        native_error = str(exc)
+
+    if not allow_mock:
+        print(f"ERROR: native ComfyUI could not be started: {native_error}", file=sys.stderr)
+        return 3
+    print(f"Native ComfyUI unavailable ({native_error}); starting deterministic mock fallback.", file=sys.stderr)
+    return _start_mock(endpoint, min(wait_seconds, 30.0))
+
+
 def stop_service() -> int:
+    stopped: Dict[str, Any] = {"native": stop_managed_comfyui(), "mock": {"status": "not_managed", "stopped": False}}
     state = load_state()
     pid = state.get("pid")
-    if not isinstance(pid, int) or pid <= 0:
-        print(json.dumps({"ok": True, "status": "not_managed", "message": "No managed EVAVO service PID is recorded."}, indent=2))
-        return 0
-    try:
-        if os.name == "nt":
-            result = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=10)
-            combined = f"{result.stdout}\n{result.stderr}".lower()
-            if result.returncode != 0 and not any(text in combined for text in ("not found", "no running instance", "not running")):
-                print(f"ERROR: taskkill failed: {(result.stderr or result.stdout).strip()}", file=sys.stderr)
-                return 1
-        else:
-            try:
-                os.killpg(pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-    finally:
-        clear_state()
-    print(json.dumps({"ok": True, "status": "stopped", "pid": pid}, indent=2))
+    if isinstance(pid, int) and pid > 0:
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=10)
+            else:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            stopped["mock"] = {"status": "stopped", "stopped": True, "pid": pid}
+        finally:
+            clear_state()
+    print(json.dumps({"ok": True, "status": "stopped", "components": stopped}, indent=2))
     return 0
 
 
@@ -184,10 +202,10 @@ def status_service(endpoint: str) -> int:
     endpoint = endpoint.rstrip("/")
     try:
         health = service_health(endpoint)
-        print(json.dumps({"ok": True, "status": "operational", "endpoint": endpoint, "health": health, "managed": load_state()}, indent=2))
+        print(json.dumps({"ok": True, "status": "operational", "endpoint": endpoint, "health": health, "managed_mock": load_state(), "managed_native": load_native_state()}, indent=2))
         return 0
     except RuntimeError as exc:
-        print(json.dumps({"ok": False, "status": "offline", "endpoint": endpoint, "error": str(exc), "managed": load_state()}, indent=2))
+        print(json.dumps({"ok": False, "status": "offline", "endpoint": endpoint, "error": str(exc), "managed_mock": load_state(), "managed_native": load_native_state()}, indent=2))
         return 3
 
 
@@ -227,6 +245,9 @@ def doctor(endpoint: str, json_output: bool = False) -> int:
     except ValueError as exc:
         add("endpoint", False, str(exc))
         normalized_endpoint = endpoint.rstrip("/")
+
+    installs = discover_comfyui()
+    add("comfyui_install", bool(installs), "; ".join(str(item.root) for item in installs) if installs else "not found in standard paths; set EVAVO_COMFYUI_HOME", severity="warning")
 
     git_dir = (ROOT / ".git").exists()
     add("git_repository", git_dir, str(ROOT))
@@ -311,31 +332,45 @@ def bootstrap(endpoint: str, skip_pull: bool = False) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="EVAVO local image generator operations controller")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    start = subparsers.add_parser("start", help="Use an existing native ComfyUI or start the managed mock fallback")
+
+    start = subparsers.add_parser("start", help="Use/start native ComfyUI; optionally fall back to the test mock")
     start.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
-    start.add_argument("--wait", type=float, default=20.0, help="Readiness timeout in seconds")
-    subparsers.add_parser("stop", help="Stop only the managed mock service")
+    start.add_argument("--wait", type=float, default=90.0, help="Native ComfyUI readiness timeout")
+    start.add_argument("--no-mock", action="store_true", help="Fail instead of starting the deterministic mock fallback")
+
+    subparsers.add_parser("stop", help="Stop only EVAVO-managed native/mock processes")
+
     status = subparsers.add_parser("status", help="Check the generation backend")
     status.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
-    doctor_parser = subparsers.add_parser("doctor", help="Diagnose Python, files, Git state and generation backend")
+
+    doctor_parser = subparsers.add_parser("doctor", help="Diagnose Python, files, Git, ComfyUI install and backend")
     doctor_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     doctor_parser.add_argument("--json", action="store_true")
+
     bootstrap_parser = subparsers.add_parser("bootstrap", help="Sync main, test, start and verify EVAVO")
     bootstrap_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
-    bootstrap_parser.add_argument("--skip-pull", action="store_true", help="Do not git pull before validation")
-    generate = subparsers.add_parser("generate", help="Queue a batch of image prompts")
+    bootstrap_parser.add_argument("--skip-pull", action="store_true")
+
+    generate = subparsers.add_parser("generate", help="Generate image prompts through the active backend")
     generate.add_argument("--prompts", nargs="+")
     generate.add_argument("--examples", action="store_true")
     generate.add_argument("--project", default="batch_gen")
     generate.add_argument("--concurrency", type=int, default=4)
     generate.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    generate.add_argument("--wait", action="store_true")
+    generate.add_argument("--wait-timeout", type=float, default=600.0)
+    generate.add_argument("--output-dir")
+    generate.add_argument("--workflow")
     generate.add_argument("--json", action="store_true")
+
     tasks = subparsers.add_parser("tasks", help="List task history")
     tasks.add_argument("--limit", type=int, default=20)
     tasks.add_argument("--project")
     tasks.add_argument("--json", action="store_true")
+
     stats = subparsers.add_parser("stats", help="Show task statistics")
     stats.add_argument("--json", action="store_true")
+
     subparsers.add_parser("test", help="Run operational integration tests")
     subparsers.add_parser("sync", help="Fast-forward the local checkout to origin/main")
 
@@ -343,7 +378,7 @@ def main() -> int:
     if args.command == "start":
         if args.wait <= 0:
             parser.error("--wait must be greater than zero")
-        return start_service(args.endpoint, args.wait)
+        return start_service(args.endpoint, args.wait, allow_mock=not args.no_mock)
     if args.command == "stop":
         return stop_service()
     if args.command == "status":
@@ -362,6 +397,12 @@ def main() -> int:
             forwarded.append("--examples")
         else:
             parser.error("generate requires --prompts or --examples")
+        if args.wait:
+            forwarded.extend(["--wait", "--wait-timeout", str(args.wait_timeout)])
+        if args.output_dir:
+            forwarded.extend(["--output-dir", args.output_dir])
+        if args.workflow:
+            forwarded.extend(["--workflow", args.workflow])
         if args.json:
             forwarded.append("--json")
         return run_passthrough("generate-batch.py", forwarded)
