@@ -1,5 +1,5 @@
 # Package-level compatibility requirements.
 # Prefer installing the repository root requirements.txt.
-mcp>=2,<3
+mcp[cli]>=2,<3
 pytest>=7.4.0
 pydantic>=2.0.0
