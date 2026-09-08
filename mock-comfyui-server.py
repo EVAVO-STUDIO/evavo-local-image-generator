@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import threading
 import uuid
@@ -17,10 +18,13 @@ from evavo_operations import PROTOCOL_VERSION, SERVICE_NAME, now_iso
 TASKS: Dict[str, Dict[str, Any]] = {}
 TASKS_LOCK = threading.Lock()
 STARTED_AT = now_iso()
+PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl1e6sAAAAASUVORK5CYII="
+)
 
 
 class EvavoMockHandler(BaseHTTPRequestHandler):
-    server_version = "EVAVOMockComfyUI/2.0"
+    server_version = "EVAVOMockComfyUI/2.1"
 
     @property
     def native_only(self) -> bool:
@@ -29,14 +33,16 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[{datetime.now().astimezone().isoformat()}] {self.client_address[0]} {fmt % args}")
 
-    def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    def _send_bytes(self, status: int, body: bytes, content_type: str) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
+        self._send_bytes(status, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
     def _read_json(self, max_bytes: int = 1024 * 1024) -> Dict[str, Any]:
         try:
@@ -88,6 +94,9 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, {prompt_id: {"status": {"completed": True}, "outputs": {"7": {"images": [{"filename": f"{prompt_id}.png", "subfolder": "EVAVO/test", "type": "output"}]}}}})
             return
+        if path == "/view":
+            self._send_bytes(200, PNG_1X1, "image/png")
+            return
         self._send_json(404, {"status": "failed", "error_code": "NOT_FOUND", "path": path})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -115,8 +124,8 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
 
         if path == "/prompt":
             workflow = payload.get("prompt")
-            if not isinstance(workflow, dict) or "1" not in workflow or "7" not in workflow:
-                self._send_json(400, {"error": "invalid_prompt", "node_errors": {"workflow": "missing expected standard nodes"}})
+            if not isinstance(workflow, dict) or not workflow:
+                self._send_json(400, {"error": "invalid_prompt", "node_errors": {"workflow": "workflow must be a non-empty object"}})
                 return
             prompt_id = str(uuid.uuid4())
             with TASKS_LOCK:
