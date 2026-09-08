@@ -1,0 +1,242 @@
+{
+  "repository": "evavo-local-image-generator",
+  "version": "0.1.0",
+  "description": "Multi-modal AI generation bridge - images, video, audio, text, particles, 3D, PBR textures",
+  "created": "2026-09-08T00:00:00Z",
+  "digest_bound_tasks": [
+    {
+      "task_id": "image_generation",
+      "description": "Generate images from text prompts via ComfyUI stable diffusion",
+      "type": "generation",
+      "script": "evavo_local_image_generator/scripts/generate.py::ImageGenerator.generate_image",
+      "entry_point": "evavo_local_image_generator.scripts.generate:generate_images",
+      "parameters": {
+        "prompts": {
+          "type": "list[str]",
+          "description": "Text prompts for generation"
+        },
+        "output_project": {
+          "type": "string",
+          "description": "Project name for organizing outputs",
+          "optional": true
+        },
+        "width": {
+          "type": "int",
+          "default": 512
+        },
+        "height": {
+          "type": "int",
+          "default": 512
+        },
+        "steps": {
+          "type": "int",
+          "default": 20
+        },
+        "cfg_scale": {
+          "type": "float",
+          "default": 7.5
+        }
+      },
+      "storage": {
+        "inputs": "bee://primary/EVAVO/AI/Models",
+        "outputs": "bee://primary/EVAVO/ImageGeneration/outputs",
+        "workflows": "bee://primary/EVAVO/ImageGeneration/workflows"
+      },
+      "dependencies": {
+        "evavo_local_storage": ">=0.31.0",
+        "evavo_local_compute": ">=0.1.0",
+        "evavo_storage": ">=0.14.3"
+      },
+      "backends": {
+        "inference": "ComfyUI",
+        "inference_endpoint": "http://127.0.0.1:8188"
+      },
+      "resource_requirements": {
+        "min_vram_gb": 6,
+        "recommended_vram_gb": 12,
+        "disk_space_gb": 50
+      },
+      "validation": {
+        "hash_algorithm": "sha256",
+        "digest_fields": ["task_type", "parameters", "created_at"]
+      }
+    },
+    {
+      "task_id": "batch_image_generation",
+      "description": "Batch generate multiple images with efficient queueing",
+      "type": "generation",
+      "script": "evavo_local_image_generator/scripts/generate.py::ImageGenerator.batch_generate",
+      "entry_point": "evavo_local_image_generator.scripts.generate:generate_images",
+      "parameters": {
+        "prompts": {
+          "type": "list[str]",
+          "description": "List of text prompts"
+        },
+        "project_name": {
+          "type": "string",
+          "description": "Project for output organization",
+          "optional": true
+        },
+        "parallel_tasks": {
+          "type": "int",
+          "default": 1,
+          "description": "Number of parallel generation tasks"
+        }
+      },
+      "storage": {
+        "outputs": "bee://primary/EVAVO/ImageGeneration/outputs"
+      },
+      "backends": {
+        "inference": "ComfyUI"
+      }
+    },
+    {
+      "task_id": "video_generation",
+      "description": "Generate videos from image sequences or text prompts",
+      "type": "generation",
+      "script": "evavo_local_image_generator/scripts/generate.py::VideoGenerator",
+      "parameters": {
+        "prompt": {
+          "type": "string",
+          "description": "Text prompt for video generation"
+        },
+        "duration_seconds": {
+          "type": "float",
+          "default": 5.0
+        },
+        "fps": {
+          "type": "int",
+          "default": 24
+        }
+      },
+      "storage": {
+        "outputs": "bee://primary/EVAVO/VideoGeneration/outputs"
+      },
+      "status": "planning"
+    },
+    {
+      "task_id": "workflow_execution",
+      "description": "Execute custom ComfyUI workflows stored in BeeStation",
+      "type": "workflow",
+      "script": "evavo_local_image_generator/scripts/workflows.py::WorkflowExecutor",
+      "parameters": {
+        "workflow_name": {
+          "type": "string",
+          "description": "Name of workflow in bee://primary/EVAVO/ImageGeneration/workflows"
+        },
+        "inputs": {
+          "type": "dict",
+          "description": "Workflow input parameters",
+          "optional": true
+        }
+      },
+      "storage": {
+        "workflows": "bee://primary/EVAVO/ImageGeneration/workflows",
+        "outputs": "bee://primary/EVAVO/ImageGeneration/outputs"
+      },
+      "status": "planning"
+    },
+    {
+      "task_id": "texture_generation",
+      "description": "Generate PBR textures (albedo, normal, roughness, metallic)",
+      "type": "generation",
+      "script": "evavo_local_image_generator/scripts/generate.py::TextureGenerator",
+      "parameters": {
+        "concept": {
+          "type": "string",
+          "description": "Material concept (e.g., 'worn leather', 'brushed metal')"
+        },
+        "resolution": {
+          "type": "int",
+          "default": 2048,
+          "options": [512, 1024, 2048, 4096]
+        }
+      },
+      "storage": {
+        "outputs": "bee://primary/EVAVO/TextureGeneration/outputs"
+      },
+      "status": "planning"
+    },
+    {
+      "task_id": "3d_model_generation",
+      "description": "Generate 3D models from text descriptions or reference images",
+      "type": "generation",
+      "script": "evavo_local_image_generator/scripts/generate.py::ModelGenerator",
+      "parameters": {
+        "description": {
+          "type": "string",
+          "description": "Text description of model"
+        },
+        "format": {
+          "type": "string",
+          "default": "glb",
+          "options": ["glb", "fbx", "obj", "usdz"]
+        }
+      },
+      "storage": {
+        "outputs": "bee://primary/EVAVO/3D/outputs"
+      },
+      "status": "planning"
+    },
+    {
+      "task_id": "audio_generation",
+      "description": "Generate audio/music and speech synthesis via local backends",
+      "type": "generation",
+      "script": "evavo_local_image_generator/scripts/generate.py::AudioGenerator",
+      "backends": {
+        "music": "Stable Audio 3",
+        "speech": "Kokoro FastAPI at http://127.0.0.1:8000"
+      },
+      "status": "planning"
+    }
+  ],
+  "integration_points": {
+    "evavo_local_storage": {
+      "purpose": "BeeStation access via bee:// URIs",
+      "min_version": "0.31.0",
+      "integration": "Via storage.py BeeStorageClient"
+    },
+    "evavo_local_compute": {
+      "purpose": "Digest-bound task execution and validation",
+      "integration": "Tasks record digests in manifest for validation"
+    },
+    "evavo_storage": {
+      "purpose": "Immutable milestone handoff and version control",
+      "integration": "Upon completion, tasks transfer outputs via evavo-storage APIs"
+    },
+    "comfyui": {
+      "purpose": "Local inference engine",
+      "endpoint": "http://127.0.0.1:8188",
+      "required": true
+    },
+    "ollama": {
+      "purpose": "Local LLM backend",
+      "endpoint": "http://127.0.0.1:11434",
+      "optional": true
+    },
+    "kokoro_fastapi": {
+      "purpose": "TTS service",
+      "endpoint": "http://127.0.0.1:8000",
+      "optional": true
+    }
+  },
+  "mcp_configuration": {
+    "server_name": "evavo-local-image-generator",
+    "entry_point": "evavo_local_image_generator.mcp_server:main",
+    "mode": "production",
+    "storage_uri": "bee://primary/EVAVO/ImageGeneration",
+    "tools": [
+      "generate_image",
+      "batch_generate_images",
+      "get_storage_paths",
+      "get_generation_status"
+    ]
+  },
+  "constraints": {
+    "never_assume_hosted_claude_sees_windows_paths": "Always use bee:// URIs via evavo-local-storage",
+    "no_intermediate_staging_on_c_drive": "All file operations via BeeStation bee:// URIs",
+    "digest_bound_tasks_only": "All execution through evavo-local-compute with manifest validation",
+    "immutable_milestones": "Hand off canonical outputs via evavo-storage",
+    "no_raw_unc_paths": "Never use //beestation/shares directly; use bee:// abstraction"
+  }
+}

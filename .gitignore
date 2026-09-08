@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Generation outputs (local scratch)
+evavo-generations/
+evavo-images/
+evavo-videos/
+evavo-audio/
+evavo-models/
+evavo-particles/
+evavo-textures/
+evavo-state/
+evavo-logs/
+
+# Local state
+.evavo/
+*.log
+*.tmp
+
+# Platform specific
+CUsersUserbeestationevavo-generation/
+$HOME/
+
+# OS
+.DS_Store
+Thumbs.db

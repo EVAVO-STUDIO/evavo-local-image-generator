@@ -1,0 +1,18 @@
+# EVAVO Local Image Generator - Production Dependencies
+# Compatible with Python 3.8+
+
+# Core dependencies
+requests>=2.28.0         # HTTP client for ComfyUI communication
+python-dotenv>=0.21.0    # Environment configuration
+
+# Optional: For enhanced functionality
+Pillow>=9.0.0            # Image processing
+numpy>=1.21.0            # Numerical operations
+aiohttp>=3.8.0           # Async HTTP client (for future async support)
+
+# Development dependencies (optional)
+pytest>=7.0.0            # Testing framework
+pytest-cov>=4.0.0        # Coverage reporting
+black>=22.0.0            # Code formatting
+flake8>=4.0.0            # Linting
+mypy>=0.950              # Type checking
