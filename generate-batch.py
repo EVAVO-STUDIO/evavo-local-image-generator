@@ -91,6 +91,8 @@ async def queue_generation(prompt: str, project_name: str, endpoint: str, semaph
         if not isinstance(task_id, str) or not task_id:
             return _failure(prompt, project_name, "MISSING_TASK_ID", "wrapper returned success without a task_id")
         result.update({"prompt": prompt, "project_name": project_name})
+        if workflow_path:
+            result["workflow_path"] = workflow_path
         return result
 
 
@@ -102,16 +104,21 @@ async def batch_generate(prompts: List[str], project_name: str, endpoint: str, c
 def persist_results(results: List[Dict[str, Any]]) -> None:
     tracker = TaskTracker()
     for result in results:
-        output_uri = None
         downloaded = result.get("downloaded_files")
-        if isinstance(downloaded, list) and downloaded:
-            output_uri = str(downloaded[0])
-        tracker.add_task(str(result["task_id"]), str(result.get("prompt", "")), str(result.get("status", "unknown")), project_name=str(result.get("project_name", "batch_gen")), error_code=result.get("error_code"), error_message=result.get("message"))
-        if output_uri and result.get("status") == "completed":
-            try:
-                tracker.update_task(str(result["task_id"]), "completed", output_uri=output_uri)
-            except KeyError:
-                pass
+        output_uris = [str(item) for item in downloaded] if isinstance(downloaded, list) else None
+        tracker.add_task(
+            str(result["task_id"]),
+            str(result.get("prompt", "")),
+            str(result.get("status", "unknown")),
+            project_name=str(result.get("project_name", "batch_gen")),
+            error_code=result.get("error_code"),
+            error_message=result.get("message"),
+            backend_mode=result.get("backend_mode"),
+            checkpoint=result.get("checkpoint"),
+            workflow_path=result.get("workflow_path"),
+            output_dir=result.get("output_dir"),
+            output_uris=output_uris,
+        )
 
 
 def display_results(results: List[Dict[str, Any]]) -> None:
