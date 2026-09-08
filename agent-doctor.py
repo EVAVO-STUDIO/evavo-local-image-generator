@@ -89,12 +89,17 @@ def run(repair: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bo
     mcp_spec = importlib.util.find_spec("mcp")
     add("mcp_sdk", mcp_spec is not None, str(mcp_spec.origin) if mcp_spec else 'missing; install mcp[cli]>=2,<3')
 
+    # Diagnostic mode reports missing native rendering as a warning. Repair mode
+    # is deliberately stricter: it is the workstation readiness gate used by
+    # UPDATE-AND-VERIFY-EVAVO.ps1 and must not pass on a mock-only setup.
+    renderer_severity = "error" if repair else "warning"
+
     installs = discover_comfyui()
     add(
         "comfyui_install",
         bool(installs),
         "; ".join(str(item.root) for item in installs) if installs else "no local install discovered; set EVAVO_COMFYUI_HOME",
-        severity="warning",
+        severity=renderer_severity,
     )
 
     health = native_health(endpoint)
@@ -105,23 +110,33 @@ def run(repair: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bo
             health = ensured.get("health") if isinstance(ensured, dict) else None
             repaired_backend = bool(health)
         except RuntimeError as exc:
-            add("backend_repair", False, str(exc), severity="warning")
+            add("backend_repair", False, str(exc), severity="error")
     add(
         "native_comfyui",
         bool(health),
         f"ready at {endpoint}" if health else f"offline at {endpoint}",
-        severity="warning",
+        severity=renderer_severity,
         repaired=repaired_backend,
     )
 
     if health:
         try:
             checkpoints = ComfyUIBackend(endpoint).checkpoints()
-            add("checkpoints", bool(checkpoints), f"{len(checkpoints)} available" if checkpoints else "none reported")
+            add(
+                "checkpoints",
+                bool(checkpoints),
+                f"{len(checkpoints)} available" if checkpoints else "none reported",
+                severity="error" if repair else "warning",
+            )
         except RuntimeError as exc:
-            add("checkpoints", False, str(exc))
+            add("checkpoints", False, str(exc), severity="error" if repair else "warning")
     else:
-        add("checkpoints", False, "not checked because native ComfyUI is offline", severity="warning")
+        add(
+            "checkpoints",
+            False,
+            "not checked because native ComfyUI is offline",
+            severity=renderer_severity,
+        )
 
     writable, output_detail = _output_writable()
     add("output_directory", writable, output_detail)
@@ -158,7 +173,7 @@ def run(repair: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bo
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="EVAVO Claude/ChatGPT agent integration doctor")
-    parser.add_argument("--repair", action="store_true", help="Start a discovered native ComfyUI when offline")
+    parser.add_argument("--repair", action="store_true", help="Start native ComfyUI and require real-renderer/checkpoint readiness")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--mcp-host", default=DEFAULT_MCP_HOST)
     parser.add_argument("--mcp-port", type=int, default=DEFAULT_MCP_PORT)
