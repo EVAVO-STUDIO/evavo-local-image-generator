@@ -1,72 +1,29 @@
-"""
-Unit tests for EVAVO multi-modal generators.
+"""Tests for EVAVO generators"""
 
-Tests verify:
-- Generator initialization and configuration
-- Task creation with digest validation
-- Error handling and edge cases
-"""
+import pytest
+from evavo_local_image_generator.storage import BeeStorageClient
+from evavo_local_image_generator.mcp_server import EvavoLocalImageGeneratorMCPServer
 
-import unittest
-from evavo_local_image_generator.generators import (
-    ImageGenerator, VideoGenerator, AudioGenerator,
-    Model3DGenerator, TextureGenerator, ParticleGenerator
-)
 
-class TestImageGenerator(unittest.TestCase):
-    """Test image generation module."""
-    
-    def setUp(self):
-        self.generator = ImageGenerator()
-    
-    def test_initialization(self):
-        """Test ImageGenerator initializes correctly."""
-        self.assertIsNotNone(self.generator)
-    
-    def test_has_methods(self):
-        """Test generator has required methods."""
-        self.assertTrue(hasattr(self.generator, 'generate_image'))
-        self.assertTrue(hasattr(self.generator, 'batch_generate'))
+def test_storage_client():
+    """Test storage client"""
+    client = BeeStorageClient()
+    data = b"test data"
+    digest = client.compute_digest(data)
+    assert len(digest) == 64  # SHA-256 hex string
 
-class TestVideoGenerator(unittest.TestCase):
-    """Test video generation module."""
-    
-    def test_initialization(self):
-        """Test VideoGenerator initializes correctly."""
-        gen = VideoGenerator()
-        self.assertIsNotNone(gen)
 
-class TestAudioGenerator(unittest.TestCase):
-    """Test audio generation module."""
-    
-    def test_initialization(self):
-        """Test AudioGenerator initializes correctly."""
-        gen = AudioGenerator()
-        self.assertIsNotNone(gen)
+def test_mcp_server_initialization():
+    """Test MCP server initialization"""
+    server = EvavoLocalImageGeneratorMCPServer()
+    assert len(server.tools) == 5
+    assert any(t["name"] == "generate_image" for t in server.tools)
 
-class TestModel3DGenerator(unittest.TestCase):
-    """Test 3D model generation module."""
-    
-    def test_initialization(self):
-        """Test Model3DGenerator initializes correctly."""
-        gen = Model3DGenerator()
-        self.assertIsNotNone(gen)
 
-class TestTextureGenerator(unittest.TestCase):
-    """Test texture generation module."""
-    
-    def test_initialization(self):
-        """Test TextureGenerator initializes correctly."""
-        gen = TextureGenerator()
-        self.assertIsNotNone(gen)
-
-class TestParticleGenerator(unittest.TestCase):
-    """Test particle system generation module."""
-    
-    def test_initialization(self):
-        """Test ParticleGenerator initializes correctly."""
-        gen = ParticleGenerator()
-        self.assertIsNotNone(gen)
-
-if __name__ == '__main__':
-    unittest.main()
+@pytest.mark.asyncio
+async def test_tool_call():
+    """Test tool call handling"""
+    server = EvavoLocalImageGeneratorMCPServer()
+    result = await server.handle_tool_call("generate_image", {"prompt": "test"})
+    assert result["status"] == "queued"
+    assert result["tool"] == "generate_image"
