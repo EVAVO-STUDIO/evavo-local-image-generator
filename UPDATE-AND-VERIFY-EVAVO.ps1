@@ -61,11 +61,17 @@ if (-not $SkipDependencies) {
     }
 }
 
+Write-Host "Running Claude/ChatGPT MCP transport validation..." -ForegroundColor Cyan
+& $python (Join-Path $PSScriptRoot "test-agent-integration.py")
+if ($LASTEXITCODE -ne 0) {
+    Fail "Agent/MCP integration tests failed." 3
+}
+
 Write-Host "Running EVAVO bootstrap..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "evavo.py") bootstrap --skip-pull
 $code = $LASTEXITCODE
 if ($code -ne 0) {
-    Fail "EVAVO bootstrap failed with exit code $code. Review doctor output and .evavo\mock-service.log." $code
+    Fail "EVAVO bootstrap failed with exit code $code. Review doctor output and .evavo logs." $code
 }
 
 Write-Host "Running final backend status..." -ForegroundColor Cyan
@@ -75,7 +81,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "EVAVO is updated, dependencies are installed, tests passed, and the backend is operational." -ForegroundColor Green
-Write-Host "For a real file render, ensure native ComfyUI is running and use:" -ForegroundColor Green
-Write-Host "  python generate-batch.py --prompts \"EVAVO smoke test\" --project smoke --wait" -ForegroundColor Green
+Write-Host "EVAVO is updated, dependencies are installed, operational tests and MCP transport tests passed, and the backend is operational." -ForegroundColor Green
+Write-Host "Native ComfyUI is preferred and will be auto-started when EVAVO can discover it." -ForegroundColor Green
+Write-Host "Claude/stdio MCP: python -m evavo_local_image_generator.mcp_server" -ForegroundColor Green
+Write-Host "ChatGPT/local HTTP MCP: .\START-AGENT-MCP.ps1" -ForegroundColor Green
 exit 0
