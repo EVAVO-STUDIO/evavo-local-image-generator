@@ -1,8 +1,10 @@
-# EVAVO Local Image Generator - update, install, validate, start and verify
-# Safe by default: refuses to overwrite local changes and only fast-forwards main.
+# EVAVO Local Image Generator - update, install, validate, configure agents and verify
+# Safe by default: refuses to overwrite local Git changes and only fast-forwards main.
 
 param(
-    [switch]$SkipDependencies
+    [switch]$SkipDependencies,
+    [switch]$SkipAgentConfiguration,
+    [int]$McpPort = 8765
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +13,10 @@ Set-Location $PSScriptRoot
 function Fail([string]$Message, [int]$Code = 1) {
     Write-Error $Message
     exit $Code
+}
+
+if ($McpPort -lt 1 -or $McpPort -gt 65535) {
+    Fail "MCP port must be between 1 and 65535." 2
 }
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
@@ -74,6 +80,26 @@ if ($code -ne 0) {
     Fail "EVAVO bootstrap failed with exit code $code. Review doctor output and .evavo logs." $code
 }
 
+if (-not $SkipAgentConfiguration) {
+    Write-Host "Installing/updating Claude Desktop stdio MCP configuration..." -ForegroundColor Cyan
+    & (Join-Path $PSScriptRoot "INSTALL-CLAUDE-MCP.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Claude MCP configuration failed." 3
+    }
+
+    Write-Host "Installing/updating per-user HTTP MCP autostart..." -ForegroundColor Cyan
+    & (Join-Path $PSScriptRoot "INSTALL-AGENT-MCP-AUTOSTART.ps1") -Port $McpPort
+    if ($LASTEXITCODE -ne 0) {
+        Fail "HTTP MCP autostart installation failed." 3
+    }
+}
+
+Write-Host "Running final agent doctor with safe repair enabled..." -ForegroundColor Cyan
+& $python (Join-Path $PSScriptRoot "agent-doctor.py") --repair --mcp-port $McpPort
+if ($LASTEXITCODE -ne 0) {
+    Fail "Agent doctor found a blocking configuration problem." 3
+}
+
 Write-Host "Running final backend status..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "evavo.py") status
 if ($LASTEXITCODE -ne 0) {
@@ -81,8 +107,17 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "EVAVO is updated, dependencies are installed, operational tests and MCP transport tests passed, and the backend is operational." -ForegroundColor Green
-Write-Host "Native ComfyUI is preferred and will be auto-started when EVAVO can discover it." -ForegroundColor Green
-Write-Host "Claude/stdio MCP: python -m evavo_local_image_generator.mcp_server" -ForegroundColor Green
-Write-Host "ChatGPT/local HTTP MCP: .\START-AGENT-MCP.ps1" -ForegroundColor Green
+Write-Host "EVAVO workstation setup completed." -ForegroundColor Green
+Write-Host "  Dependencies: installed/validated" -ForegroundColor Green
+Write-Host "  Operational tests: passed" -ForegroundColor Green
+Write-Host "  MCP negotiation tests: passed" -ForegroundColor Green
+if (-not $SkipAgentConfiguration) {
+    Write-Host "  Claude stdio MCP: installed/updated" -ForegroundColor Green
+    Write-Host "  HTTP MCP autostart: installed and started" -ForegroundColor Green
+}
+Write-Host "  Agent doctor: passed blocking checks" -ForegroundColor Green
+Write-Host ""
+Write-Host "Claude: restart Claude Desktop so it reloads its MCP configuration." -ForegroundColor Yellow
+Write-Host "Local HTTP MCP endpoint: http://127.0.0.1:$McpPort/mcp" -ForegroundColor Green
+Write-Host "Native ComfyUI is reused or auto-started when EVAVO can discover a real installation." -ForegroundColor Green
 exit 0
