@@ -1,21 +1,54 @@
 # EVAVO Local Image Generator - Operations Guide
 
-This guide describes the repository's actual local operational control plane. The supported runtime is **Python 3.10+**. The operational scripts use only the Python standard library; install `requirements.txt` for the wider generator/tooling repository.
+This guide describes the repository's actual local operational control plane. The supported runtime is **Python 3.10+**. The operations layer uses only the Python standard library; `requirements.txt` is for the wider generator/tooling repository.
 
-## Recommended workflow
+## Preferred workflow
 
-The preferred entry point for humans and agents is `evavo.py`:
+For normal use, one command performs the operational bootstrap:
 
 ```powershell
+python evavo.py bootstrap
+```
+
+That sequence:
+
+1. requires branch `main`;
+2. refuses to overwrite local changes;
+3. runs `git pull --ff-only origin main`;
+4. runs the environment doctor;
+5. runs the integration test suite;
+6. starts the managed local service;
+7. verifies final service status.
+
+If the checkout is old enough that `evavo.py` does not exist yet, fast-forward once:
+
+```powershell
+git pull --ff-only origin main
+python evavo.py bootstrap --skip-pull
+```
+
+Windows operators can instead run:
+
+```powershell
+.\UPDATE-AND-VERIFY-EVAVO.ps1
+```
+
+## Core commands
+
+```powershell
+python evavo.py doctor
+python evavo.py sync
+python evavo.py bootstrap
 python evavo.py start
 python evavo.py status
 python evavo.py generate --prompts "sunset landscape" "cyberpunk city" --project demo
 python evavo.py tasks --limit 20
 python evavo.py stats
+python evavo.py test
 python evavo.py stop
 ```
 
-`START-EVAVO-SERVICES.bat` remains available for Windows operators who prefer a batch launcher.
+`START-EVAVO-SERVICES.bat` remains available, but it is intentionally thin: it finds Python, runs `evavo.py doctor`, delegates startup to `evavo.py start`, then displays `evavo.py status`. Process lifecycle logic lives in Python rather than being duplicated in batch syntax.
 
 ## Architecture
 
@@ -43,85 +76,134 @@ monitor-evavo.py              generate-batch.py
                          v
                 mock-comfyui-server.py
 
-All generation results ----------> task_history.json
+Generation results -------------> task_history.json
                                   atomic + lock protected
 ```
 
-The mock server is a reproducible local queue/API surface. It is not a real image renderer. Replace the mock HTTP implementation with the real ComfyUI-compatible backend when connecting production generation, while preserving the same wrapper/health contract.
+The current mock server is a deterministic local queue/API surface for operational validation. It does **not** render images. The real ComfyUI adapter should preserve the same service identity, health and queue response contract so the wrapper/monitor/batch/controller layers do not need to change.
 
-## Quick start
+## Environment doctor
 
-### 1. Verify Python
-
-```powershell
-python --version
-```
-
-Python 3.10 or newer is required.
-
-Optional virtual environment:
+Run:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+python evavo.py doctor
 ```
 
-The operational control plane itself does not need third-party packages.
+Machine-readable form:
 
-### 2. Start services
+```powershell
+python evavo.py doctor --json
+```
 
-Preferred:
+The doctor checks:
+
+- Python 3.10+ and interpreter path;
+- presence of all required operational files;
+- whether `asyncio` resolves from the standard library instead of `site-packages`;
+- valid loopback endpoint syntax;
+- Git repository presence;
+- branch `main`;
+- local/upstream commit state when an upstream is configured;
+- local worktree cleanliness;
+- current service health.
+
+Python already includes `asyncio`. Do **not** install the PyPI `asyncio` package for this repository. If it shadows the standard library, doctor reports it.
+
+## Start and stop
+
+Default service:
 
 ```powershell
 python evavo.py start
+python evavo.py status
+python evavo.py stop
 ```
 
-Windows batch alternative:
+The managed mock server defaults to:
 
-```batch
-START-EVAVO-SERVICES.bat
+```text
+http://127.0.0.1:8188
 ```
 
-The managed Python controller writes service state and logs below `.evavo/`.
-
-### 3. Verify health
+For isolated testing, other loopback ports are supported:
 
 ```powershell
-python evavo.py status
-python monitor-evavo.py --json
+python evavo.py start --endpoint http://127.0.0.1:18190
+python evavo.py status --endpoint http://127.0.0.1:18190
+python evavo.py stop
 ```
+
+Only `http://127.0.0.1:<port>` and `http://localhost:<port>` managed endpoints are accepted. Paths, credentials, query strings and non-loopback hosts are rejected.
+
+Managed service state and logs are stored under:
+
+```text
+.evavo/operations-service.json
+.evavo/mock-service.log
+```
+
+If startup fails or times out, the controller terminates the process it started and clears stale managed state before returning an error.
+
+## Health contract
 
 A healthy service must:
 
-- respond with HTTP 2xx;
+- return HTTP 2xx;
 - return valid JSON;
-- identify itself as `evavo-local-image-generator`;
+- identify as `evavo-local-image-generator`;
 - report protocol version `1`;
-- report `ready`/`ok` health state;
-- pass the wrapper health check.
+- report `ready` or `ok`.
 
-A one-shot monitor exits nonzero when degraded/offline, making it safe for automation.
+Example:
 
-### 4. Queue image tasks
+```json
+{
+  "service": "evavo-local-image-generator",
+  "protocol_version": 1,
+  "status": "ready",
+  "mode": "mock"
+}
+```
+
+Monitoring commands:
+
+```powershell
+python monitor-evavo.py
+python monitor-evavo.py --json
+python monitor-evavo.py --continuous --interval 10
+python monitor-evavo.py --continuous --interval 10 --json
+```
+
+The one-shot monitor exits nonzero when degraded/offline, so automation can trust its process exit status.
+
+## Queue generation
+
+Preferred:
 
 ```powershell
 python evavo.py generate --prompts "landscape" "portrait" "abstract" --project production_batch
 ```
 
-Examples:
+Direct batch usage:
 
 ```powershell
-python evavo.py generate --examples
 python generate-batch.py --examples
 python generate-batch.py --prompts "prompt one" "prompt two" --concurrency 4 --json
 ```
 
-`generate-batch.py` performs a service preflight by default, queues requests concurrently using async subprocesses, validates returned task IDs and writes every result to task history.
+`generate-batch.py`:
 
-Concurrency is bounded with `--concurrency` (default `4`, allowed `1..64`).
+- performs service identity/readiness preflight by default;
+- uses `asyncio.create_subprocess_exec` rather than blocking `subprocess.run`;
+- bounds concurrency (`1..64`, default `4`);
+- enforces per-wrapper timeout;
+- validates wrapper JSON and returned task IDs;
+- records successes and failures to task history;
+- exits `1` on partial batch failure;
+- exits `3` when preflight fails.
 
-### 5. Inspect tasks
+## Task history
 
 ```powershell
 python evavo.py tasks
@@ -136,9 +218,10 @@ python task-tracker.py list --limit 50
 python task-tracker.py list --project production_batch --json
 python task-tracker.py stats --json
 python task-tracker.py update <TASK_ID> completed --output-uri "bee://primary/EVAVO/ImageGeneration/outputs/example.png"
+python task-tracker.py clear --yes
 ```
 
-Task history defaults to:
+History defaults to:
 
 ```text
 <repository>\task_history.json
@@ -150,7 +233,7 @@ Override with:
 $env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\task_history.json"
 ```
 
-Writes use an inter-process lock and atomic replacement to avoid lost updates/truncated JSON during concurrent operation.
+Persistence uses an inter-process lock, temporary-file write, flush/fsync and atomic `os.replace()` to avoid lost updates and truncated JSON. Corrupt JSON is reported explicitly rather than silently replaced.
 
 ## Environment variables
 
@@ -162,82 +245,68 @@ Writes use an inter-process lock and atomic replacement to avoid lost updates/tr
 
 ## `bee://` storage
 
-`bee://` values are logical resource URIs, not Windows filesystem paths. They should be resolved by the storage layer rather than concatenated directly with `C:\...` paths. Keep path/URI translation centralized and reject traversal outside configured storage roots.
+`bee://` values are logical resource URIs, not Windows filesystem paths. Resolve them through the storage layer rather than concatenating them with Windows paths. Path/URI translation should remain centralized and traversal outside configured roots should be rejected.
 
-## Monitoring
+## Validation
 
-Single health check:
-
-```powershell
-python monitor-evavo.py
-```
-
-Machine-readable:
+Run:
 
 ```powershell
-python monitor-evavo.py --json
+python evavo.py test
 ```
 
-Continuous human display:
+The integration suite validates:
 
-```powershell
-python monitor-evavo.py --continuous --interval 10
-```
-
-Continuous JSON lines for agents/log collectors:
-
-```powershell
-python monitor-evavo.py --continuous --interval 10 --json
-```
+- mock service startup and readiness;
+- wrapper health contract;
+- queue submission and `evavo_*` task IDs;
+- monitor operational JSON;
+- concurrent two-prompt batching;
+- batch-to-history persistence;
+- nonzero offline monitor behavior;
+- doctor handling of an isolated loopback endpoint;
+- controller `start -> status -> stop` lifecycle on an isolated test port;
+- managed state cleanup after stop.
 
 ## Exit codes
-
-Operational scripts use conventional nonzero exit codes rather than silently reporting success:
 
 | Code | Meaning |
 |---:|---|
 | `0` | Requested operation succeeded |
 | `1` | General or partial operation failure |
 | `2` | Invalid CLI/configuration/prerequisite |
-| `3` | Service/wrapper unavailable or degraded |
+| `3` | Service/wrapper unavailable, degraded, startup timeout or sync timeout |
 | `4` | Task not found (tracker update) |
-| `5` | Windows startup port conflict with a non-EVAVO process |
-
-Do not rely on historical `127`/`255` values from the old quick reference.
-
-## Windows startup behavior
-
-`START-EVAVO-SERVICES.bat`:
-
-1. resolves the repository directory with `%~dp0`;
-2. prefers `.venv\Scripts\python.exe` when present;
-3. verifies required runtime files;
-4. checks port `8188`;
-5. only terminates the existing listener when its command line identifies the EVAVO mock server;
-6. refuses to kill unrelated processes using the port;
-7. starts the service in a minimized window;
-8. runs up to 20 readiness checks using `monitor-evavo.py`;
-9. exits nonzero if readiness fails.
-
-The Python controller is preferred for agent automation because it also records a managed PID and log location.
 
 ## Troubleshooting
+
+### Old checkout still running old scripts
+
+Symptoms include the old monitor JSON fields (`comfyui`, `evavo_wrapper`, `overall`) or a batch table that reports `error / N/A` without preflight information.
+
+Fix:
+
+```powershell
+git pull --ff-only origin main
+python evavo.py bootstrap --skip-pull
+```
 
 ### Service offline
 
 ```powershell
-python evavo.py status
+python evavo.py doctor
 python evavo.py start
+python evavo.py status
 ```
 
-### Port 8188 conflict
+### Startup failure
 
 ```powershell
-Get-NetTCPConnection -LocalPort 8188 -State Listen
-Get-CimInstance Win32_Process -Filter "ProcessId=<PID>" | Select-Object ProcessId,CommandLine
+Get-Content .\.evavo\mock-service.log -Tail 100
+Get-NetTCPConnection -LocalPort 8188 -State Listen -ErrorAction SilentlyContinue
 ```
 
-Do not use `taskkill /IM python.exe` as a generic fix; it can terminate unrelated Python workloads.
+Do not use `taskkill /IM python.exe` as a generic fix. It can terminate unrelated Python workloads.
 
 ### Wrapper failure
 
@@ -249,43 +318,20 @@ Wrapper stdout is exactly one JSON object. Nonzero exit status means the wrapper
 
 ### Task history corruption or permissions
 
-The tracker refuses to silently replace malformed history. If it reports `CORRUPT_HISTORY`, preserve the existing file, repair/restore it, or intentionally move it aside before continuing.
+If the tracker reports `CORRUPT_HISTORY`, preserve the existing file and repair/restore it or intentionally move it aside. Choose an `EVAVO_TASK_HISTORY` location writable by the current Windows account when the repository is read-only.
 
-Choose an `EVAVO_TASK_HISTORY` location writable by the current Windows account when the repository itself is read-only.
+## Repository hygiene
 
-### Batch partial failure
-
-The table/JSON output includes per-task `error_code` and `message`. The command exits `1` if any requested item failed to queue, while successful items are still tracked.
-
-## Validation
-
-Run the standard-library integration suite:
-
-```powershell
-python evavo.py test
-```
-
-or:
-
-```powershell
-python test-operations.py
-```
-
-It validates:
-
-- mock service startup and health;
-- wrapper health contract;
-- task ID generation;
-- monitor health output;
-- concurrent batch queueing and persistence;
-- nonzero offline monitoring behavior.
+Git metadata backup directories such as `.git.backup`, `.git.broken`, `.git.final-backup`, `.git.framework-backup`, `.git.new`, `.git.old.backup` and `.git.test-backup` are not part of the product and are removed/ignored. Do not commit copied `.git*` metadata into this repository.
 
 ## Security baseline
 
-- Service binds to loopback only (`127.0.0.1`) by default.
-- The mock server refuses non-loopback bind values.
+- Managed mock service is loopback-only.
+- Non-loopback binds are rejected.
 - Request bodies are capped at 1 MiB.
 - Prompts must be non-empty and are capped at 100,000 characters.
-- Startup scripts do not indiscriminately terminate Python processes.
+- Wrapper output is a stable JSON object for automation.
+- Startup/stop tooling does not indiscriminately terminate Python processes.
+- Bootstrap uses `git pull --ff-only` and refuses to overwrite a dirty worktree.
 
-Loopback is not authentication. If the service is ever exposed beyond the local machine, add authentication/authorization and firewall rules before doing so.
+Loopback is not authentication. Before exposing a real backend beyond the local machine, add authentication/authorization, firewall restrictions, payload validation and secret-safe logging.
