@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import socket
 import subprocess
@@ -18,6 +19,7 @@ from mcp import Client, StdioServerParameters
 
 ROOT = Path(__file__).resolve().parent
 HTTP_PORT = 18192
+MOCK_PORT = 18193
 EXPECTED_TOOLS = {
     "ensure_backend",
     "health_check",
@@ -77,6 +79,48 @@ class AgentIntegrationTests(unittest.TestCase):
             self.assertTrue(installs)
             self.assertEqual(installs[0].root, root.resolve())
             self.assertFalse(installs[0].portable)
+
+    def test_runtime_rejects_evavo_mock_as_native_renderer(self) -> None:
+        from evavo_local_image_generator.comfyui_runtime import native_health
+
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "mock-comfyui-server.py"), "--port", str(MOCK_PORT)],
+            cwd=str(ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            wait_port(MOCK_PORT)
+            self.assertIsNone(native_health(f"http://127.0.0.1:{MOCK_PORT}"))
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+    def test_agent_doctor_json_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as appdata:
+            env = os.environ.copy()
+            env["APPDATA"] = appdata
+            result = subprocess.run(
+                [sys.executable, str(ROOT / "agent-doctor.py"), "--skip-tests", "--json", "--mcp-port", "18194"],
+                cwd=str(ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr or result.stdout)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertIn(payload["status"], {"operational", "degraded"})
+            names = {item["name"] for item in payload["checks"]}
+            self.assertIn("mcp_sdk", names)
+            self.assertIn("output_directory", names)
+            self.assertIn("claude_stdio", names)
+            self.assertIn("mcp_http", names)
 
     def test_mcp_stdio_client_negotiates_and_lists_tools(self) -> None:
         params = StdioServerParameters(
