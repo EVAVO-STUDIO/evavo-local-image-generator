@@ -138,8 +138,14 @@ def _interprocess_lock(lock_path: Path, timeout: float = 10.0) -> Iterator[None]
             handle.close()
 
 
+def _clean_string_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None and str(item)]
+
+
 class TaskTracker:
-    """Atomic, lock-protected JSON task history used by all operation tools."""
+    """Atomic, lock-protected JSON task history used by CLI and MCP tools."""
 
     def __init__(self, history_file: Path | str = HISTORY_FILE):
         self.history_file = Path(history_file).expanduser().resolve()
@@ -196,11 +202,16 @@ class TaskTracker:
         project_name: str = "batch_gen",
         error_code: Optional[str] = None,
         error_message: Optional[str] = None,
+        backend_mode: Optional[str] = None,
+        checkpoint: Optional[str] = None,
+        workflow_path: Optional[str] = None,
+        output_dir: Optional[str] = None,
+        output_uris: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         if not isinstance(task_id, str) or not task_id.strip():
             raise ValueError("task_id must be a non-empty string")
         timestamp = now_iso()
-        record = {
+        record: Dict[str, Any] = {
             "task_id": task_id.strip(),
             "prompt": str(prompt),
             "project_name": str(project_name),
@@ -208,10 +219,21 @@ class TaskTracker:
             "timestamp": timestamp,
             "updated": timestamp,
         }
-        if error_code:
-            record["error_code"] = str(error_code)
-        if error_message:
-            record["error_message"] = str(error_message)
+        optional_strings = {
+            "error_code": error_code,
+            "error_message": error_message,
+            "backend_mode": backend_mode,
+            "checkpoint": checkpoint,
+            "workflow_path": workflow_path,
+            "output_dir": output_dir,
+        }
+        for key, value in optional_strings.items():
+            if value is not None and str(value):
+                record[key] = str(value)
+        cleaned_outputs = _clean_string_list(output_uris)
+        if cleaned_outputs:
+            record["output_uris"] = cleaned_outputs
+            record["output_uri"] = cleaned_outputs[0]
 
         with _interprocess_lock(self.lock_file):
             tasks = self._read_unlocked()
@@ -233,12 +255,33 @@ class TaskTracker:
                 raise KeyError(task_id)
             target["status"] = normalize_status(status)
             target["updated"] = now_iso()
-            for key in ("error_code", "error_message", "output_uri"):
+
+            for key in (
+                "error_code",
+                "error_message",
+                "output_uri",
+                "backend_mode",
+                "checkpoint",
+                "workflow_path",
+                "output_dir",
+            ):
                 if key in fields and fields[key] is not None:
-                    target[key] = fields[key]
+                    target[key] = str(fields[key])
+
+            if "output_uris" in fields and fields["output_uris"] is not None:
+                cleaned_outputs = _clean_string_list(fields["output_uris"])
+                target["output_uris"] = cleaned_outputs
+                if cleaned_outputs:
+                    target["output_uri"] = cleaned_outputs[0]
+
             self._write_unlocked(tasks)
             self.tasks = tasks
             return dict(target)
+
+    def get_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        self.load_history()
+        target = next((item for item in self.tasks if item.get("task_id") == task_id), None)
+        return dict(target) if target is not None else None
 
     def list_tasks(self, limit: int = 20, project: Optional[str] = None) -> List[Dict[str, Any]]:
         self.load_history()
