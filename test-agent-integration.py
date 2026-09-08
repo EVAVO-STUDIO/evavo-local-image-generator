@@ -20,6 +20,7 @@ from mcp import Client, StdioServerParameters
 ROOT = Path(__file__).resolve().parent
 HTTP_PORT = 18192
 MOCK_PORT = 18193
+NATIVE_MCP_PORT = 18195
 EXPECTED_TOOLS = {
     "ensure_backend",
     "health_check",
@@ -46,6 +47,15 @@ def wait_port(port: int, timeout: float = 10.0) -> None:
 def tool_names(result: object) -> set[str]:
     tools = getattr(result, "tools", [])
     return {str(getattr(tool, "name", "")) for tool in tools}
+
+
+def stop_process(process: subprocess.Popen[bytes] | subprocess.Popen[str]) -> None:
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
 
 
 class AgentIntegrationTests(unittest.TestCase):
@@ -93,12 +103,7 @@ class AgentIntegrationTests(unittest.TestCase):
             wait_port(MOCK_PORT)
             self.assertIsNone(native_health(f"http://127.0.0.1:{MOCK_PORT}"))
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            stop_process(process)
 
     def test_agent_doctor_json_contract(self) -> None:
         with tempfile.TemporaryDirectory() as appdata:
@@ -136,7 +141,20 @@ class AgentIntegrationTests(unittest.TestCase):
 
         anyio.run(exercise)
 
-    def test_mcp_streamable_http_client_negotiates_and_lists_tools(self) -> None:
+    def test_mcp_streamable_http_generates_and_downloads_image(self) -> None:
+        native_endpoint = f"http://127.0.0.1:{NATIVE_MCP_PORT}"
+        native = subprocess.Popen(
+            [sys.executable, str(ROOT / "mock-comfyui-server.py"), "--port", str(NATIVE_MCP_PORT), "--native-only"],
+            cwd=str(ROOT),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        wait_port(NATIVE_MCP_PORT)
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT)
+        env["PYTHONUNBUFFERED"] = "1"
+        env["EVAVO_COMFYUI_ENDPOINT"] = native_endpoint
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -153,6 +171,7 @@ class AgentIntegrationTests(unittest.TestCase):
                 "--json-response",
             ],
             cwd=str(ROOT),
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
@@ -160,19 +179,40 @@ class AgentIntegrationTests(unittest.TestCase):
             wait_port(HTTP_PORT)
             self.assertIsNone(process.poll(), "HTTP MCP server exited unexpectedly")
 
-            async def exercise() -> None:
-                async with Client(f"http://127.0.0.1:{HTTP_PORT}/mcp") as client:
-                    names = tool_names(await client.list_tools())
-                    self.assertTrue(EXPECTED_TOOLS.issubset(names), names)
+            with tempfile.TemporaryDirectory() as output_directory:
+                async def exercise() -> None:
+                    async with Client(f"http://127.0.0.1:{HTTP_PORT}/mcp") as client:
+                        names = tool_names(await client.list_tools())
+                        self.assertTrue(EXPECTED_TOOLS.issubset(names), names)
+                        result = await client.call_tool(
+                            "generate_image",
+                            {
+                                "prompt": "EVAVO MCP end-to-end image test",
+                                "project_name": "mcp_test",
+                                "width": 512,
+                                "height": 512,
+                                "steps": 2,
+                                "wait": True,
+                                "auto_start": False,
+                                "output_dir": output_directory,
+                            },
+                        )
+                        payload = result.structured_content
+                        self.assertIsInstance(payload, dict)
+                        assert isinstance(payload, dict)
+                        self.assertEqual(payload.get("status"), "completed")
+                        downloaded = payload.get("downloaded_files")
+                        self.assertIsInstance(downloaded, list)
+                        self.assertTrue(downloaded)
+                        for file_name in downloaded:
+                            path = Path(str(file_name))
+                            self.assertTrue(path.is_file(), path)
+                            self.assertGreater(path.stat().st_size, 0)
 
-            anyio.run(exercise)
+                anyio.run(exercise)
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            stop_process(process)
+            stop_process(native)
 
 
 if __name__ == "__main__":
