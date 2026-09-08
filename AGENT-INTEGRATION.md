@@ -1,28 +1,52 @@
 # EVAVO Agent Integration
 
-EVAVO exposes the same native ComfyUI generation pipeline to Claude, ChatGPT-compatible MCP clients, Codex/IDE agents, and direct Python automation.
+EVAVO exposes one native ComfyUI generation pipeline to Claude, ChatGPT-compatible MCP clients, Codex/IDE agents, direct Python automation and the `evavo.py` CLI.
+
+## Canonical Windows setup
+
+From a current checkout, the preferred setup is one command:
+
+```powershell
+.\UPDATE-AND-VERIFY-EVAVO.ps1
+```
+
+By default it:
+
+1. safely fast-forwards `main`;
+2. installs/upgrades repository dependencies including `mcp[cli]>=2,<3`;
+3. runs operational integration tests;
+4. runs negotiated MCP stdio + Streamable HTTP tests;
+5. bootstraps/selects the generation backend;
+6. installs/updates Claude Desktop stdio MCP configuration while preserving other servers;
+7. installs the current-user HTTP MCP login autostart;
+8. starts the HTTP MCP listener if it is not already running;
+9. runs `agent-doctor.py --repair` as a strict real-generation readiness gate;
+10. verifies final backend status.
+
+Use `-SkipAgentInstall` only when intentionally troubleshooting without changing local agent configuration.
 
 ## Automation contract
 
-An agent does **not** need to know how ComfyUI was installed or manually start services first.
+An agent does **not** need to know how ComfyUI was installed or manually start it first.
 
 On a generation call EVAVO can:
 
-1. check `http://127.0.0.1:8188` for a real native ComfyUI;
-2. discover a local ComfyUI source or Windows portable install;
-3. start it in the background when it is installed but offline;
-4. wait for `/system_stats` readiness;
-5. discover checkpoints from `CheckpointLoaderSimple`;
-6. queue `/prompt` with a standard or custom API workflow;
-7. poll `/history/<prompt_id>`;
-8. download `/view` outputs atomically;
-9. return concrete local file paths to the calling agent.
-
-The deterministic EVAVO mock is never accepted as a native renderer by the agent lifecycle manager.
+1. check the configured endpoint for a real native ComfyUI;
+2. reject the deterministic EVAVO mock as a renderer;
+3. discover a local source or Windows portable ComfyUI install;
+4. stop only an EVAVO-owned mock if it is occupying port 8188;
+5. start native ComfyUI in the background when installed but offline;
+6. wait for `/system_stats` readiness;
+7. discover checkpoints through `CheckpointLoaderSimple`;
+8. queue `/prompt` with the built-in or a custom API workflow;
+9. poll `/history/<prompt_id>`;
+10. download `/view` outputs atomically;
+11. persist queue/completion/failure state in the shared EVAVO task history;
+12. return concrete local file paths to the calling agent.
 
 ## ComfyUI discovery
 
-Automatic discovery checks common Windows locations including:
+Automatic discovery covers common Windows locations, sibling Git repositories, source virtual environments and portable installs, including paths such as:
 
 ```text
 C:\ComfyUI
@@ -36,17 +60,23 @@ C:\ComfyUI_windows_portable
 %USERPROFILE%\Desktop\ComfyUI
 ```
 
-For a non-standard installation set:
+For a non-standard installation:
 
 ```powershell
 $env:EVAVO_COMFYUI_HOME = "D:\AI\ComfyUI"
 ```
 
-Multiple additional search roots can be supplied with `EVAVO_COMFYUI_SEARCH_PATHS` using the platform path separator.
+To force the exact Python interpreter used to launch a source checkout:
+
+```powershell
+$env:EVAVO_COMFYUI_PYTHON = "D:\AI\ComfyUI\.venv\Scripts\python.exe"
+```
+
+Additional roots can be supplied through `EVAVO_COMFYUI_SEARCH_PATHS` using the platform path separator.
 
 ## Claude: stdio MCP
 
-The preferred Windows setup is fully automated:
+The workstation updater installs this automatically. It can also be installed independently:
 
 ```powershell
 .\INSTALL-CLAUDE-MCP.ps1
@@ -54,30 +84,34 @@ The preferred Windows setup is fully automated:
 
 The installer:
 
-- runs the MCP integration tests first;
+- runs MCP integration tests first;
 - resolves the actual Python executable;
-- uses the absolute repository path via `PYTHONPATH`;
+- uses the absolute repository path through `PYTHONPATH`;
 - backs up an existing `claude_desktop_config.json`;
-- preserves other MCP servers;
+- preserves existing MCP servers;
 - adds/updates only `evavo-local-image-generator`;
 - configures stdio MCP and the local ComfyUI endpoint.
 
 Restart Claude Desktop after installation so it reloads its MCP configuration.
 
-The underlying server command is:
+Underlying server command:
 
 ```text
 python -m evavo_local_image_generator.mcp_server --transport stdio
 ```
 
-The repository `.mcp.json` also contains a portable stdio profile for hosts that resolve the repository working directory themselves.
-
 ## ChatGPT/local MCP clients: Streamable HTTP
 
-Start the loopback MCP endpoint:
+Manual foreground start:
 
 ```powershell
 .\START-AGENT-MCP.ps1
+```
+
+Install current-user Windows login autostart and start it now:
+
+```powershell
+.\INSTALL-AGENT-MCP-AUTOSTART.ps1
 ```
 
 Default endpoint:
@@ -86,17 +120,9 @@ Default endpoint:
 http://127.0.0.1:8765/mcp
 ```
 
-Equivalent Python command:
+The HTTP transport is restricted to loopback and uses exact host/origin allowlists for the configured port with DNS-rebinding protection enabled.
 
-```powershell
-python -m evavo_local_image_generator.mcp_server `
-  --transport streamable-http `
-  --host 127.0.0.1 `
-  --port 8765 `
-  --path /mcp
-```
-
-The launcher intentionally binds only to loopback. A cloud-hosted client cannot reach workstation localhost unless the product provides a local bridge/connector. Do not expose this service to the public internet merely to make it reachable; use an authenticated connector/tunnel architecture if remote access is deliberately required.
+A cloud-hosted client cannot directly reach workstation `127.0.0.1` unless the product provides a local bridge/connector. Do not expose this listener or ComfyUI directly to the public internet just to make it reachable.
 
 ## Agent tools
 
@@ -106,12 +132,31 @@ The MCP server exposes:
 - `health_check` — backend version/device health;
 - `discover_backends` — local ComfyUI installations EVAVO can launch;
 - `list_checkpoints` — installed checkpoints;
-- `generate_image` — queue and optionally wait/download;
-- `generation_status` — inspect a prompt ID;
-- `collect_generation` — wait/download an existing prompt;
+- `generate_image` — one image, queue or wait/download, persisted to shared history;
+- `generate_batch` — bounded-concurrency multi-prompt generation, also persisted;
+- `generation_status` — inspect a prompt ID and reconcile history;
+- `collect_generation` — wait/download an existing prompt and reconcile history;
+- `task_history` — recent shared CLI + MCP generation history;
+- `task_statistics` — shared task counts by status;
 - `stop_managed_backend` — stop only native ComfyUI started by EVAVO.
 
-`generate_image` defaults to `auto_start=true` and `wait=true`, making it suitable for a one-call agent workflow.
+`generate_image` and `generate_batch` default to `auto_start=true` and `wait=true` for one-call agent workflows.
+
+## Shared task history
+
+MCP and CLI generation use the same lock-protected, atomic history file:
+
+```text
+task_history.json
+```
+
+Override its location when desired:
+
+```powershell
+$env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\image-generation-history.json"
+```
+
+This allows a Claude-generated task to be inspected later from `evavo.py tasks`, and a CLI-generated task to appear through the MCP `task_history` tool.
 
 ## Default generated files
 
@@ -127,7 +172,7 @@ Override globally:
 $env:EVAVO_GENERATION_OUTPUT_DIR = "D:\EVAVO\generated"
 ```
 
-or pass `output_dir` to the tool.
+or pass `output_dir` to a generation tool.
 
 ## Custom ComfyUI API workflow
 
@@ -137,7 +182,7 @@ For Flux, SDXL variants, custom nodes, ControlNet or other pipelines export API-
 $env:EVAVO_COMFYUI_WORKFLOW = "C:\workflows\production-api.json"
 ```
 
-The workflow loader supports placeholders inside string values:
+Supported placeholders inside string values:
 
 ```text
 {{PROMPT}}
@@ -153,27 +198,48 @@ The workflow loader supports placeholders inside string values:
 
 A tool call can also pass `workflow_path` explicitly.
 
-## Validation
+## Agent doctor
 
-Full workstation update and validation:
+Read-only diagnosis:
 
 ```powershell
-.\UPDATE-AND-VERIFY-EVAVO.ps1
+python agent-doctor.py
 ```
 
-This installs dependencies and runs:
+Strict repair/readiness gate:
+
+```powershell
+python agent-doctor.py --repair
+```
+
+With `--repair`, native ComfyUI and at least one usable checkpoint are required. The command fails rather than reporting success on the deterministic mock fallback.
+
+Machine-readable status:
+
+```powershell
+python agent-doctor.py --repair --json
+```
+
+## Validation
+
+The full workstation updater runs both suites:
 
 ```powershell
 python test-agent-integration.py
-python evavo.py bootstrap --skip-pull
+python evavo.py test
 ```
 
-Agent tests verify actual MCP negotiation and tool discovery through:
+Agent tests verify:
 
-- an in-process MCP v2 client;
-- a real stdio client/server subprocess handshake;
-- a real Streamable HTTP client/server handshake;
-- ComfyUI installation discovery.
+- MCP v2 in-process negotiation/tool discovery;
+- real stdio client/server negotiation;
+- real Streamable HTTP client/server negotiation;
+- exact advertised tool inventory;
+- ComfyUI discovery;
+- rejection of the EVAVO mock as native;
+- HTTP MCP `generate_image` end-to-end output download;
+- HTTP MCP `generate_batch` end-to-end multi-image generation;
+- shared task-history persistence and task statistics.
 
 Operational tests separately verify mock/native health, native workflow submission, output history and file downloads, batch tracking, offline behavior and controller lifecycle.
 
@@ -185,3 +251,4 @@ Operational tests separately verify mock/native health, native workflow submissi
 - An already-running user-managed ComfyUI is reused and is not stopped by EVAVO.
 - If an EVAVO-managed mock is occupying port 8188 and a native install is available, EVAVO may stop only that recorded mock PID before starting native ComfyUI.
 - Output downloads use temporary files followed by atomic replacement.
+- Legacy launchers are compatibility shims and no longer spawn persistent `cmd /k`, `-NoExit`, Ollama/Kokoro, or surprise multimodal jobs.
