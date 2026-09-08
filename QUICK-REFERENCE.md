@@ -1,171 +1,163 @@
 # EVAVO Local Image Generator - Quick Reference
 
-## Preferred commands
+## Preferred workflow
 
 ```powershell
-# Diagnose Python, files, Git state and service health
-python evavo.py doctor
-
-# First-class automated workflow: sync main -> doctor -> tests -> start -> status
+cd C:\Gitrepos\evavo-local-image-generator
 python evavo.py bootstrap
-
-# Start and verify the managed local service
-python evavo.py start
-
-# Check health
 python evavo.py status
-
-# Generate a batch
-python evavo.py generate --prompts "landscape" "portrait" "abstract" --project demo
-
-# Built-in example batch
-python evavo.py generate --examples
-
-# Task history and statistics
-python evavo.py tasks --limit 20
-python evavo.py stats
-
-# Run end-to-end operational validation
-python evavo.py test
-
-# Stop the managed service
-python evavo.py stop
 ```
 
-## Windows workstation update
+`bootstrap` syncs `main`, diagnoses the environment, runs integration tests, uses a healthy native ComfyUI if one is already running, otherwise starts the managed mock fallback, then verifies health.
 
-If the checkout predates `evavo.py`, fast-forward it once:
+## Real image generation
+
+Queue only:
 
 ```powershell
-git pull --ff-only origin main
+python evavo.py generate --prompts "PS1 horror corridor" --project ps1
 ```
 
-After that, either use the Python controller:
+Render, wait, and download the actual image:
 
 ```powershell
-python evavo.py bootstrap
+python generate-batch.py --prompts "PS1 horror corridor" --project ps1 --wait
 ```
 
-or the PowerShell wrapper:
+Custom output directory:
 
 ```powershell
-.\UPDATE-AND-VERIFY-EVAVO.ps1
+python generate-batch.py --prompts "PS1 horror corridor" --project ps1 --wait --output-dir "C:\EVAVO\Generated"
 ```
 
-Both paths refuse destructive Git updates. `bootstrap` uses `git pull --ff-only` and stops when local changes would need to be overwritten.
+Custom API workflow:
 
-## Direct utility commands
+```powershell
+python generate-batch.py --prompts "PS1 horror corridor" --workflow "C:\EVAVO\workflows\workflow-api.json" --wait
+```
+
+## Controller
 
 | Operation | Command |
 |---|---|
-| Doctor JSON | `python evavo.py doctor --json` |
-| Sync main | `python evavo.py sync` |
-| One-shot health | `python monitor-evavo.py` |
-| Health JSON | `python monitor-evavo.py --json` |
-| Continuous health | `python monitor-evavo.py --continuous --interval 10` |
-| Batch examples | `python generate-batch.py --examples` |
-| Batch JSON | `python generate-batch.py --prompts "one" "two" --json` |
-| Set concurrency | `python generate-batch.py --examples --concurrency 4` |
-| List tasks | `python task-tracker.py list --limit 20` |
-| Task stats | `python task-tracker.py stats` |
-| Filter project | `python task-tracker.py list --project demo` |
-| Mark completed | `python task-tracker.py update <TASK_ID> completed` |
-| Clear history | `python task-tracker.py clear --yes` |
+| Diagnose | `python evavo.py doctor` |
+| Sync `main` | `python evavo.py sync` |
+| Full bootstrap | `python evavo.py bootstrap` |
+| Start/select backend | `python evavo.py start` |
+| Backend status | `python evavo.py status` |
+| Queue batch | `python evavo.py generate --prompts "one" "two" --project demo` |
+| Tasks | `python evavo.py tasks --limit 20` |
+| Statistics | `python evavo.py stats` |
+| Integration tests | `python evavo.py test` |
+| Stop EVAVO-owned mock | `python evavo.py stop` |
+
+## Direct generation/wrapper operations
+
+| Operation | Command |
+|---|---|
+| Queue batch | `python generate-batch.py --prompts "one" "two"` |
+| Render + collect | `python generate-batch.py --prompts "one" --wait` |
+| Machine JSON | `python generate-batch.py --prompts "one" --wait --json` |
 | Wrapper health | `python evavo-wrapper.py health_check "{}"` |
-| Windows startup | `START-EVAVO-SERVICES.bat` |
+| Task status | `python evavo-wrapper.py task_status "{\"task_id\":\"<id>\"}"` |
+| Wait + collect existing task | `python evavo-wrapper.py wait_image "{\"task_id\":\"<id>\"}"` |
+| Monitor | `python monitor-evavo.py --json` |
 
-## Runtime files
-
-| Component | File | Purpose |
-|---|---|---|
-| Unified controller | `evavo.py` | Doctor/sync/bootstrap/start/stop/status/generate/tasks/test |
-| Shared operations | `evavo_operations.py` | HTTP contract, health validation, durable task history |
-| Mock service | `mock-comfyui-server.py` | Local ComfyUI-compatible queue API |
-| Wrapper | `evavo-wrapper.py` | Stable machine-readable generation/health CLI |
-| Batch | `generate-batch.py` | Bounded concurrent queueing + tracking |
-| Monitor | `monitor-evavo.py` | Service and wrapper health |
-| Tracker | `task-tracker.py` | Task history CLI |
-| Windows launcher | `START-EVAVO-SERVICES.bat` | Thin launcher around `evavo.py doctor/start/status` |
-| Windows updater | `UPDATE-AND-VERIFY-EVAVO.ps1` | Safe update + bootstrap |
-| Integration tests | `test-operations.py` | End-to-end operational validation, including controller lifecycle |
-
-## HTTP endpoints
+## Backend detection
 
 Default endpoint: `http://127.0.0.1:8188`
 
-| Endpoint | Method | Purpose |
-|---|---|---|
-| `/system` | GET | Identity/readiness contract |
-| `/api/status` | GET | Queue/service status |
-| `/api/prompt` | POST | Queue an image-generation task |
+The tools detect in this order:
 
-Healthy `/system` responses identify:
+1. EVAVO compatibility service via `/system`.
+2. Native ComfyUI via `/system_stats`.
+3. `evavo.py start` launches the mock fallback only when neither is available.
 
-```json
-{
-  "service": "evavo-local-image-generator",
-  "protocol_version": 1,
-  "status": "ready"
-}
-```
-
-The Python controller also supports isolated loopback ports for testing, for example:
-
-```powershell
-python evavo.py start --endpoint http://127.0.0.1:18190
-python evavo.py status --endpoint http://127.0.0.1:18190
-python evavo.py stop
-```
-
-## Exit codes
-
-| Code | Meaning |
-|---:|---|
-| `0` | Success |
-| `1` | General or partial failure |
-| `2` | Invalid argument/configuration/prerequisite |
-| `3` | Service/wrapper unavailable, degraded, or startup timeout |
-| `4` | Task not found |
-
-## Local state
+Native ComfyUI routes used by EVAVO:
 
 ```text
-.evavo/operations-service.json   managed service PID/state
-.evavo/mock-service.log          managed service log
-task_history.json                persistent generation history
-task_history.json.lock           inter-process history lock
+GET  /system_stats
+GET  /object_info/CheckpointLoaderSimple
+POST /prompt
+GET  /history/{prompt_id}
+GET  /view?filename=...&subfolder=...&type=...
 ```
 
-Override task history location:
+EVAVO mock compatibility routes:
 
-```powershell
-$env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\task_history.json"
+```text
+GET  /system
+GET  /api/status
+POST /api/prompt
 ```
 
-Override service endpoint:
+## Model/workflow configuration
+
+Built-in workflow checkpoint override:
 
 ```powershell
-$env:COMFYUI_ENDPOINT = "http://127.0.0.1:8188"
+$env:EVAVO_COMFYUI_CHECKPOINT = "your-model.safetensors"
 ```
 
-## Common failures
+Custom ComfyUI API workflow:
 
 ```powershell
-# Diagnose environment and stale checkout issues
+$env:EVAVO_COMFYUI_WORKFLOW = "C:\EVAVO\workflows\workflow-api.json"
+```
+
+Template placeholders:
+
+```text
+{{prompt}} {{negative_prompt}} {{checkpoint}}
+{{width}} {{height}} {{steps}} {{cfg_scale}}
+{{seed}} {{filename_prefix}}
+```
+
+## MCP agent integration
+
+Install repository dependencies:
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+Run the MCP stdio server directly:
+
+```powershell
+python -m evavo_local_image_generator.mcp_server
+```
+
+Agent tools:
+
+```text
+health_check
+list_checkpoints
+generate_image
+generation_status
+collect_generation
+```
+
+The MCP server uses the current SDK v2 line and `generate_image` waits for the real output by default.
+
+## State/output files
+
+```text
+.evavo/operations-service.json   EVAVO-owned mock PID/state
+.evavo/mock-service.log          managed mock log
+.evavo/outputs/                  default downloaded native images
+task_history.json                generation history
+task_history.json.lock           inter-process lock
+```
+
+## Important recovery commands
+
+```powershell
 python evavo.py doctor
-
-# Detailed health
 python monitor-evavo.py --json
-
-# Full operational validation
 python evavo.py test
-
-# Managed service log
 Get-Content .\.evavo\mock-service.log -Tail 100
 ```
 
-Python 3.10+ already includes `asyncio`. Do not install the PyPI `asyncio` package for this repository. `evavo.py doctor` warns if `asyncio` resolves from `site-packages` instead of the standard library.
+Python 3.10+ already contains `asyncio`. Do **not** install the separate PyPI `asyncio` package for this repository.
 
-Do **not** broadly run `taskkill /IM python.exe`; the process tooling is designed to avoid killing unrelated Python processes.
-
-See `OPERATIONS-GUIDE.md` for deployment, recovery, storage URI, security and troubleshooting details.
+Do **not** use broad `taskkill /IM python.exe`; EVAVO only stops processes it owns.
