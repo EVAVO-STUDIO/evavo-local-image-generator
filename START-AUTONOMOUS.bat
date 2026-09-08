@@ -1,44 +1,30 @@
 @echo off
-REM EVAVO Quick Start - Windows Batch File
-REM Single command to start complete autonomous system
+setlocal EnableExtensions
 
-setlocal enabledelayedexpansion
+REM Compatibility shim retained for old EVAVO shortcuts.
+REM The former version invoked MASTER-AUTOMATION-CONTROLLER.ps1 and paused in
+REM console windows. Agent setup and lifecycle now live in the canonical tools.
 
-echo.
-echo ======================================================================
-echo   EVAVO AUTONOMOUS IMAGE GENERATION
-echo ======================================================================
-echo.
+set "ROOT=%~dp0"
+pushd "%ROOT%" >nul
+set "PYTHON=%ROOT%.venv\Scripts\python.exe"
+if not exist "%PYTHON%" set "PYTHON=python"
 
-REM Change to repository directory
-cd /d "C:\Gitrepos\evavo-local-image-generator"
+echo START-AUTONOMOUS.bat now validates the canonical EVAVO agent stack.
 
+"%PYTHON%" "%ROOT%agent-doctor.py" --repair
 if errorlevel 1 (
-    echo ERROR: Repository not found at C:\Gitrepos\evavo-local-image-generator
-    pause
-    exit /b 1
+    set "CODE=%errorlevel%"
+    popd >nul
+    exit /b %CODE%
 )
 
-REM Run PowerShell automation
-echo Starting complete automation system...
-echo.
-
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "& '.\MASTER-AUTOMATION-CONTROLLER.ps1' -Mode Full"
-
-if errorlevel 1 (
-    echo.
-    echo AUTOMATION FAILED - Check logs at: C:\Gitrepos\evavo-logs\
-    pause
-    exit /b 1
-)
+"%PYTHON%" "%ROOT%evavo.py" status
+set "CODE=%errorlevel%"
 
 echo.
-echo ======================================================================
-echo   GENERATION COMPLETE
-echo ======================================================================
-echo.
-echo Images saved to: C:\Gitrepos\evavo-generations\
-echo Logs saved to: C:\Gitrepos\evavo-logs\
-echo.
-pause
+echo EVAVO agent backend is ready.
+echo Claude uses stdio MCP; local HTTP MCP uses http://127.0.0.1:8765/mcp.
+
+popd >nul
+exit /b %CODE%
