@@ -1,307 +1,284 @@
 # EVAVO Local Image Generator
 
-Multi-modal AI generation bridge for the EVAVO platform. Provides unified interface for image, video, audio, text, particle, 3D model, and PBR texture generation using local ComfyUI, Ollama, and Kokoro FastAPI backends.
+Local-first image generation and automation for EVAVO Studio. The repository now provides one operational path for humans, Python automation, and MCP agents, with **native ComfyUI preferred automatically** and a deterministic mock backend available for testing/fallback.
 
-## Architecture
+## What is real
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ evavo-local-image-generator (This repo)                     │
-│ ├─ MCP Server (evavo_local_image_generator.mcp_server)      │
-│ ├─ Generation (evavo_local_image_generator.scripts.generate)│
-│ ├─ Storage Integration (scripts.storage)                    │
-│ └─ Workflows (scripts.workflows)                            │
-└─────────────────────────────────────────────────────────────┘
-          ↓                              ↓                      ↓
-┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐
-│ evavo-local-storage  │  │ evavo-local-compute  │  │  evavo-storage   │
-│ (BeeStation access   │  │ (Digest-bound tasks) │  │ (Immutable milestones)
-│  via bee:// URIs)    │  │                      │  │                  │
-└──────────────────────┘  └──────────────────────┘  └──────────────────┘
-          ↓
-   //beestation/shares (Synology NAS)
-   ├── EVAVO/ImageGeneration/
-   │   ├── outputs/
-   │   ├── workflows/
-   │   └── models/
-   ├── AI/Models/
-   └── Projects/
-```
+- Native ComfyUI detection through `/system_stats`.
+- Checkpoint discovery through `/object_info/CheckpointLoaderSimple`.
+- API-format workflow submission through `/prompt`.
+- Prompt status/output discovery through `/history/{prompt_id}`.
+- Image collection through `/view`.
+- Built-in standard txt2img workflow using normal ComfyUI nodes.
+- Custom API-workflow templates for Flux/custom-node/other pipelines.
+- Bounded concurrent batch queueing.
+- Optional wait-until-complete + automatic file download.
+- Durable lock-protected task history.
+- Python lifecycle/health/bootstrap controller.
+- MCP Python SDK v2 stdio tools for agents.
+- Mock/native simulation integration tests.
 
-## Features
+The managed mock service is a queue/API simulator used when real ComfyUI is not running. It is not presented as a renderer.
 
-- **Multi-Modal Generation**: Images, video, audio, text, particles, 3D models, PBR textures
-- **Local Inference**: ComfyUI, Ollama, Kokoro FastAPI on Windows workstation
-- **BeeStation Integration**: Network storage via bee:// URI abstraction
-- **Digest-Bound Execution**: Secure task validation through evavo-local-compute
-- **Immutable Milestones**: Version control via evavo-storage handoff
-- **MCP Protocol**: Model Context Protocol for Claude integration
+## Requirements
 
-## Storage Architecture
+- Python 3.10+
+- A local ComfyUI instance for real rendering, normally at `http://127.0.0.1:8188`
+- At least one compatible model/checkpoint or a custom ComfyUI API workflow
 
-All file operations use **bee:// URIs** managed by evavo-local-storage. Never access Windows paths directly.
+Install the full repository dependencies:
 
-### Storage Paths
-
-```
-bee://primary/EVAVO/ImageGeneration/          - Primary image generation directory
-  ├── outputs/                                 - Generated images and metadata
-  ├── workflows/                               - ComfyUI workflow definitions
-  └── models/                                  - Local model checkpoints
-
-bee://primary/EVAVO/AI/Models/                 - Shared AI model storage
-  ├── diffusion/                               - Stable Diffusion checkpoints
-  ├── upscalers/                               - Super-resolution models
-  └── lora/                                    - LoRA fine-tuning weights
-
-bee://primary/Projects/<project-name>/        - Project-specific outputs
+```powershell
+python -m pip install -r requirements.txt
 ```
 
-## Installation
+Do not install the PyPI package named `asyncio`; supported Python versions already include `asyncio` in the standard library.
 
-```bash
-# Clone repository
-git clone https://github.com/evavo/evavo-local-image-generator.git
-cd evavo-local-image-generator
+## First run on Windows
 
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
+```powershell
+cd C:\Gitrepos\evavo-local-image-generator
+git pull --ff-only origin main
+python -m pip install -r requirements.txt
+python evavo.py doctor
+python evavo.py test
+python evavo.py start
+python evavo.py status
 ```
 
-## Usage
+Or use the automated controller:
 
-### As MCP Server
-
-Configure in your Claude Code or MCP client:
-
-```json
-{
-  "mcpServers": {
-    "evavo-local-image-generator": {
-      "command": "./.venv/Scripts/python.exe",
-      "args": ["-m", "evavo_local_image_generator.mcp_server"],
-      "env": {
-        "EVAVO_LOCAL_IMAGE_GENERATOR_MODE": "production",
-        "EVAVO_LOCAL_IMAGE_GENERATOR_STORAGE": "bee://primary/EVAVO/ImageGeneration",
-        "EVAVO_COMFYUI_ENDPOINT": "http://127.0.0.1:8188"
-      }
-    }
-  }
-}
+```powershell
+python evavo.py bootstrap
 ```
 
-### Programmatic Usage
+`bootstrap` fast-forwards `main`, runs diagnostics/tests, uses an already-running native ComfyUI when available, otherwise starts the managed mock fallback, and verifies the final backend health.
 
-```python
-from evavo_local_image_generator.scripts.generate import generate_images
-import asyncio
+## Generate images
 
-# Generate batch of images
-prompts = [
-    "a serene mountain landscape at sunset",
-    "a futuristic city skyline at night",
-    "a cozy cabin in the forest"
-]
+Queue work without waiting:
 
-results = asyncio.run(generate_images(
-    prompts=prompts,
-    output_project="landscapes",
-    steps=20,
-    width=768,
-    height=512
-))
-
-for result in results:
-    print(f"Generated: {result['task_id']}")
-    print(f"Storage URI: {result['storage_uri']}")
+```powershell
+python evavo.py generate --prompts "cinematic industrial harbour at night" --project harbour
 ```
 
-## API Reference
+For a real ComfyUI render and downloaded output:
 
-### Tools
-
-#### `generate_image`
-Generate a single image from a text prompt.
-
-**Parameters:**
-- `prompt` (string, required): Text prompt for generation
-- `negative_prompt` (string): Features to avoid
-- `width` (integer, default 512): Output width in pixels
-- `height` (integer, default 512): Output height in pixels
-- `steps` (integer, default 20): Inference steps
-- `cfg_scale` (float, default 7.5): Guidance scale
-- `project_name` (string): Optional project context
-
-**Returns:**
-```json
-{
-  "task_id": "abc123def456",
-  "digest": "sha256-hash",
-  "storage_uri": "bee://primary/EVAVO/ImageGeneration/outputs",
-  "status": "queued"
-}
+```powershell
+python generate-batch.py --prompts "cinematic industrial harbour at night" --project harbour --wait
 ```
 
-#### `batch_generate_images`
-Generate multiple images efficiently.
+Default downloaded native outputs are written below:
 
-**Parameters:**
-- `prompts` (array of strings, required): List of prompts
-- `project_name` (string): Project for organizing outputs
-- (other parameters same as `generate_image`)
-
-#### `get_storage_paths`
-Get bee:// URIs for storage locations.
-
-**Parameters:**
-- `location_type` (string, required): outputs, models, workflows, or projects
-- `project_name` (string): For projects location
-
-#### `get_generation_status`
-Check status of generation tasks.
-
-**Parameters:**
-- `task_id` (string): Task ID to check
-
-## Digest-Bound Task Manifest
-
-See `evavo-repository-task-manifest.json` for complete task definitions including:
-- Image generation via ComfyUI
-- Batch processing
-- Video generation (planning)
-- Workflow execution
-- Texture generation (planning)
-- 3D model generation (planning)
-- Audio/music generation (planning)
-
-Each task includes:
-- Script entry points
-- Parameter schemas
-- Storage paths (bee:// URIs)
-- Resource requirements
-- Digest validation fields
-
-## Integration with EVAVO Infrastructure
-
-### evavo-local-storage (0.31.0+)
-Provides bee:// URI resolution and BeeStation SMB/CIFS access.
-
-**Never** assume hosted Claude can see Windows paths. Always use:
-```python
-from evavo_local_image_generator.scripts.storage import get_storage_client
-
-client = get_storage_client()
-outputs_uri = client.get_outputs_path()  # "bee://primary/EVAVO/ImageGeneration/outputs"
+```text
+.evavo/outputs/
 ```
 
-### evavo-local-compute
-Executes generation tasks with digest-bound validation. Tasks record their digest in the manifest for secure execution across the network.
+Choose another directory:
 
-### evavo-storage
-Upon completion, outputs are handed off to evavo-storage for immutable versioning and archival.
+```powershell
+python generate-batch.py --prompts "PS1 survival horror corridor" --project ps1 --wait --output-dir "C:\EVAVO\Generated"
+```
 
-## Backend Services
+Machine-readable output:
 
-Ensure these services are running on the workstation:
+```powershell
+python generate-batch.py --prompts "test image" --wait --json
+```
 
-### ComfyUI
-- **Port**: 8188
-- **Health Check**: `curl http://127.0.0.1:8188/status`
-- **Start Command**: See evavo-local-storage bootstrap
+## Backend selection
 
-### Ollama (Optional)
-- **Port**: 11434
-- **Models**: Qwen3.5, Mistral, etc. (12GB VRAM workstation)
+The operational tools try the endpoint in this order:
 
-### Kokoro FastAPI (Optional)
-- **Port**: 8000
-- **Purpose**: Text-to-speech
+1. EVAVO compatibility service (`/system`).
+2. Native ComfyUI (`/system_stats`).
+3. If `evavo.py start` finds neither, it starts the managed mock fallback.
 
-## Testing
+A running native ComfyUI is never killed or replaced by the mock.
 
-```bash
-# Run unit tests
-python -m pytest tests/
+Configure another local endpoint:
 
-# Test MCP server
+```powershell
+$env:COMFYUI_ENDPOINT = "http://127.0.0.1:8188"
+$env:EVAVO_COMFYUI_ENDPOINT = "http://127.0.0.1:8188"
+```
+
+## Checkpoints
+
+When using the built-in workflow, EVAVO reads checkpoints from ComfyUI's `CheckpointLoaderSimple` node. It uses `EVAVO_COMFYUI_CHECKPOINT` when set, otherwise the first reported checkpoint.
+
+```powershell
+$env:EVAVO_COMFYUI_CHECKPOINT = "your-model.safetensors"
+```
+
+The built-in graph is intended for conventional checkpoint pipelines that work with:
+
+- `CheckpointLoaderSimple`
+- `CLIPTextEncode`
+- `EmptyLatentImage`
+- `KSampler`
+- `VAEDecode`
+- `SaveImage`
+
+## Custom ComfyUI workflow templates
+
+For Flux, custom nodes, specialist models, or any graph that does not fit the built-in workflow, export a workflow in **ComfyUI API format** and set:
+
+```powershell
+$env:EVAVO_COMFYUI_WORKFLOW = "C:\EVAVO\workflows\my-api-workflow.json"
+```
+
+Or per command:
+
+```powershell
+python generate-batch.py --prompts "my prompt" --workflow "C:\EVAVO\workflows\my-api-workflow.json" --wait
+```
+
+Supported template placeholders are recursively replaced:
+
+```text
+{{prompt}}
+{{negative_prompt}}
+{{checkpoint}}
+{{width}}
+{{height}}
+{{steps}}
+{{cfg_scale}}
+{{seed}}
+{{filename_prefix}}
+```
+
+When a JSON value is exactly a placeholder, numeric replacements remain numeric rather than becoming strings.
+
+## Wrapper API
+
+Health:
+
+```powershell
+python evavo-wrapper.py health_check "{}"
+```
+
+Queue:
+
+```powershell
+python evavo-wrapper.py generate_image "{\"prompt\":\"test\",\"project_name\":\"demo\"}"
+```
+
+Queue, wait, and download:
+
+```powershell
+python evavo-wrapper.py generate_image "{\"prompt\":\"test\",\"project_name\":\"demo\",\"wait\":true}"
+```
+
+Status:
+
+```powershell
+python evavo-wrapper.py task_status "{\"task_id\":\"<prompt-id>\"}"
+```
+
+Wait/collect an existing prompt:
+
+```powershell
+python evavo-wrapper.py wait_image "{\"task_id\":\"<prompt-id>\",\"wait_timeout\":600}"
+```
+
+Wrapper stdout is exactly one JSON object so agents can consume it safely.
+
+## Task history
+
+```powershell
+python evavo.py tasks
+python evavo.py stats
+python task-tracker.py list --project demo --json
+```
+
+History defaults to `task_history.json`. Writes use an inter-process lock and atomic replacement.
+
+## MCP agent integration
+
+The repository uses the current MCP Python SDK v2 line (`mcp>=2,<3`). `.mcp.json` launches:
+
+```text
 python -m evavo_local_image_generator.mcp_server
-
-# Test generation
-python -m evavo_local_image_generator.scripts.generate
 ```
 
-## Configuration
+The server exposes real tools:
 
-Environment variables:
+- `health_check`
+- `list_checkpoints`
+- `generate_image`
+- `generation_status`
+- `collect_generation`
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `EVAVO_LOCAL_IMAGE_GENERATOR_MODE` | development | Operation mode (development/production) |
-| `EVAVO_LOCAL_IMAGE_GENERATOR_STORAGE` | bee://primary/EVAVO/ImageGeneration | Base storage URI |
-| `EVAVO_COMFYUI_ENDPOINT` | http://127.0.0.1:8188 | ComfyUI API endpoint |
-| `EVAVO_OLLAMA_ENDPOINT` | http://127.0.0.1:11434 | Ollama API endpoint |
-| `EVAVO_TTS_ENDPOINT` | http://127.0.0.1:8000 | Kokoro FastAPI endpoint |
+`generate_image` waits for the rendered image by default for agent callers and returns concrete downloaded file paths. Unsupported video/audio/3D modes are not falsely advertised as completed or queued.
 
-## File Organization
+## Programmatic Python
 
-```
-evavo-local-image-generator/
-├── evavo_local_image_generator/              # Python package
-│   ├── __init__.py                           # Package initialization
-│   ├── mcp_server.py                         # MCP protocol implementation
-│   ├── scripts/
-│   │   ├── __init__.py
-│   │   ├── storage.py                        # BeeStation storage client
-│   │   ├── generate.py                       # Generation orchestration
-│   │   ├── workflows.py                      # ComfyUI workflow execution
-│   │   └── batch.py                          # Batch processing
-│   ├── workflows/                            # ComfyUI workflow files
-│   │   ├── stable_diffusion_basic.json
-│   │   └── ...
-│   └── tests/
-│       ├── __init__.py
-│       ├── test_generation.py
-│       └── test_storage.py
-├── evavo-repository-task-manifest.json       # Digest-bound task definitions
-├── .mcp.json                                 # MCP server configuration
-├── CLAUDE.md                                 # Operating notes for Claude
-├── requirements.txt                          # Python dependencies
-├── README.md                                 # This file
-└── .git/                                     # Version control
+```python
+import asyncio
+from evavo_local_image_generator.scripts.generate import generate_images
+
+results = asyncio.run(
+    generate_images(
+        ["a storm over a 1990s industrial city"],
+        output_project="demo",
+        width=768,
+        height=512,
+        steps=24,
+    )
+)
+
+print(results)
 ```
 
-## Key Constraints
+This path submits real native ComfyUI work; it no longer fabricates queue IDs.
 
-1. **Never assume hosted Claude sees Windows paths** - Use bee:// URIs exclusively
-2. **No intermediate staging on C: drive** - All operations via BeeStation
-3. **Digest-bound tasks only** - Execute through evavo-local-compute with validation
-4. **Immutable milestones** - Hand off canonical outputs via evavo-storage
-5. **No raw UNC paths** - Never use //beestation/shares directly
+## Validation
 
-## Contributing
+Run:
 
-1. Create feature branch from main
-2. Implement changes following the module structure
-3. Add digest-bound task definition to manifest if adding new capability
-4. Test with local ComfyUI, Ollama, and Kokoro services
-5. Commit with proper attribution
-6. Submit pull request
+```powershell
+python evavo.py test
+```
 
-## License
+The integration suite exercises isolated loopback services and verifies:
 
-Part of the EVAVO Platform. See LICENSE.
+- EVAVO mock health/queue behavior;
+- native ComfyUI detection;
+- checkpoint discovery;
+- standard workflow submission;
+- native prompt IDs;
+- history/output parsing;
+- `/view` file download;
+- custom workflow substitution;
+- concurrent batch tracking;
+- offline failure exit codes;
+- native-backend preference;
+- managed mock `start -> status -> stop` lifecycle.
 
-## Support
+## Security baseline
 
-For issues and questions, refer to:
-- evavo-local-storage documentation for BeeStation access
-- evavo-local-compute documentation for digest-bound execution
-- evavo-storage documentation for immutable handoff
+- Managed services bind to loopback only.
+- Native output downloads are capped at 256 MiB per file by default.
+- Download destinations use a sanitized basename, preventing ComfyUI filenames from escaping the configured local output directory.
+- Task history uses locking and atomic replacement.
+- Startup never performs broad `taskkill /IM python.exe` termination.
+- Native ComfyUI is treated as externally owned; `evavo.py stop` stops only the mock process that EVAVO itself started.
 
----
+## Main operational files
 
-Built for the EVAVO Platform's unified multi-modal AI generation infrastructure.
+```text
+evavo.py                                  unified lifecycle/controller
+evavo-wrapper.py                          stable JSON wrapper
+evavo_operations.py                       HTTP + task primitives
+generate-batch.py                         concurrent generation / optional wait
+monitor-evavo.py                          mock/native backend health
+task-tracker.py                           durable task history CLI
+mock-comfyui-server.py                    deterministic test/fallback simulator
+test-operations.py                        end-to-end operational tests
+evavo_local_image_generator/backends/
+  comfyui_backend.py                      native ComfyUI implementation
+evavo_local_image_generator/mcp_server.py MCP v2 stdio agent server
+```
+
+See `OPERATIONS-GUIDE.md` and `QUICK-REFERENCE.md` for operational commands and recovery guidance.
