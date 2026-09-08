@@ -1,47 +1,38 @@
 @echo off
-REM EVAVO Full Generation - Starts all services and runs complete generation
+setlocal EnableExtensions
 
-echo ========================================================================
-echo  EVAVO MULTI-MODAL GENERATION SYSTEM
-echo  Starting all services and running full content generation
-echo ========================================================================
-echo.
+REM Compatibility shim retained for old shortcuts.
+REM The former implementation opened persistent ComfyUI/Ollama consoles,
+REM executed legacy multimodal generation and copied to hardcoded user paths.
 
-REM Start ComfyUI in background
-echo Starting ComfyUI server...
-start "ComfyUI Server" cmd /k "cd C:\AI\ComfyUI && python main.py"
-timeout /t 5 /nobreak
+set "ROOT=%~dp0"
+pushd "%ROOT%" >nul
+set "PYTHON=%ROOT%.venv\Scripts\python.exe"
+if not exist "%PYTHON%" set "PYTHON=python"
 
-REM Start Ollama in background  
-echo Starting Ollama server...
-start "Ollama Server" cmd /k "ollama serve"
-timeout /t 3 /nobreak
+echo FULL-GENERATION-START.bat now uses the canonical EVAVO image-generation lifecycle.
 
-REM Run full test generation
-echo.
-echo Running full 71-test generation suite...
-echo This will generate images, videos, audio, text, particles, 3D models, and textures
-echo Expected time: 45 minutes to 2 hours depending on GPU
-echo.
-cd /d C:\Gitrepos\evavo-local-image-generator
-python COMPLETE-MULTIMODAL-TEST.py --execute
-
-REM Copy to beestation
-echo.
-echo Copying all generated files to C:\Users\User\beestation\...
-if not exist "C:\Users\User\beestation\evavo-generation" mkdir "C:\Users\User\beestation\evavo-generation"
-
-for %%D in (evavo-images evavo-videos evavo-audio evavo-text evavo-particles evavo-models evavo-textures evavo-state evavo-generations) do (
-    if exist "%%D" (
-        echo Copying %%D...
-        xcopy "%%D" "C:\Users\User\beestation\evavo-generation\%%D" /E /I /Y
-    )
+"%PYTHON%" "%ROOT%evavo.py" start --no-mock
+if errorlevel 1 (
+    set "CODE=%errorlevel%"
+    popd >nul
+    exit /b %CODE%
 )
 
-echo.
-echo ========================================================================
-echo GENERATION COMPLETE
-echo All files copied to: C:\Users\User\beestation\evavo-generation\
-echo ========================================================================
-pause
+"%PYTHON%" "%ROOT%agent-doctor.py" --repair --skip-tests
+if errorlevel 1 (
+    set "CODE=%errorlevel%"
+    popd >nul
+    exit /b %CODE%
+)
 
+"%PYTHON%" "%ROOT%evavo.py" status
+set "CODE=%errorlevel%"
+
+echo.
+echo No automatic multimodal generation or BeeStation copy is performed anymore.
+echo Generate explicitly with:
+echo   python evavo.py generate --prompts "your prompt" --project demo --wait
+
+popd >nul
+exit /b %CODE%
