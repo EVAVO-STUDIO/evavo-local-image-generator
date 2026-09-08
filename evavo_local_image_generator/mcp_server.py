@@ -47,21 +47,55 @@ async def _ensure(auto_start: bool = True, wait_seconds: float = 90.0) -> Dict[s
     return await asyncio.to_thread(ensure_comfyui, _endpoint(), wait_seconds=wait_seconds, allow_start=auto_start)
 
 
-async def _track_queued(task_id: str, prompt: str, project_name: str) -> Optional[str]:
+async def _track_queued(
+    task_id: str,
+    prompt: str,
+    project_name: str,
+    *,
+    backend_mode: Optional[str] = None,
+    checkpoint: Optional[str] = None,
+    workflow_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
+) -> Optional[str]:
     try:
-        await asyncio.to_thread(_tracker().add_task, task_id, prompt, "queued", project_name=project_name)
+        await asyncio.to_thread(
+            _tracker().add_task,
+            task_id,
+            prompt,
+            "queued",
+            project_name=project_name,
+            backend_mode=backend_mode,
+            checkpoint=checkpoint,
+            workflow_path=workflow_path,
+            output_dir=output_dir,
+        )
         return None
-    except Exception as exc:  # tracking must never hide a successful generation
+    except Exception as exc:  # tracking must never hide successful generation
         return str(exc)
 
 
-async def _track_update(task_id: str, status: str, *, output_uri: Optional[str] = None, error_message: Optional[str] = None) -> Optional[str]:
+async def _track_update(
+    task_id: str,
+    status: str,
+    *,
+    output_uris: Optional[List[str]] = None,
+    output_dir: Optional[str] = None,
+    backend_mode: Optional[str] = None,
+    checkpoint: Optional[str] = None,
+    workflow_path: Optional[str] = None,
+    error_code: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> Optional[str]:
     try:
-        kwargs: Dict[str, Any] = {}
-        if output_uri:
-            kwargs["output_uri"] = output_uri
-        if error_message:
-            kwargs["error_message"] = error_message
+        kwargs: Dict[str, Any] = {
+            "output_uris": output_uris,
+            "output_dir": output_dir,
+            "backend_mode": backend_mode,
+            "checkpoint": checkpoint,
+            "workflow_path": workflow_path,
+            "error_code": error_code,
+            "error_message": error_message,
+        }
         await asyncio.to_thread(_tracker().update_task, task_id, status, **kwargs)
         return None
     except KeyError:
@@ -119,6 +153,10 @@ async def _generate_image_impl(
                 prompt,
                 "failed",
                 project_name=project_name,
+                backend_mode="native-comfyui",
+                checkpoint=checkpoint,
+                workflow_path=workflow_path,
+                output_dir=output_dir,
                 error_code="GENERATION_START_FAILED",
                 error_message=str(exc),
             )
@@ -133,26 +171,55 @@ async def _generate_image_impl(
         }
 
     task_id = str(result["task_id"])
-    tracking_warning = await _track_queued(task_id, prompt, project_name)
+    effective_checkpoint = result.get("checkpoint")
+    effective_backend = str(result.get("backend_mode") or "native-comfyui")
+    target = _output_dir(project_name, output_dir) if wait or output_dir else None
+    tracking_warning = await _track_queued(
+        task_id,
+        prompt,
+        project_name,
+        backend_mode=effective_backend,
+        checkpoint=str(effective_checkpoint) if effective_checkpoint else None,
+        workflow_path=workflow_path,
+        output_dir=str(target) if target else output_dir,
+    )
     result.update({"ok": True, "prompt": prompt, "project_name": project_name})
+    if workflow_path:
+        result["workflow_path"] = workflow_path
     if tracking_warning:
         result["tracking_warning"] = tracking_warning
 
     if not wait:
         return result
 
-    target = _output_dir(project_name, output_dir)
+    assert target is not None
     try:
         downloaded = await asyncio.to_thread(backend.wait_and_download, task_id, target, timeout=wait_timeout)
     except Exception as exc:
-        warning = await _track_update(task_id, "failed", error_message=str(exc))
+        warning = await _track_update(
+            task_id,
+            "failed",
+            output_dir=str(target),
+            backend_mode=effective_backend,
+            checkpoint=str(effective_checkpoint) if effective_checkpoint else None,
+            workflow_path=workflow_path,
+            error_code="GENERATION_WAIT_FAILED",
+            error_message=str(exc),
+        )
         result.update({"ok": False, "status": "failed", "error_code": "GENERATION_WAIT_FAILED", "message": str(exc), "output_dir": str(target)})
         if warning:
             result["tracking_warning"] = warning
         return result
 
-    first_output = downloaded[0] if downloaded else None
-    warning = await _track_update(task_id, "completed", output_uri=first_output)
+    warning = await _track_update(
+        task_id,
+        "completed",
+        output_uris=[str(item) for item in downloaded],
+        output_dir=str(target),
+        backend_mode=effective_backend,
+        checkpoint=str(effective_checkpoint) if effective_checkpoint else None,
+        workflow_path=workflow_path,
+    )
     result.update({"status": "completed", "downloaded_files": downloaded, "output_dir": str(target)})
     if warning:
         result["tracking_warning"] = warning
@@ -239,11 +306,19 @@ async def generate_batch(
     concurrency: int = 2,
     auto_start: bool = True,
 ) -> Dict[str, Any]:
-    """Generate multiple prompts with bounded concurrency. Every item is persisted to the shared EVAVO task history."""
+    """Generate multiple prompts with bounded concurrency. Every item is persisted to shared EVAVO task history."""
     if not isinstance(prompts, list) or not prompts:
         return {"ok": False, "status": "failed", "error_code": "INVALID_PROMPTS", "message": "prompts must be a non-empty list"}
     if len(prompts) > 100:
         return {"ok": False, "status": "failed", "error_code": "TOO_MANY_PROMPTS", "message": "a batch may contain at most 100 prompts"}
+    invalid = [index for index, prompt in enumerate(prompts) if not isinstance(prompt, str) or not prompt.strip()]
+    if invalid:
+        return {
+            "ok": False,
+            "status": "failed",
+            "error_code": "INVALID_PROMPT_ITEMS",
+            "message": f"prompts at indices {invalid[:20]} must be non-empty strings",
+        }
     concurrency = max(1, min(16, int(concurrency)))
     await _ensure(auto_start=auto_start)
     semaphore = asyncio.Semaphore(concurrency)
@@ -251,7 +326,7 @@ async def generate_batch(
     async def one(prompt: str) -> Dict[str, Any]:
         async with semaphore:
             return await _generate_image_impl(
-                str(prompt),
+                prompt,
                 project_name=project_name,
                 negative_prompt=negative_prompt,
                 width=width,
@@ -287,7 +362,7 @@ async def generation_status(task_id: str, auto_start: bool = False) -> Dict[str,
     history = await asyncio.to_thread(backend.history, task_id)
     outputs = await asyncio.to_thread(backend.outputs, task_id) if isinstance(history.get(task_id), dict) else []
     status = "completed" if outputs else "queued"
-    warning = await _track_update(task_id, status, output_uri=(outputs[0].get("filename") if outputs else None))
+    warning = await _track_update(task_id, status, backend_mode="native-comfyui")
     result: Dict[str, Any] = {"task_id": task_id, "status": status, "outputs": outputs}
     if warning and warning != "task was not present in local history":
         result["tracking_warning"] = warning
@@ -308,12 +383,12 @@ async def collect_generation(
     try:
         downloaded = await asyncio.to_thread(backend.wait_and_download, task_id, target, timeout=timeout)
     except Exception as exc:
-        warning = await _track_update(task_id, "failed", error_message=str(exc))
+        warning = await _track_update(task_id, "failed", output_dir=str(target), backend_mode="native-comfyui", error_code="GENERATION_WAIT_FAILED", error_message=str(exc))
         result: Dict[str, Any] = {"ok": False, "task_id": task_id, "status": "failed", "message": str(exc), "output_dir": str(target)}
         if warning and warning != "task was not present in local history":
             result["tracking_warning"] = warning
         return result
-    warning = await _track_update(task_id, "completed", output_uri=(downloaded[0] if downloaded else None))
+    warning = await _track_update(task_id, "completed", output_uris=[str(item) for item in downloaded], output_dir=str(target), backend_mode="native-comfyui")
     result = {"ok": True, "task_id": task_id, "status": "completed", "downloaded_files": downloaded, "output_dir": str(target)}
     if warning and warning != "task was not present in local history":
         result["tracking_warning"] = warning
