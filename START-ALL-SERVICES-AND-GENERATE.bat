@@ -1,62 +1,47 @@
 @echo off
-setlocal enabledelayedexpansion
+setlocal EnableExtensions
 
-echo ===============================================================================
-echo EVAVO COMPLETE GENERATION PIPELINE
-echo ===============================================================================
-echo.
+REM Compatibility shim retained for old shortcuts.
+REM The former implementation opened persistent cmd windows, hardcoded
+REM C:\AI\ComfyUI and user BeeStation paths, launched unrelated services and
+REM generated/copyied multimodal assets automatically. That behavior is retired.
 
-REM Start ComfyUI in a new window
-echo Starting ComfyUI server...
-start "ComfyUI Server" cmd /k "cd /d C:\AI\ComfyUI && python main.py"
-timeout /t 5 /nobreak
+set "ROOT=%~dp0"
+pushd "%ROOT%" >nul
 
-REM Start Ollama in a new window
-echo Starting Ollama server...
-start "Ollama Server" cmd /k "ollama serve"
-timeout /t 3 /nobreak
+set "PYTHON=%ROOT%.venv\Scripts\python.exe"
+if not exist "%PYTHON%" set "PYTHON=python"
 
-REM Navigate to generation directory
-cd /d C:\Gitrepos\evavo-local-image-generator
-
-REM Run the complete generation
-echo.
-echo Starting generation script...
-echo This will generate real images, videos, audio, text, particles, textures, and 3D models
-echo.
-
-python COMPLETE-MULTIMODAL-TEST.py
-
-REM Copy outputs to beestation
-echo.
-echo Copying generated files to beestation...
-
-if not exist "C:\Users\User\beestation\evavo-generation" (
-    mkdir "C:\Users\User\beestation\evavo-generation"
-)
-
-REM Copy all output directories
-for %%D in (evavo-images evavo-videos evavo-audio evavo-text evavo-particles evavo-models evavo-textures evavo-state) do (
-    if exist "%%D" (
-        echo Copying %%D to beestation...
-        xcopy "%%D" "C:\Users\User\beestation\evavo-generation\%%D" /E /I /Y /Q
+where "%PYTHON%" >nul 2>&1
+if errorlevel 1 (
+    if not exist "%PYTHON%" (
+        echo ERROR: Python 3.10+ was not found.
+        popd >nul
+        exit /b 2
     )
 )
 
+echo START-ALL-SERVICES-AND-GENERATE.bat is a compatibility shim.
+echo Starting the canonical native EVAVO image-generation backend without extra consoles...
+
+"%PYTHON%" "%ROOT%evavo.py" start --no-mock
+if errorlevel 1 (
+    popd >nul
+    exit /b %errorlevel%
+)
+
+"%PYTHON%" "%ROOT%agent-doctor.py" --repair --skip-tests
+if errorlevel 1 (
+    popd >nul
+    exit /b %errorlevel%
+)
+
+"%PYTHON%" "%ROOT%evavo.py" status
+set "EXITCODE=%errorlevel%"
+
 echo.
-echo ===============================================================================
-echo GENERATION COMPLETE!
-echo ===============================================================================
-echo All generated content is now in: C:\Users\User\beestation\evavo-generation\
-echo.
-echo Generated directories:
-echo   - evavo-images/      Generated images
-echo   - evavo-videos/      Generated videos
-echo   - evavo-audio/       Generated audio
-echo   - evavo-text/        Generated text
-echo   - evavo-particles/   Particle configurations
-echo   - evavo-models/      3D models
-echo   - evavo-textures/    PBR textures
-echo   - evavo-state/       Generation metadata
-echo.
-pause
+echo No automatic sample generation is run by this legacy shortcut anymore.
+echo Use: python evavo.py generate --prompts "your prompt" --project demo --wait
+
+popd >nul
+exit /b %EXITCODE%
