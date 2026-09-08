@@ -69,16 +69,64 @@ def _agent_tests() -> tuple[bool, str]:
     if not script.is_file():
         return False, f"missing {script.name}"
     try:
-        result = subprocess.run([sys.executable, str(script)], cwd=str(ROOT), capture_output=True, text=True, timeout=60)
+        result = subprocess.run([sys.executable, str(script)], cwd=str(ROOT), capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     if result.returncode == 0:
-        return True, "MCP stdio + Streamable HTTP negotiation passed"
-    detail = (result.stderr or result.stdout).strip()[-1200:]
+        return True, "MCP stdio + Streamable HTTP generation/history tests passed"
+    detail = (result.stderr or result.stdout).strip()[-1600:]
     return False, detail or f"exit {result.returncode}"
 
 
-def run(repair: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bool) -> Dict[str, Any]:
+def _checkpoint_source_configured() -> bool:
+    return bool(os.getenv("EVAVO_CHECKPOINT_FILE") or os.getenv("EVAVO_CHECKPOINT_URL"))
+
+
+def _filesystem_checkpoints(installs: List[Any]) -> List[str]:
+    found: List[str] = []
+    for install in installs:
+        root = Path(install.root)
+        app_root = root / "ComfyUI" if getattr(install, "portable", False) else root
+        directory = app_root / "models" / "checkpoints"
+        if not directory.is_dir():
+            continue
+        for path in directory.iterdir():
+            if path.is_file() and path.suffix.lower() in {".safetensors", ".ckpt", ".pt", ".pth"}:
+                found.append(str(path))
+    return found
+
+
+def _provision_comfyui() -> tuple[bool, str]:
+    script = ROOT / "provision-comfyui.py"
+    if not script.is_file():
+        return False, f"missing {script.name}"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), "--json"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        payload = None
+    if result.returncode == 0 and isinstance(payload, dict) and payload.get("ok"):
+        target = payload.get("target", "unknown")
+        models = payload.get("verification", {}).get("checkpoint_files", []) if isinstance(payload.get("verification"), dict) else []
+        return True, f"provisioned {target}; checkpoints={len(models)}"
+    detail = ""
+    if isinstance(payload, dict):
+        detail = str(payload.get("message", ""))
+    if not detail:
+        detail = (result.stderr or result.stdout).strip()[-2000:]
+    return False, detail or f"provisioner exit {result.returncode}"
+
+
+def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bool) -> Dict[str, Any]:
     checks: List[Dict[str, Any]] = []
 
     def add(name: str, ok: bool, detail: str, severity: str = "error", repaired: bool = False) -> None:
@@ -89,24 +137,33 @@ def run(repair: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bo
     mcp_spec = importlib.util.find_spec("mcp")
     add("mcp_sdk", mcp_spec is not None, str(mcp_spec.origin) if mcp_spec else 'missing; install mcp[cli]>=2,<3')
 
-    # Diagnostic mode reports missing native rendering as a warning. Repair mode
-    # is deliberately stricter: it is the workstation readiness gate used by
-    # UPDATE-AND-VERIFY-EVAVO.ps1 and must not pass on a mock-only setup.
     renderer_severity = "error" if repair else "warning"
 
     installs = discover_comfyui()
+    provision_attempted = False
+    if repair and provision:
+        missing_runtime = not installs
+        configured_model_missing = bool(installs) and _checkpoint_source_configured() and not _filesystem_checkpoints(installs)
+        if missing_runtime or configured_model_missing:
+            provision_attempted = True
+            provision_ok, provision_detail = _provision_comfyui()
+            add("comfyui_provision", provision_ok, provision_detail, severity="error", repaired=provision_ok)
+            if provision_ok:
+                installs = discover_comfyui()
+
     add(
         "comfyui_install",
         bool(installs),
-        "; ".join(str(item.root) for item in installs) if installs else "no local install discovered; set EVAVO_COMFYUI_HOME",
+        "; ".join(str(item.root) for item in installs) if installs else "no local install discovered; use --provision or set EVAVO_COMFYUI_HOME",
         severity=renderer_severity,
+        repaired=provision_attempted and bool(installs),
     )
 
     health = native_health(endpoint)
     repaired_backend = False
-    if not health and repair:
+    if not health and repair and installs:
         try:
-            ensured = ensure_comfyui(endpoint, wait_seconds=120.0, allow_start=True)
+            ensured = ensure_comfyui(endpoint, wait_seconds=180.0, allow_start=True)
             health = ensured.get("health") if isinstance(ensured, dict) else None
             repaired_backend = bool(health)
         except RuntimeError as exc:
@@ -122,10 +179,13 @@ def run(repair: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bo
     if health:
         try:
             checkpoints = ComfyUIBackend(endpoint).checkpoints()
+            checkpoint_detail = f"{len(checkpoints)} available" if checkpoints else "none reported"
+            if not checkpoints and repair and not _checkpoint_source_configured():
+                checkpoint_detail += "; configure EVAVO_CHECKPOINT_FILE or EVAVO_CHECKPOINT_URL for automated model provisioning"
             add(
                 "checkpoints",
                 bool(checkpoints),
-                f"{len(checkpoints)} available" if checkpoints else "none reported",
+                checkpoint_detail,
                 severity="error" if repair else "warning",
             )
         except RuntimeError as exc:
@@ -165,6 +225,7 @@ def run(repair: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bo
         "ok": not hard_failures,
         "status": "operational" if not hard_failures and not warnings else ("degraded" if not hard_failures else "needs_attention"),
         "repair_requested": repair,
+        "provision_requested": provision,
         "endpoint": endpoint,
         "mcp_http": f"http://{mcp_host}:{mcp_port}/mcp",
         "checks": checks,
@@ -174,6 +235,7 @@ def run(repair: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bo
 def main() -> int:
     parser = argparse.ArgumentParser(description="EVAVO Claude/ChatGPT agent integration doctor")
     parser.add_argument("--repair", action="store_true", help="Start native ComfyUI and require real-renderer/checkpoint readiness")
+    parser.add_argument("--provision", action="store_true", help="When repairing, provision missing official ComfyUI and any explicitly configured checkpoint source")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--mcp-host", default=DEFAULT_MCP_HOST)
     parser.add_argument("--mcp-port", type=int, default=DEFAULT_MCP_PORT)
@@ -182,7 +244,9 @@ def main() -> int:
     args = parser.parse_args()
     if not 1 <= args.mcp_port <= 65535:
         parser.error("--mcp-port must be between 1 and 65535")
-    payload = run(args.repair, args.endpoint.rstrip("/"), args.mcp_host, args.mcp_port, not args.skip_tests)
+    if args.provision and not args.repair:
+        parser.error("--provision requires --repair")
+    payload = run(args.repair, args.provision, args.endpoint.rstrip("/"), args.mcp_host, args.mcp_port, not args.skip_tests)
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
