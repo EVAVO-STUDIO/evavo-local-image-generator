@@ -1,107 +1,230 @@
-# EVAVO Local Image Generator - Deployment Status
+# EVAVO Local Image Generator - Deployment Architecture
 
-## System Architecture
+This document describes the **repository-backed operational architecture**. Runtime health is verified with `python evavo.py status` or `python evavo.py test`; this file does not claim that a particular workstation process is currently running.
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Claude Desktop App                       │
-│                    (MCP Server Bridge)                       │
-└───────────────────────────┬─────────────────────────────────┘
+## Reproducible control plane
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│                    Agent / Operator                          │
+│          ChatGPT / Codex / Claude / PowerShell              │
+└─────────────────────────────┬────────────────────────────────┘
+                              │
+                              ▼
+                    ┌───────────────────┐
+                    │     evavo.py      │
+                    │ unified control   │
+                    └───────┬───────────┘
                             │
-        ┌───────────────────┼───────────────────┐
-        │                   │                   │
-┌───────▼────────┐  ┌───────▼────────┐  ┌──────▼──────────┐
-│  ComfyUI Mock  │  │  EVAVO Wrapper │  │  Storage Layer  │
-│  Server (8188) │  │   (evavo-      │  │  (bee:// URIs)  │
-│                │  │    wrapper.py) │  │                 │
-└────────────────┘  └─────┬──────────┘  └─────────────────┘
-                          │
-        ┌─────────────────┼─────────────────┐
-        │                 │                 │
-    ┌───▼───┐      ┌──────▼──────┐    ┌────▼────┐
-    │Batch  │      │  Monitor    │    │  Task   │
-    │Gen    │      │  (Real-time)│    │ Tracker │
-    │(Multi)│      │             │    │(History)│
-    └───────┘      └─────────────┘    └─────────┘
+            ┌───────────────┼─────────────────┐
+            │               │                 │
+            ▼               ▼                 ▼
+┌──────────────────┐ ┌────────────────┐ ┌─────────────────┐
+│ monitor-evavo.py │ │generate-batch.py│ │task-tracker.py  │
+│ health/status    │ │ async batching │ │ history/stats   │
+└─────────┬────────┘ └───────┬────────┘ └────────┬────────┘
+          │                  │                   │
+          │                  ▼                   │
+          │         ┌───────────────────┐         │
+          └────────►│ evavo-wrapper.py  │         │
+                    │ stable JSON CLI   │         │
+                    └─────────┬─────────┘         │
+                              │ HTTP               │
+                              ▼                    │
+               ┌────────────────────────────┐     │
+               │ 127.0.0.1:8188             │     │
+               │ /system                    │     │
+               │ /api/status                │     │
+               │ /api/prompt                │     │
+               └─────────────┬──────────────┘     │
+                             │                    │
+                             ▼                    │
+               ┌────────────────────────────┐     │
+               │ mock-comfyui-server.py     │     │
+               │ reproducible queue mock    │     │
+               └────────────────────────────┘     │
+                                                  │
+                    ┌─────────────────────────────┘
+                    ▼
+            ┌──────────────────────┐
+            │ task_history.json    │
+            │ lock + atomic writes │
+            └──────────────────────┘
 ```
 
-## Component Status
+## Runtime components
 
-### ComfyUI Mock Server
-- **Status**: ✓ Running on 127.0.0.1:8188
-- **Purpose**: Provides HTTP API surface for workflow queueing
-- **Startup**: Automated via START-EVAVO-SERVICES.bat
-- **Endpoints**:
-  - `/system` - Health check
-  - `/api/status` - Status information
-  - `/api/prompt` - Queue workflow
+### Unified controller: `evavo.py`
 
-### EVAVO Wrapper
-- **Status**: ✓ Operational
-- **Purpose**: Main entry point for generation requests
-- **Location**: evavo-wrapper.py (cloud session)
-- **Environment**: PYTHONPATH configured for local execution
+Purpose:
 
-### Operational Utilities
+- start the managed mock service;
+- wait for readiness;
+- write PID/log metadata under `.evavo/`;
+- check status;
+- delegate generation/task commands;
+- stop the managed service;
+- run operational integration tests.
 
-#### generate-batch.py
-- **Purpose**: Queue multiple generation tasks
-- **Features**: Concurrent generation, formatted output
-- **Usage**: `python generate-batch.py --examples`
+Primary commands:
 
-#### monitor-evavo.py
-- **Purpose**: Real-time system health monitoring
-- **Features**: ComfyUI + EVAVO wrapper checks, continuous mode
-- **Usage**: `python monitor-evavo.py --continuous`
-
-#### task-tracker.py
-- **Purpose**: Persistent task history and statistics
-- **Features**: JSON-based history, stats aggregation
-- **Usage**: `python task-tracker.py stats`
-
-## Configuration
-
-### Storage Paths
+```powershell
+python evavo.py start
+python evavo.py status
+python evavo.py generate --examples
+python evavo.py tasks
+python evavo.py stats
+python evavo.py test
+python evavo.py stop
 ```
+
+### Mock ComfyUI service: `mock-comfyui-server.py`
+
+- Binds to `127.0.0.1:8188` by default.
+- Refuses non-loopback binds.
+- Implements `/system`, `/api/status`, and `/api/prompt`.
+- Generates unique `evavo_<uuid>` task IDs.
+- Uses `ThreadingHTTPServer` so health/status requests are not blocked by another connection.
+- Caps request bodies at 1 MiB.
+- Validates prompt/project shape.
+
+This component is a deterministic local queue mock, not a real image renderer. A production ComfyUI bridge should preserve the same health and queue contract.
+
+### Wrapper: `evavo-wrapper.py`
+
+- Uses the shared HTTP/health contract in `evavo_operations.py`.
+- Emits exactly one JSON object on stdout.
+- Supports the existing commands:
+
+```powershell
+python evavo-wrapper.py health_check "{}"
+python evavo-wrapper.py generate_image '{"prompt":"example","project_name":"demo"}'
+```
+
+- Rejects malformed arguments.
+- Requires a valid queued `task_id` before reporting success.
+
+### Batch generation: `generate-batch.py`
+
+- Runs a service identity/readiness preflight by default.
+- Uses `asyncio.create_subprocess_exec` for real concurrent wrapper execution.
+- Bounds concurrency (default `4`).
+- Handles per-task timeout/process/JSON/protocol failures.
+- Returns a formatted table or `--json` output.
+- Persists success and failure records through the shared tracker.
+- Exits `1` on partial batch failure and `3` when preflight fails.
+
+### Monitor: `monitor-evavo.py`
+
+- Checks `/system` directly with HTTP status + JSON validation.
+- Verifies service identity and protocol version.
+- Independently exercises `evavo-wrapper.py health_check`.
+- Runs both checks concurrently.
+- Supports one-shot, continuous display, and continuous JSON-lines modes.
+- Returns nonzero for degraded/offline one-shot checks.
+
+### Task tracker: `task-tracker.py`
+
+Persistence is provided by `evavo_operations.TaskTracker`:
+
+- repository-relative default history file;
+- configurable `EVAVO_TASK_HISTORY` path;
+- inter-process advisory lock;
+- atomic temp-file + `os.replace()` writes;
+- explicit corruption/read errors instead of silently discarding history;
+- normalized statuses (`queued`, `running`, `completed`, `failed`, `cancelled`, `unknown`);
+- list/stats/add/update/clear CLI operations.
+
+## Service contract
+
+A healthy `/system` response contains:
+
+```json
+{
+  "service": "evavo-local-image-generator",
+  "protocol_version": 1,
+  "status": "ready"
+}
+```
+
+A successful queue response contains:
+
+```json
+{
+  "status": "queued",
+  "task_id": "evavo_<unique-id>"
+}
+```
+
+Utilities do not treat simple TCP connectivity or arbitrary HTTP 200 responses as proof of health.
+
+## Storage
+
+Logical storage root used by package tooling:
+
+```text
 bee://primary/EVAVO/ImageGeneration/
-  ├── outputs/        # Generated images
-  ├── models/         # Model files
-  ├── workflows/      # Workflow definitions
-  └── projects/       # Project-specific outputs
 ```
 
-### Environment Variables
+`bee://` is treated as a resource URI, not a Windows path. Translation to filesystem/NAS locations belongs in the storage layer.
+
+Operational task history defaults to:
+
+```text
+<repository>/task_history.json
 ```
-PYTHONPATH=C:\Gitrepos\evavo-local-image-generator
+
+Managed service state:
+
+```text
+<repository>/.evavo/operations-service.json
+<repository>/.evavo/mock-service.log
+```
+
+## Environment
+
+Supported Python runtime:
+
+```text
+Python 3.10+
+```
+
+Operational scripts require only the standard library. Wider repository dependencies remain documented in `requirements.txt`.
+
+Environment variables:
+
+```text
 COMFYUI_ENDPOINT=http://127.0.0.1:8188
+EVAVO_TASK_HISTORY=<optional custom JSON path>
+EVAVO_LOCAL_IMAGE_GENERATOR_STORAGE=bee://primary/EVAVO/ImageGeneration
 ```
 
-## Performance Metrics
+## Windows startup
 
-### Typical Response Times
-- Task Queue: 50-100ms
-- Health Check: 100-300ms
-- Batch Queue (5 tasks): 500-800ms
+`START-EVAVO-SERVICES.bat` is repository-relative and safe against broad Python process termination. It:
 
-### System Requirements
-- Python 3.8+
-- 4GB RAM minimum
-- 10GB storage for outputs
+- prefers `.venv\Scripts\python.exe`;
+- checks required files;
+- examines the process listening on port 8188;
+- terminates it only when it is the EVAVO mock server;
+- refuses unrelated port conflicts;
+- performs a 20-attempt readiness loop with the real monitor;
+- exits nonzero on failure.
 
-## Verification Checklist
+For agent automation, prefer `python evavo.py start` because it records managed process state and logs without requiring CMD-specific behavior.
 
-- [x] ComfyUI mock server responds to /system
-- [x] EVAVO wrapper instantiates successfully
-- [x] Batch generation queues tasks
-- [x] Task tracker logs history
-- [x] Monitor shows operational status
-- [x] All utilities executable
+## Validation gates
 
-## Deployment Date
-September 8, 2026
+Operational readiness should be established by running:
 
-## Latest Commit
-- Hash: 8f4750f (or latest)
-- Message: Operational enhancements
-- Branch: main
-- Status: ✓ Pushed to origin
+```powershell
+python evavo.py test
+```
+
+The suite validates wrapper health, generation task IDs, monitor output, batch-to-tracker integration and offline failure behavior against an isolated mock port.
+
+A deployment should not be described as active solely because this Markdown file exists; `evavo.py status` is the source of truth for live process state.
+
+## Security boundary
+
+Current mock service is deliberately local-only. Loopback reduces exposure but is not authentication. Before binding a real backend outside localhost, add authentication/authorization, restrict firewall access, validate all file/URI targets, limit payload sizes and avoid logging secrets.
