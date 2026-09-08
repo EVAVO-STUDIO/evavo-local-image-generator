@@ -1,18 +1,25 @@
-"""
-Backend integration for kokoro_backend.
+"""Minimal Kokoro FastAPI backend integration."""
 
-This module provides abstraction for interacting with the kokoro_backend service.
-"""
+from __future__ import annotations
 
-class kokoro_backendBackend:
-    """Backend adapter for kokoro_backend service."""
-    
-    def __init__(self, endpoint: str = None):
-        self.endpoint = endpoint
-    
+import urllib.error
+import urllib.request
+from typing import Optional
+
+
+class KokoroBackend:
+    def __init__(self, endpoint: Optional[str] = None):
+        self.endpoint = (endpoint or "http://127.0.0.1:8000").rstrip("/")
+
     def health_check(self) -> bool:
-        """Check if the backend service is running."""
-        raise NotImplementedError
-    
-    def __repr__(self):
-        return f"kokoro_backendBackend(endpoint={self.endpoint!r})"
+        for path in ("/health", "/docs", "/"):
+            try:
+                with urllib.request.urlopen(f"{self.endpoint}{path}", timeout=3.0) as response:
+                    if 200 <= getattr(response, "status", 200) < 500:
+                        return True
+            except (OSError, urllib.error.URLError, TimeoutError):
+                continue
+        return False
+
+    def __repr__(self) -> str:
+        return f"KokoroBackend(endpoint={self.endpoint!r})"
