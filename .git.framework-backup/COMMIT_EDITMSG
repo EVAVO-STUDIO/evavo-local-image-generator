@@ -1,0 +1,42 @@
+feat(evavo-local-image-generator): Establish proper module structure and digest-bound task manifest
+
+Implement core architecture for local EVAVO multi-modal generation system:
+
+Core Components:
+- EvavoLocalImageGeneratorMCPServer: MCP protocol implementation with STDIO handler
+- GenerationTask: SHA-256 digest-bound task execution framework
+- ComfyUIClient: Async HTTP communication with ComfyUI backend (port 8188)
+- BeeStorageClient: bee:// URI resolution for BeeStation network storage abstraction
+- Storage manifest-based digest tracking for secure task validation
+
+Package Structure:
+- evavo_local_image_generator/__init__.py: Module metadata and public API exports
+- evavo_local_image_generator/__main__.py: Entry point for CLI execution (python -m)
+- evavo_local_image_generator/mcp_server.py: Full MCP protocol implementation (~680 lines)
+- evavo_local_image_generator/scripts/generate.py: Image generation and batch processing (~320 lines)
+- evavo_local_image_generator/scripts/storage.py: BeeStation URI resolution and digest validation (~280 lines)
+- evavo_local_image_generator/tests/__init__.py: Test suite placeholder
+
+Configuration & Documentation:
+- .mcp.json: MCP server registration pointing to module entry point
+- evavo-repository-task-manifest.json: Digest-bound task definitions (7 tasks: 3 implemented, 4 planned)
+- README.md: Comprehensive architecture, API reference, integration guidelines
+- CLAUDE.md: Operating notes and infrastructure integration patterns
+- requirements.txt: Python dependencies (httpx async HTTP client)
+- .gitignore: Scoped to Python runtime, virtual environments, platform artifacts
+
+Key Architecture Principles:
+- NEVER assume Windows paths visible to hosted Claude - use bee:// URI abstraction only
+- SHA-256 digest-bound execution for secure task validation
+- Immutable storage through evavo-storage (0.14.3+) integration
+- evavo-local-storage (0.31.0) for logical URI discovery on BeeStation
+- Integration with local ComfyUI (127.0.0.1:8188), Ollama (127.0.0.1:11434), Kokoro (127.0.0.1:8000)
+
+Environment Configuration:
+- EVAVO_LOCAL_IMAGE_GENERATOR_MODE: production/debug modes
+- EVAVO_LOCAL_IMAGE_GENERATOR_STORAGE: bee://primary/EVAVO/ImageGeneration default storage path
+- EVAVO_COMFYUI_ENDPOINT: ComfyUI backend endpoint (http://127.0.0.1:8188)
+- PYTHONUNBUFFERED: 1 for real-time logging
+
+Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_017UkZUzTDtz2LeK9HrXjYnR
