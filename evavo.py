@@ -11,8 +11,9 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.parse
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from evavo_operations import DEFAULT_ENDPOINT, ROOT, now_iso, request_json, validate_health
 
@@ -36,6 +37,26 @@ def service_health(endpoint: str) -> Dict[str, Any]:
     return validate_health(request_json(f"{endpoint.rstrip('/')}/system", timeout=2.0))
 
 
+def parse_managed_endpoint(endpoint: str) -> Tuple[str, int, str]:
+    """Validate a local-only HTTP endpoint and return host, port, normalized URL."""
+    parsed = urllib.parse.urlparse(endpoint.rstrip("/"))
+    if parsed.scheme != "http" or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("managed endpoint must be a plain loopback HTTP URL")
+    if parsed.path not in {"", "/"}:
+        raise ValueError("managed endpoint must not contain a path")
+    host = parsed.hostname
+    if host not in {"127.0.0.1", "localhost"}:
+        raise ValueError("managed mock service is restricted to 127.0.0.1/localhost")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("managed endpoint contains an invalid port") from exc
+    if port is None or not 1 <= port <= 65535:
+        raise ValueError("managed endpoint must include a valid port")
+    bind_host = "127.0.0.1" if host == "localhost" else host
+    return bind_host, port, f"http://{bind_host}:{port}"
+
+
 def save_state(pid: int, endpoint: str) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(
@@ -57,9 +78,7 @@ def load_state() -> Dict[str, Any]:
 def clear_state() -> None:
     try:
         STATE_FILE.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError:
+    except (FileNotFoundError, OSError):
         pass
 
 
@@ -81,7 +100,12 @@ def terminate_pid(pid: int) -> None:
 
 
 def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
-    endpoint = endpoint.rstrip("/")
+    try:
+        bind_host, port, endpoint = parse_managed_endpoint(endpoint)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
     try:
         health = service_health(endpoint)
         print(json.dumps({"ok": True, "status": "already_running", "endpoint": endpoint, "health": health}, indent=2))
@@ -89,9 +113,6 @@ def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
     except RuntimeError:
         pass
 
-    if endpoint != "http://127.0.0.1:8188":
-        print("ERROR: managed mock service start currently uses http://127.0.0.1:8188 only.", file=sys.stderr)
-        return 2
     if not SERVER.exists():
         print(f"ERROR: missing server: {SERVER}", file=sys.stderr)
         return 2
@@ -110,7 +131,10 @@ def start_service(endpoint: str, wait_seconds: float = 20.0) -> int:
         kwargs["start_new_session"] = True
 
     try:
-        process = subprocess.Popen([sys.executable, str(SERVER)], **kwargs)
+        process = subprocess.Popen(
+            [sys.executable, str(SERVER), "--host", bind_host, "--port", str(port)],
+            **kwargs,
+        )
     finally:
         log_handle.close()
     save_state(process.pid, endpoint)
@@ -180,6 +204,7 @@ def stop_service() -> int:
 
 
 def status_service(endpoint: str) -> int:
+    endpoint = endpoint.rstrip("/")
     try:
         health = service_health(endpoint)
         print(json.dumps({"ok": True, "status": "operational", "endpoint": endpoint, "health": health, "managed": load_state()}, indent=2))
@@ -218,8 +243,7 @@ def doctor(endpoint: str, json_output: bool = False) -> int:
     def add(name: str, ok: bool, detail: str, severity: str = "error") -> None:
         checks.append({"name": name, "ok": ok, "severity": severity, "detail": detail})
 
-    version_ok = sys.version_info >= (3, 10)
-    add("python", version_ok, f"{sys.version.split()[0]} at {sys.executable}")
+    add("python", sys.version_info >= (3, 10), f"{sys.version.split()[0]} at {sys.executable}")
 
     missing = [name for name in REQUIRED_FILES if not (ROOT / name).is_file()]
     add("required_files", not missing, "all present" if not missing else f"missing: {', '.join(missing)}")
@@ -234,6 +258,13 @@ def doctor(endpoint: str, json_output: bool = False) -> int:
         severity="warning" if asyncio_shadowed else "info",
     )
 
+    try:
+        _, _, normalized_endpoint = parse_managed_endpoint(endpoint)
+        add("endpoint", True, normalized_endpoint, severity="info")
+    except ValueError as exc:
+        add("endpoint", False, str(exc))
+        normalized_endpoint = endpoint.rstrip("/")
+
     git_dir = (ROOT / ".git").exists()
     add("git_repository", git_dir, str(ROOT))
     if git_dir:
@@ -247,8 +278,8 @@ def doctor(endpoint: str, json_output: bool = False) -> int:
         add("git_worktree", dirty == "", "clean" if dirty == "" else "local changes present", severity="warning")
 
     try:
-        health = service_health(endpoint.rstrip("/"))
-        add("service", True, f"ready ({health.get('mode', 'unknown')}) at {endpoint.rstrip('/')}", severity="info")
+        health = service_health(normalized_endpoint)
+        add("service", True, f"ready ({health.get('mode', 'unknown')}) at {normalized_endpoint}", severity="info")
     except RuntimeError as exc:
         add("service", False, str(exc), severity="warning")
 
