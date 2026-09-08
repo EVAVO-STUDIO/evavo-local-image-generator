@@ -18,26 +18,26 @@ Write-Host ""
 Write-Host "Checking Python..."
 python --version
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "✓ Python installed" -ForegroundColor Green
+    Write-Host "[PASS] Python installed" -ForegroundColor Green
 } else {
-    Write-Host "✗ Python not found" -ForegroundColor Red
+    Write-Host "[FAIL] Python not found" -ForegroundColor Red
 }
 
 # Dependencies
 Write-Host ""
 Write-Host "Checking dependencies..."
-pip list | findstr /i "httpx pytest"
-Write-Host "✓ Dependencies verified" -ForegroundColor Green
+pip list | findstr /i "httpx pytest pydantic"
+Write-Host "[PASS] Dependencies verified" -ForegroundColor Green
 
 # ComfyUI
 Write-Host ""
 Write-Host "Checking ComfyUI..."
 try {
     $response = Invoke-WebRequest -Uri "http://127.0.0.1:8188/system" -TimeoutSec 2 -ErrorAction SilentlyContinue
-    Write-Host "✓ ComfyUI available" -ForegroundColor Green
+    Write-Host "[PASS] ComfyUI available" -ForegroundColor Green
 } catch {
-    Write-Host "⚠ ComfyUI not responding (optional)" -ForegroundColor Yellow
+    Write-Host "[WARN] ComfyUI not responding (optional)" -ForegroundColor Yellow
 }
 
 Write-Host ""
-Write-Host "✓ Verification complete" -ForegroundColor Green
+Write-Host "[PASS] Verification complete" -ForegroundColor Green

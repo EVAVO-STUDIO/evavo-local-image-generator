@@ -58,7 +58,7 @@ if ($Setup) {
 
     $settings | ConvertTo-Json -Depth 10 | Set-Content $claudeSettingsPath
 
-    Write-Host "✓ MCP configuration written to: $claudeSettingsPath" -ForegroundColor Green
+    Write-Host "[PASS] MCP configuration written to: $claudeSettingsPath" -ForegroundColor Green
     Write-Host ""
     Write-Host "Next steps:" -ForegroundColor Yellow
     Write-Host "1. Restart Claude desktop app"
