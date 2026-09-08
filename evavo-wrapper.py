@@ -6,10 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any, Dict
 
-from evavo_operations import DEFAULT_ENDPOINT, SERVICE_NAME, now_iso, request_json, validate_health
+from evavo_operations import DEFAULT_ENDPOINT, ROOT, SERVICE_NAME, now_iso, request_json, validate_health
 from evavo_local_image_generator.backends import ComfyUIBackend
+
+DEFAULT_OUTPUT_DIR = ROOT / ".evavo" / "outputs"
 
 
 def error_payload(code: str, message: str) -> Dict[str, Any]:
@@ -27,25 +30,14 @@ def parse_payload(raw: str) -> Dict[str, Any]:
 
 
 def detect_backend(endpoint: str) -> Dict[str, Any]:
-    """Prefer the EVAVO compatibility service, then native ComfyUI."""
     endpoint = endpoint.rstrip("/")
     try:
         health = validate_health(request_json(f"{endpoint}/system", timeout=2.0))
-        return {
-            "kind": "evavo-service",
-            "mode": health.get("mode", "mock"),
-            "endpoint": endpoint,
-            "health": health,
-        }
+        return {"kind": "evavo-service", "mode": health.get("mode", "mock"), "endpoint": endpoint, "health": health}
     except RuntimeError as evavo_error:
         try:
             native = ComfyUIBackend(endpoint).health()
-            return {
-                "kind": "native-comfyui",
-                "mode": "native-comfyui",
-                "endpoint": endpoint,
-                "health": native,
-            }
+            return {"kind": "native-comfyui", "mode": "native-comfyui", "endpoint": endpoint, "health": native}
         except RuntimeError as native_error:
             raise RuntimeError(f"BACKEND_UNAVAILABLE:EVAVO={evavo_error}; ComfyUI={native_error}") from native_error
 
@@ -65,6 +57,11 @@ def health_check(endpoint: str) -> Dict[str, Any]:
         "devices": health.get("devices", []),
         "timestamp": now_iso(),
     }
+
+
+def _output_dir(payload: Dict[str, Any]) -> Path:
+    raw = payload.get("output_dir")
+    return Path(raw).expanduser().resolve() if isinstance(raw, str) and raw.strip() else DEFAULT_OUTPUT_DIR.resolve()
 
 
 def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -90,55 +87,53 @@ def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             cfg_scale=payload.get("cfg_scale", 7.0),
             seed=payload.get("seed"),
             checkpoint=payload.get("checkpoint"),
+            workflow_path=payload.get("workflow_path"),
         )
         response.update({"ok": True, "endpoint": endpoint, "timestamp": now_iso()})
+        if bool(payload.get("wait")):
+            timeout = float(payload.get("wait_timeout", 600.0))
+            downloaded = client.wait_and_download(response["task_id"], _output_dir(payload), timeout=timeout)
+            response.update({"status": "completed", "downloaded_files": downloaded, "output_dir": str(_output_dir(payload)), "timestamp": now_iso()})
         return response
 
-    response = request_json(
-        f"{endpoint}/api/prompt",
-        method="POST",
-        payload={"prompt": prompt.strip(), "project_name": project_name.strip()},
-        timeout=30.0,
-    )
+    response = request_json(f"{endpoint}/api/prompt", method="POST", payload={"prompt": prompt.strip(), "project_name": project_name.strip()}, timeout=30.0)
     task_id = response.get("task_id")
     if response.get("status") != "queued" or not isinstance(task_id, str) or not task_id:
         raise RuntimeError("INVALID_RESPONSE:queue response did not contain a valid queued task_id")
-    return {
-        "ok": True,
-        "status": "queued",
-        "task_id": task_id,
-        "project_name": response.get("project_name", project_name),
-        "backend_mode": backend["mode"],
-        "endpoint": endpoint,
-        "timestamp": now_iso(),
-    }
+    result = {"ok": True, "status": "queued", "task_id": task_id, "project_name": response.get("project_name", project_name), "backend_mode": backend["mode"], "endpoint": endpoint, "timestamp": now_iso()}
+    if bool(payload.get("wait")):
+        result["wait_note"] = "managed mock queues work but does not render files"
+    return result
 
 
-def task_status(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def task_status(endpoint: str, payload: Dict[str, Any], *, wait: bool = False) -> Dict[str, Any]:
     task_id = payload.get("task_id")
     if not isinstance(task_id, str) or not task_id.strip():
         raise ValueError("task_id must be a non-empty string")
     backend = detect_backend(endpoint)
     if backend["kind"] != "native-comfyui":
         return {"ok": True, "status": "queued", "task_id": task_id, "backend_mode": backend["mode"], "timestamp": now_iso()}
+
     client = ComfyUIBackend(endpoint)
-    history = client.history(task_id)
-    entry = history.get(task_id)
-    outputs = client.outputs(task_id) if isinstance(entry, dict) else []
-    completed = bool(outputs or (isinstance(entry, dict) and entry.get("status")))
-    return {
-        "ok": True,
-        "status": "completed" if completed else "queued",
-        "task_id": task_id,
-        "outputs": outputs,
-        "backend_mode": "native-comfyui",
-        "timestamp": now_iso(),
-    }
+    if wait:
+        timeout = float(payload.get("wait_timeout", payload.get("timeout", 600.0)))
+        outputs = client.wait_for_outputs(task_id, timeout=timeout)
+    else:
+        history = client.history(task_id)
+        entry = history.get(task_id)
+        outputs = client.outputs(task_id) if isinstance(entry, dict) else []
+    completed = bool(outputs)
+    result: Dict[str, Any] = {"ok": True, "status": "completed" if completed else "queued", "task_id": task_id, "outputs": outputs, "backend_mode": "native-comfyui", "timestamp": now_iso()}
+    if completed and (wait or bool(payload.get("download"))):
+        target_dir = _output_dir(payload)
+        downloaded = [client.download_output(item, target_dir) for item in outputs]
+        result.update({"downloaded_files": downloaded, "output_dir": str(target_dir)})
+    return result
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="EVAVO local image generator wrapper")
-    parser.add_argument("command", choices=["generate_image", "health_check", "task_status"])
+    parser.add_argument("command", choices=["generate_image", "health_check", "task_status", "wait_image"])
     parser.add_argument("payload", nargs="?", default="{}", help="JSON object payload")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="EVAVO or native ComfyUI endpoint")
     args = parser.parse_args()
@@ -150,6 +145,8 @@ def main() -> int:
             result = health_check(endpoint)
         elif args.command == "task_status":
             result = task_status(endpoint, payload)
+        elif args.command == "wait_image":
+            result = task_status(endpoint, payload, wait=True)
         else:
             result = generate_image(endpoint, payload)
     except ValueError as exc:
