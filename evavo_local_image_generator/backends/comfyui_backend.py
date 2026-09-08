@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -17,21 +20,24 @@ class ComfyUIBackend:
     def __init__(self, endpoint: Optional[str] = None):
         self.endpoint = (endpoint or os.getenv("EVAVO_COMFYUI_ENDPOINT") or os.getenv("COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
 
-    def _request(self, path: str, *, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 10.0) -> Dict[str, Any]:
+    def _open(self, path: str, *, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 10.0):
         body = None
         headers = {"Accept": "application/json", "User-Agent": "EVAVO-ComfyUI/1"}
         if payload is not None:
             body = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        req = urllib.request.Request(f"{self.endpoint}{path}", data=body, headers=headers, method=method)
+        request = urllib.request.Request(f"{self.endpoint}{path}", data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                raw = response.read().decode("utf-8", errors="replace")
+            return urllib.request.urlopen(request, timeout=timeout)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:1000]
             raise RuntimeError(f"COMFYUI_HTTP_ERROR:{exc.code}:{detail or exc.reason}") from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(f"COMFYUI_CONNECTION_ERROR:{exc}") from exc
+
+    def _request(self, path: str, *, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 10.0) -> Dict[str, Any]:
+        with self._open(path, method=method, payload=payload, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -96,16 +102,69 @@ class ComfyUIBackend:
             raise ValueError("width/height must be between 64 and 4096")
         return max(64, number - (number % 8))
 
-    def build_txt2img_workflow(self, prompt: str, *, negative_prompt: str = "", width: int = 1024, height: int = 1024, steps: int = 24, cfg_scale: float = 7.0, seed: Optional[int] = None, checkpoint: Optional[str] = None, filename_prefix: str = "EVAVO") -> Dict[str, Any]:
+    @staticmethod
+    def _replace_template(value: Any, replacements: Dict[str, Any]) -> Any:
+        if isinstance(value, dict):
+            return {key: ComfyUIBackend._replace_template(item, replacements) for key, item in value.items()}
+        if isinstance(value, list):
+            return [ComfyUIBackend._replace_template(item, replacements) for item in value]
+        if isinstance(value, str):
+            if value in replacements:
+                return replacements[value]
+            result = value
+            for placeholder, replacement in replacements.items():
+                result = result.replace(placeholder, str(replacement))
+            return result
+        return value
+
+    def load_workflow_template(self, path: str | Path, replacements: Dict[str, Any]) -> Dict[str, Any]:
+        workflow_path = Path(path).expanduser().resolve()
+        try:
+            payload = json.loads(workflow_path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"COMFYUI_WORKFLOW_NOT_FOUND:{workflow_path}") from exc
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"COMFYUI_WORKFLOW_INVALID:{workflow_path}:{exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("COMFYUI_WORKFLOW_INVALID:workflow root must be a JSON object")
+        rendered = self._replace_template(payload, replacements)
+        if not isinstance(rendered, dict) or not rendered:
+            raise RuntimeError("COMFYUI_WORKFLOW_INVALID:rendered workflow is empty")
+        return rendered
+
+    def build_txt2img_workflow(self, prompt: str, *, negative_prompt: str = "", width: int = 1024, height: int = 1024, steps: int = 24, cfg_scale: float = 7.0, seed: Optional[int] = None, checkpoint: Optional[str] = None, filename_prefix: str = "EVAVO", workflow_path: Optional[str] = None) -> Dict[str, Any]:
         width = self._dimension(width, 1024)
         height = self._dimension(height, 1024)
         steps = max(1, min(200, int(steps)))
         cfg_scale = float(cfg_scale)
         if not 0.0 <= cfg_scale <= 100.0:
             raise ValueError("cfg_scale must be between 0 and 100")
-        chosen_checkpoint = self.choose_checkpoint(checkpoint)
         seed_value = int(seed) if seed is not None else secrets.randbits(63)
-        safe_prefix = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in filename_prefix)[:120] or "EVAVO"
+        safe_prefix = "".join(ch if ch.isalnum() or ch in "_-/" else "_" for ch in filename_prefix)[:120] or "EVAVO"
+        template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
+
+        chosen_checkpoint: Optional[str] = None
+        try:
+            chosen_checkpoint = self.choose_checkpoint(checkpoint)
+        except RuntimeError:
+            if not template_path:
+                raise
+            chosen_checkpoint = checkpoint or os.getenv("EVAVO_COMFYUI_CHECKPOINT") or ""
+
+        replacements: Dict[str, Any] = {
+            "{{prompt}}": prompt,
+            "{{negative_prompt}}": negative_prompt,
+            "{{checkpoint}}": chosen_checkpoint,
+            "{{width}}": width,
+            "{{height}}": height,
+            "{{steps}}": steps,
+            "{{cfg_scale}}": cfg_scale,
+            "{{seed}}": seed_value,
+            "{{filename_prefix}}": safe_prefix,
+        }
+        if template_path:
+            return self.load_workflow_template(template_path, replacements)
+
         return {
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": chosen_checkpoint}},
             "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
@@ -116,7 +175,7 @@ class ComfyUIBackend:
             "7": {"class_type": "SaveImage", "inputs": {"filename_prefix": safe_prefix, "images": ["6", 0]}},
         }
 
-    def queue_image(self, prompt: str, *, project_name: str = "batch_gen", negative_prompt: str = "", width: int = 1024, height: int = 1024, steps: int = 24, cfg_scale: float = 7.0, seed: Optional[int] = None, checkpoint: Optional[str] = None) -> Dict[str, Any]:
+    def queue_image(self, prompt: str, *, project_name: str = "batch_gen", negative_prompt: str = "", width: int = 1024, height: int = 1024, steps: int = 24, cfg_scale: float = 7.0, seed: Optional[int] = None, checkpoint: Optional[str] = None, workflow_path: Optional[str] = None) -> Dict[str, Any]:
         workflow = self.build_txt2img_workflow(
             prompt,
             negative_prompt=negative_prompt,
@@ -127,6 +186,7 @@ class ComfyUIBackend:
             seed=seed,
             checkpoint=checkpoint,
             filename_prefix=f"EVAVO/{project_name}",
+            workflow_path=workflow_path,
         )
         response = self._request("/prompt", method="POST", payload={"prompt": workflow}, timeout=30.0)
         prompt_id = response.get("prompt_id")
@@ -138,9 +198,19 @@ class ComfyUIBackend:
             "task_id": prompt_id,
             "prompt_id": prompt_id,
             "project_name": project_name,
-            "checkpoint": workflow["1"]["inputs"]["ckpt_name"],
+            "checkpoint": checkpoint or os.getenv("EVAVO_COMFYUI_CHECKPOINT") or self._workflow_checkpoint(workflow),
             "backend_mode": "native-comfyui",
         }
+
+    @staticmethod
+    def _workflow_checkpoint(workflow: Dict[str, Any]) -> Optional[str]:
+        for node in workflow.values():
+            if not isinstance(node, dict) or node.get("class_type") != "CheckpointLoaderSimple":
+                continue
+            inputs = node.get("inputs")
+            if isinstance(inputs, dict) and isinstance(inputs.get("ckpt_name"), str):
+                return inputs["ckpt_name"]
+        return None
 
     def history(self, prompt_id: str) -> Dict[str, Any]:
         return self._request(f"/history/{urllib.parse.quote(prompt_id)}", timeout=15.0)
@@ -168,6 +238,69 @@ class ComfyUIBackend:
                         "type": str(image.get("type", "output")),
                     })
         return found
+
+    def wait_for_outputs(self, prompt_id: str, *, timeout: float = 600.0, interval: float = 1.0) -> List[Dict[str, str]]:
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+        if interval < 0.1:
+            raise ValueError("interval must be at least 0.1 seconds")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            history = self.history(prompt_id)
+            entry = history.get(prompt_id)
+            if isinstance(entry, dict):
+                outputs = self.outputs(prompt_id)
+                if outputs:
+                    return outputs
+                status = entry.get("status")
+                if isinstance(status, dict):
+                    messages = status.get("messages")
+                    if status.get("completed") is False and messages:
+                        raise RuntimeError(f"COMFYUI_EXECUTION_FAILED:{messages}")
+            time.sleep(interval)
+        raise RuntimeError(f"COMFYUI_WAIT_TIMEOUT:{prompt_id}:{timeout:g}s")
+
+    def download_output(self, output: Dict[str, str], target_dir: str | Path, *, max_bytes: int = 256 * 1024 * 1024) -> str:
+        filename = output.get("filename")
+        if not isinstance(filename, str) or not filename:
+            raise ValueError("output filename is missing")
+        safe_name = Path(filename).name
+        if safe_name in {"", ".", ".."}:
+            raise ValueError("output filename is invalid")
+        destination_dir = Path(target_dir).expanduser().resolve()
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / safe_name
+        query = urllib.parse.urlencode({
+            "filename": filename,
+            "subfolder": output.get("subfolder", ""),
+            "type": output.get("type", "output"),
+        })
+        fd, temp_name = tempfile.mkstemp(prefix=safe_name + ".", suffix=".part", dir=str(destination_dir))
+        total = 0
+        try:
+            with os.fdopen(fd, "wb") as handle, self._open(f"/view?{query}", timeout=60.0) as response:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError(f"COMFYUI_OUTPUT_TOO_LARGE:{safe_name}")
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, destination)
+        except Exception:
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
+        return str(destination)
+
+    def wait_and_download(self, prompt_id: str, target_dir: str | Path, *, timeout: float = 600.0, interval: float = 1.0) -> List[str]:
+        outputs = self.wait_for_outputs(prompt_id, timeout=timeout, interval=interval)
+        return [self.download_output(output, target_dir) for output in outputs]
 
     def __repr__(self) -> str:
         return f"ComfyUIBackend(endpoint={self.endpoint!r})"
