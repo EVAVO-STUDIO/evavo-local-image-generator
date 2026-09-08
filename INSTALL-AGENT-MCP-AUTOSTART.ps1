@@ -46,18 +46,12 @@ Write-Host "Installed EVAVO agent MCP autostart:" -ForegroundColor Green
 Write-Host "  $launcher"
 Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in." -ForegroundColor Green
 
-# Start it now without blocking this installer. The server itself remains a
-# foreground process inside the spawned hidden PowerShell process so failures
-# are not detached from their owning process tree.
+# Start it now without blocking this installer. Quote the script path explicitly
+# because Start-Process joins ArgumentList values into a command line on Windows.
 Write-Host "Starting it now in a hidden process..." -ForegroundColor Cyan
-$arguments = @(
-    "-NoProfile",
-    "-ExecutionPolicy", "Bypass",
-    "-WindowStyle", "Hidden",
-    "-File", $script,
-    "-Port", "$Port"
-)
-Start-Process -FilePath "powershell.exe" -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden | Out-Null
+$quotedScript = '"' + $script.Replace('"', '\"') + '"'
+$argumentLine = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $quotedScript -Port $Port"
+Start-Process -FilePath "powershell.exe" -ArgumentList $argumentLine -WorkingDirectory $repo -WindowStyle Hidden | Out-Null
 
 $deadline = (Get-Date).AddSeconds(20)
 $ready = $false
