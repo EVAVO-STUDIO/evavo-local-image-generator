@@ -53,6 +53,9 @@ evavo-logs/
 .evavo/
 *.log
 *.tmp
+task_history.json
+task_history.json.lock
+task_history.json.*.tmp
 
 # Platform specific
 CUsersUserbeestationevavo-generation/
