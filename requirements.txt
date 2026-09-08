@@ -1,18 +1,25 @@
 # EVAVO Local Image Generator - Production Dependencies
-# Compatible with Python 3.8+
+# Supported runtime: Python 3.10+
+#
+# The operational control plane (evavo_operations.py, evavo-wrapper.py,
+# mock-comfyui-server.py, generate-batch.py, monitor-evavo.py and
+# task-tracker.py) intentionally uses only the Python standard library.
+# The packages below support the wider generator/tooling repository.
 
 # Core dependencies
-requests>=2.28.0         # HTTP client for ComfyUI communication
-python-dotenv>=0.21.0    # Environment configuration
+requests>=2.28.0
+python-dotenv>=0.21.0
 
-# Optional: For enhanced functionality
-Pillow>=9.0.0            # Image processing
-numpy>=1.21.0            # Numerical operations
-aiohttp>=3.8.0           # Async HTTP client (for future async support)
+# Image/numerical functionality
+Pillow>=9.0.0
+numpy>=1.21.0
 
-# Development dependencies (optional)
-pytest>=7.0.0            # Testing framework
-pytest-cov>=4.0.0        # Coverage reporting
-black>=22.0.0            # Code formatting
-flake8>=4.0.0            # Linting
-mypy>=0.950              # Type checking
+# Async integrations used elsewhere in the repository
+aiohttp>=3.8.0
+
+# Development / validation
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=22.0.0
+flake8>=4.0.0
+mypy>=0.950
