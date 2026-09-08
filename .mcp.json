@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "evavo-local-image-generator": {
-      "command": "./.venv/Scripts/python.exe",
+      "command": "python",
       "args": ["-m", "evavo_local_image_generator.mcp_server"],
       "env": {
         "EVAVO_LOCAL_IMAGE_GENERATOR_MODE": "production",
@@ -9,8 +9,7 @@
         "EVAVO_COMFYUI_ENDPOINT": "http://127.0.0.1:8188",
         "PYTHONUNBUFFERED": "1"
       },
-      "description": "Multi-modal AI generation bridge for EVAVO platform",
-      "documentation": "https://github.com/evavo/evavo-local-image-generator#readme"
+      "description": "EVAVO native ComfyUI image generation MCP server"
     }
   }
 }
