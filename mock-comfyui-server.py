@@ -18,9 +18,7 @@ from evavo_operations import PROTOCOL_VERSION, SERVICE_NAME, now_iso
 TASKS: Dict[str, Dict[str, Any]] = {}
 TASKS_LOCK = threading.Lock()
 STARTED_AT = now_iso()
-PNG_1X1 = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl1e6sAAAAASUVORK5CYII="
-)
+PNG_1X1 = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl1e6sAAAAASUVORK5CYII=")
 
 
 def _choice_node(input_name: str, values: list[str]) -> Dict[str, Any]:
@@ -45,7 +43,7 @@ NATIVE_NODES: Dict[str, Dict[str, Any]] = {
 
 
 class EvavoMockHandler(BaseHTTPRequestHandler):
-    server_version = "EVAVOMockComfyUI/2.4"
+    server_version = "EVAVOMockComfyUI/2.5"
 
     @property
     def native_only(self) -> bool:
@@ -54,6 +52,10 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
     @property
     def no_checkpoint_loader(self) -> bool:
         return bool(getattr(self.server, "no_checkpoint_loader", False))
+
+    @property
+    def hold_prompts(self) -> bool:
+        return bool(getattr(self.server, "hold_prompts", False))
 
     def _native_nodes(self) -> Dict[str, Dict[str, Any]]:
         if not self.no_checkpoint_loader:
@@ -74,12 +76,14 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, payload: Dict[str, Any]) -> None:
         self._send_bytes(status, json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
-    def _read_json(self, max_bytes: int = 1024 * 1024) -> Dict[str, Any]:
+    def _read_json(self, max_bytes: int = 1024 * 1024, *, allow_empty: bool = False) -> Dict[str, Any]:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as exc:
             raise ValueError("invalid Content-Length") from exc
         if length <= 0:
+            if allow_empty:
+                return {}
             raise ValueError("request body is required")
         if length > max_bytes:
             raise OverflowError("request body exceeds 1 MiB")
@@ -89,6 +93,22 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
             raise ValueError("request body must be valid UTF-8 JSON") from exc
         if not isinstance(payload, dict):
             raise ValueError("request JSON root must be an object")
+        return payload
+
+    @staticmethod
+    def _job_payload(prompt_id: str, task: Dict[str, Any]) -> Dict[str, Any]:
+        mapping = {"queued": "pending", "running": "in_progress", "completed": "completed", "failed": "error", "cancelled": "cancelled"}
+        status = mapping.get(str(task.get("status", "")), "pending")
+        payload: Dict[str, Any] = {
+            "id": prompt_id,
+            "status": status,
+            "created_at": task.get("created_at", STARTED_AT),
+            "updated_at": task.get("updated_at", task.get("created_at", STARTED_AT)),
+        }
+        if status == "error":
+            payload["error_message"] = str(task.get("error", "simulated failure"))
+        else:
+            payload["error_message"] = None
         return payload
 
     def do_GET(self) -> None:  # noqa: N802
@@ -110,23 +130,27 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
         if path.startswith("/object_info/"):
             node_name = unquote(path[len("/object_info/"):])
             node = self._native_nodes().get(node_name)
-            if node is None:
-                self._send_json(404, {"error": "unknown_node", "node": node_name})
-            else:
-                self._send_json(200, {node_name: node})
+            self._send_json(200, {node_name: node}) if node is not None else self._send_json(404, {"error": "unknown_node", "node": node_name})
             return
         if path == "/queue":
             with TASKS_LOCK:
-                running = []
-                pending = []
+                running, pending = [], []
                 for index, (prompt_id, task) in enumerate(TASKS.items(), start=1):
-                    status = str(task.get("status", ""))
                     row = [index, prompt_id, task.get("workflow", {}), {}, []]
-                    if status == "running":
+                    if task.get("status") == "running":
                         running.append(row)
-                    elif status == "queued":
+                    elif task.get("status") == "queued":
                         pending.append(row)
             self._send_json(200, {"queue_running": running, "queue_pending": pending})
+            return
+        if path.startswith("/api/jobs/"):
+            prompt_id = unquote(path[len("/api/jobs/"):])
+            with TASKS_LOCK:
+                task = TASKS.get(prompt_id)
+            if task is None:
+                self._send_json(404, {"error": "Job not found"})
+            else:
+                self._send_json(200, self._job_payload(prompt_id, task))
             return
         if path.startswith("/history/"):
             prompt_id = path.rsplit("/", 1)[-1]
@@ -135,29 +159,11 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
             if task is None or task.get("status") in {"queued", "running"}:
                 self._send_json(200, {})
             elif task.get("status") == "failed":
-                self._send_json(
-                    200,
-                    {
-                        prompt_id: {
-                            "status": {
-                                "status_str": "error",
-                                "completed": False,
-                                "messages": [["execution_error", {"exception_message": str(task.get("error", "simulated failure"))}]],
-                            },
-                            "outputs": {},
-                        }
-                    },
-                )
+                self._send_json(200, {prompt_id: {"status": {"status_str": "error", "completed": False, "messages": [["execution_error", {"exception_message": str(task.get("error", "simulated failure"))}]]}, "outputs": {}}})
+            elif task.get("status") == "cancelled":
+                self._send_json(200, {prompt_id: {"status": {"status_str": "cancelled", "completed": False, "messages": []}, "outputs": {}}})
             else:
-                self._send_json(
-                    200,
-                    {
-                        prompt_id: {
-                            "status": {"status_str": "success", "completed": True, "messages": []},
-                            "outputs": {"7": {"images": [{"filename": f"{prompt_id}.png", "subfolder": "EVAVO/test", "type": "output"}]}},
-                        }
-                    },
-                )
+                self._send_json(200, {prompt_id: {"status": {"status_str": "success", "completed": True, "messages": []}, "outputs": {"7": {"images": [{"filename": f"{prompt_id}.png", "subfolder": "EVAVO/test", "type": "output"}]}}}})
             return
         if path == "/view":
             self._send_bytes(200, PNG_1X1, "image/png")
@@ -166,6 +172,21 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
+        if path.startswith("/api/jobs/") and path.endswith("/cancel"):
+            prompt_id = unquote(path[len("/api/jobs/"):-len("/cancel")])
+            try:
+                self._read_json(allow_empty=True)
+            except (OverflowError, ValueError):
+                pass
+            with TASKS_LOCK:
+                task = TASKS.get(prompt_id)
+                cancelled = bool(task and task.get("status") in {"queued", "running"})
+                if cancelled:
+                    task["status"] = "cancelled"
+                    task["updated_at"] = now_iso()
+            self._send_json(200, {"cancelled": cancelled})
+            return
+
         try:
             payload = self._read_json()
         except OverflowError as exc:
@@ -175,6 +196,17 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"status": "failed", "error_code": "INVALID_REQUEST", "message": str(exc)})
             return
 
+        if path == "/queue":
+            delete = payload.get("delete")
+            if isinstance(delete, list):
+                with TASKS_LOCK:
+                    for prompt_id in delete:
+                        task = TASKS.get(str(prompt_id))
+                        if task and task.get("status") == "queued":
+                            task["status"] = "cancelled"
+                            task["updated_at"] = now_iso()
+            self._send_json(200, {})
+            return
         if path == "/api/prompt" and not self.native_only:
             prompt = payload.get("prompt")
             project_name = payload.get("project_name", "default")
@@ -186,7 +218,6 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
                 TASKS[task_id] = {"task_id": task_id, "status": "queued", "prompt": prompt, "project_name": project_name, "created_at": now_iso()}
             self._send_json(202, {"service": SERVICE_NAME, "protocol_version": PROTOCOL_VERSION, "status": "queued", "task_id": task_id, "project_name": project_name, "timestamp": now_iso()})
             return
-
         if path == "/prompt":
             workflow = payload.get("prompt")
             if not isinstance(workflow, dict) or not workflow:
@@ -194,10 +225,9 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
                 return
             prompt_id = str(uuid.uuid4())
             with TASKS_LOCK:
-                TASKS[prompt_id] = {"task_id": prompt_id, "status": "completed", "workflow": workflow, "created_at": now_iso()}
+                TASKS[prompt_id] = {"task_id": prompt_id, "status": "queued" if self.hold_prompts else "completed", "workflow": workflow, "created_at": now_iso()}
             self._send_json(200, {"prompt_id": prompt_id, "number": 1, "node_errors": {}})
             return
-
         self._send_json(404, {"status": "failed", "error_code": "NOT_FOUND", "path": path})
 
 
@@ -207,6 +237,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8188)
     parser.add_argument("--native-only", action="store_true", help="Expose only native ComfyUI routes")
     parser.add_argument("--no-checkpoint-loader", action="store_true", help="Simulate a native workflow environment without CheckpointLoaderSimple")
+    parser.add_argument("--hold-prompts", action="store_true", help="Leave native /prompt submissions pending for cancellation tests")
     args = parser.parse_args()
     if args.host not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("mock service is restricted to loopback; use 127.0.0.1")
@@ -215,7 +246,8 @@ def main() -> int:
     server = ThreadingHTTPServer((args.host, args.port), EvavoMockHandler)
     server.native_only = args.native_only  # type: ignore[attr-defined]
     server.no_checkpoint_loader = args.no_checkpoint_loader  # type: ignore[attr-defined]
-    print(f"EVAVO ComfyUI simulator ready at http://{args.host}:{args.port} native_only={args.native_only} no_checkpoint_loader={args.no_checkpoint_loader}")
+    server.hold_prompts = args.hold_prompts  # type: ignore[attr-defined]
+    print(f"EVAVO ComfyUI simulator ready at http://{args.host}:{args.port} native_only={args.native_only} no_checkpoint_loader={args.no_checkpoint_loader} hold_prompts={args.hold_prompts}")
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
