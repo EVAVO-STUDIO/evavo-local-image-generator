@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Provision an isolated local ComfyUI runtime and explicit checkpoints for EVAVO.
 
-Runtime provisioning is automatic. Checkpoint provisioning is intentionally
-opt-in: a local file or explicit URL must be supplied by the operator because
-model files are large and may have separate licenses/access requirements.
+Runtime provisioning is automatic for source checkouts. Existing Windows
+portable installations are reused without modifying their embedded Python.
+Checkpoint provisioning is intentionally opt-in: a local file or explicit URL
+must be supplied by the operator because model files are large and may have
+separate licenses/access requirements.
 """
 
 from __future__ import annotations
@@ -52,10 +54,44 @@ def require_ok(result: subprocess.CompletedProcess[str], action: str) -> None:
         raise RuntimeError(f"{action}:{detail}")
 
 
+def _looks_like_comfyui(target: Path) -> bool:
+    return (target / "main.py").is_file() or (target / "ComfyUI" / "main.py").is_file()
+
+
 def default_target() -> Path:
     configured = os.getenv("EVAVO_COMFYUI_HOME")
     if configured:
         return Path(configured).expanduser().resolve()
+
+    home = Path.home()
+    candidates = [
+        ROOT.parent / "ComfyUI",
+        Path("C:/ComfyUI"),
+        Path("C:/Gitrepos/ComfyUI"),
+        Path("C:/GitRepos/ComfyUI"),
+        Path("C:/AI/ComfyUI"),
+        Path("C:/ComfyUI_windows_portable"),
+        home / "ComfyUI",
+        home / "Documents" / "ComfyUI",
+        home / "Downloads" / "ComfyUI_windows_portable",
+        home / "Desktop" / "ComfyUI",
+    ]
+    extra = os.getenv("EVAVO_COMFYUI_SEARCH_PATHS", "")
+    candidates.extend(Path(raw).expanduser() for raw in extra.split(os.pathsep) if raw.strip())
+
+    seen = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            resolved = candidate.expanduser().absolute()
+        key = os.path.normcase(str(resolved))
+        if key in seen:
+            continue
+        seen.add(key)
+        if _looks_like_comfyui(resolved):
+            return resolved
+
     return (ROOT.parent / "ComfyUI").resolve()
 
 
@@ -68,6 +104,11 @@ def resolve_app_root(target: Path) -> Path:
     if (portable / "main.py").is_file():
         return portable
     raise RuntimeError(f"COMFYUI_TARGET_CONFLICT:{target} does not contain main.py or ComfyUI/main.py")
+
+
+def is_portable_container(target: Path) -> bool:
+    target = target.expanduser().resolve()
+    return not (target / "main.py").is_file() and (target / "ComfyUI" / "main.py").is_file()
 
 
 def venv_python(target: Path) -> Path:
@@ -131,8 +172,7 @@ def install_runtime(target: Path, python: Path, *, install_pytorch: bool, torch_
 
     nvidia = nvidia_available()
     if nvidia and install_pytorch:
-        # Match ComfyUI's documented stable NVIDIA installation path. ComfyUI
-        # currently recommends the CUDA wheel source as an extra index.
+        # Match ComfyUI's documented stable NVIDIA installation path.
         result = run(
             [
                 str(python),
@@ -307,6 +347,27 @@ def save_state(payload: Dict[str, Any]) -> None:
     os.replace(temp, STATE_FILE)
 
 
+def _portable_payload(target: Path, app_root: Path, checkpoint: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    checkpoint_files = list_checkpoint_files(app_root)
+    payload = {
+        "ok": True,
+        "status": "portable_reused",
+        "timestamp": now_iso(),
+        "target": str(target),
+        "app_root": str(app_root),
+        "runtime_managed": False,
+        "checkpoint": checkpoint,
+        "verification": {
+            "checkpoint_directory": str(app_root / "models" / "checkpoints"),
+            "checkpoint_files": checkpoint_files,
+        },
+        "environment": {"EVAVO_COMFYUI_HOME": str(target)},
+        "model_required": not bool(checkpoint_files),
+    }
+    save_state(payload)
+    return payload
+
+
 def provision(args: argparse.Namespace) -> Dict[str, Any]:
     target = Path(args.target).expanduser().resolve() if args.target else default_target()
 
@@ -315,6 +376,8 @@ def provision(args: argparse.Namespace) -> Dict[str, Any]:
         checkpoint = provision_checkpoint(app_root, args)
         if checkpoint is None:
             raise RuntimeError("CHECKPOINT_SOURCE_REQUIRED:set EVAVO_CHECKPOINT_FILE or EVAVO_CHECKPOINT_URL")
+        if is_portable_container(target):
+            return _portable_payload(target, app_root, checkpoint)
         checkpoint_files = list_checkpoint_files(app_root)
         payload = {
             "ok": True,
@@ -331,6 +394,13 @@ def provision(args: argparse.Namespace) -> Dict[str, Any]:
         }
         save_state(payload)
         return payload
+
+    # Portable bundles own their embedded Python/runtime. Reuse them rather than
+    # creating a second source checkout or mutating the embedded environment.
+    if target.exists() and is_portable_container(target):
+        app_root = resolve_app_root(target)
+        checkpoint = provision_checkpoint(app_root, args)
+        return _portable_payload(target, app_root, checkpoint)
 
     checkout = ensure_checkout(target, args.repository, not args.skip_update)
     app_root = resolve_app_root(target)
@@ -365,7 +435,7 @@ def provision(args: argparse.Namespace) -> Dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Provision official ComfyUI for EVAVO")
-    parser.add_argument("--target", help="ComfyUI source root or Windows portable container; defaults to sibling ComfyUI")
+    parser.add_argument("--target", help="ComfyUI source root or Windows portable container; defaults to an existing standard install or sibling ComfyUI")
     parser.add_argument("--repository", default=os.getenv("EVAVO_COMFYUI_REPOSITORY", OFFICIAL_COMFYUI_REPOSITORY))
     parser.add_argument("--skip-update", action="store_true", help="Do not git pull an existing clean source checkout")
     parser.add_argument("--skip-pytorch", action="store_true", help="Do not perform NVIDIA-specific PyTorch install before ComfyUI requirements")
