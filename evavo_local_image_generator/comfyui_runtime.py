@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -11,6 +14,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -23,8 +27,6 @@ MOCK_STATE_FILE = STATE_DIR / "operations-service.json"
 LOG_FILE = STATE_DIR / "native-comfyui.log"
 EXTRA_MODEL_CONFIG = STATE_DIR / "extra-model-paths.yaml"
 
-# Canonical ComfyUI model folder keys, with common source/portable/A1111-style
-# relative directory variants. Only directories that actually exist are emitted.
 MODEL_PATH_CANDIDATES: Dict[str, Sequence[str]] = {
     "checkpoints": ("checkpoints", "models/checkpoints", "Stable-diffusion", "models/Stable-diffusion"),
     "configs": ("configs", "models/configs", "models/Stable-diffusion"),
@@ -212,8 +214,6 @@ def _relative_existing_paths(root: Path, candidates: Sequence[str]) -> List[str]
 
 
 def _yaml_string(value: str) -> str:
-    # JSON strings are valid YAML scalars and safely escape Windows backslashes,
-    # quotes and control characters without depending on PyYAML.
     return json.dumps(value, ensure_ascii=False)
 
 
@@ -249,11 +249,22 @@ def render_extra_model_paths_yaml(roots: Sequence[Path]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def shared_model_configuration() -> Dict[str, Any]:
+    roots = configured_shared_model_roots()
+    if not roots:
+        return {"roots": [], "yaml": None, "sha256": None}
+    text = render_extra_model_paths_yaml(roots)
+    return {
+        "roots": roots,
+        "yaml": text,
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+
+
 def write_extra_model_paths_config(
     roots: Optional[Sequence[Path]] = None,
     destination: Path = EXTRA_MODEL_CONFIG,
 ) -> Optional[Path]:
-    """Atomically write EVAVO's extra model-path config, or return None when unused."""
     configured = list(roots) if roots is not None else configured_shared_model_roots()
     destination = destination.expanduser().resolve()
     if not configured:
@@ -295,12 +306,78 @@ def load_state() -> Dict[str, Any]:
     return _load_json(STATE_FILE)
 
 
-def _save_state(pid: int, endpoint: str, install: ComfyUIInstall, *, extra_model_config: Optional[Path] = None) -> None:
+def _process_command_line(pid: int) -> Optional[str]:
+    if pid <= 0:
+        return None
+    if os.name == "nt":
+        powershell = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            return None
+        script = f"$p=Get-CimInstance Win32_Process -Filter 'ProcessId = {pid}' -ErrorAction SilentlyContinue; if ($p) {{ $p.CommandLine }}"
+        try:
+            result = subprocess.run([powershell, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        value = result.stdout.strip()
+        return value or None
+
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    if proc_cmdline.is_file():
+        try:
+            data = proc_cmdline.read_bytes().replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+            if data:
+                return data
+        except OSError:
+            pass
+    try:
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def _command_contains_path(command_line: Optional[str], path: Path) -> bool:
+    if not command_line:
+        return False
+    command = command_line.replace("\\", "/").lower()
+    expected = str(path.expanduser().resolve()).replace("\\", "/").lower()
+    return expected in command
+
+
+def _native_state_identity_matches(state: Dict[str, Any]) -> bool:
+    pid = state.get("pid")
+    install = state.get("install")
+    if not isinstance(pid, int) or pid <= 0 or not isinstance(install, dict):
+        return False
+    main_py = install.get("main_py")
+    if not isinstance(main_py, str) or not main_py:
+        return False
+    return _command_contains_path(_process_command_line(pid), Path(main_py))
+
+
+def _save_state(
+    pid: int,
+    endpoint: str,
+    install: ComfyUIInstall,
+    command: Sequence[str],
+    *,
+    extra_model_config: Optional[Path],
+    shared_roots: Sequence[Path],
+    config_sha256: Optional[str],
+) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    payload: Dict[str, Any] = {"pid": pid, "endpoint": endpoint, "install": install.to_dict()}
+    payload: Dict[str, Any] = {
+        "pid": pid,
+        "endpoint": endpoint,
+        "started_at": datetime.now().astimezone().isoformat(),
+        "install": install.to_dict(),
+        "command": list(command),
+        "shared_model_roots": [str(item) for item in shared_roots],
+        "extra_model_paths_sha256": config_sha256,
+    }
     if extra_model_config is not None:
         payload["extra_model_paths_config"] = str(extra_model_config)
-        payload["shared_model_roots"] = [str(item) for item in configured_shared_model_roots()]
     STATE_FILE.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -320,19 +397,26 @@ def _evavo_mock_running(endpoint: str) -> bool:
     return isinstance(payload, dict) and payload.get("service") == "evavo-local-image-generator" and payload.get("mode") == "mock"
 
 
+def _terminate_pid(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=10)
+    else:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
 def _stop_managed_mock() -> bool:
     state = _load_json(MOCK_STATE_FILE)
     pid = state.get("pid")
     if not isinstance(pid, int) or pid <= 0:
         return False
+    expected = ROOT / "mock-comfyui-server.py"
+    if not _command_contains_path(_process_command_line(pid), expected):
+        return False
     try:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)
-        else:
-            try:
-                os.kill(pid, 15)
-            except ProcessLookupError:
-                pass
+        _terminate_pid(pid)
     finally:
         try:
             MOCK_STATE_FILE.unlink()
@@ -350,12 +434,52 @@ def native_health(endpoint: str = "http://127.0.0.1:8188") -> Optional[Dict[str,
         return None
 
 
+def stop_managed_comfyui() -> Dict[str, Any]:
+    state = load_state()
+    pid = state.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return {"status": "not_managed", "stopped": False}
+    if not _native_state_identity_matches(state):
+        _clear_state()
+        return {"status": "stale_or_identity_mismatch", "stopped": False, "pid": pid}
+    try:
+        _terminate_pid(pid)
+    finally:
+        _clear_state()
+    return {"status": "stopped", "stopped": True, "pid": pid}
+
+
 def ensure_comfyui(endpoint: str = "http://127.0.0.1:8188", *, wait_seconds: float = 90.0, allow_start: bool = True) -> Dict[str, Any]:
-    """Return healthy native ComfyUI, starting a discovered local install if needed."""
+    """Return healthy native ComfyUI, safely restarting EVAVO-owned instances when model config changes."""
     endpoint = endpoint.rstrip("/")
+    desired = shared_model_configuration()
+    desired_roots = list(desired["roots"])
+    desired_hash = desired["sha256"]
+
     existing = native_health(endpoint)
     if existing:
-        return {"status": "already_running", "started": False, "health": existing, "endpoint": endpoint}
+        state = load_state()
+        managed_here = bool(state) and state.get("endpoint") == endpoint and _native_state_identity_matches(state)
+        if state and not managed_here:
+            _clear_state()
+            state = {}
+
+        if managed_here and state.get("extra_model_paths_sha256") != desired_hash:
+            if not allow_start:
+                raise RuntimeError("COMFYUI_RESTART_REQUIRED:EVAVO shared model configuration changed")
+            stopped = stop_managed_comfyui()
+            if not stopped.get("stopped"):
+                raise RuntimeError(f"COMFYUI_RESTART_FAILED:{stopped.get('status')}")
+            time.sleep(0.75)
+        else:
+            result: Dict[str, Any] = {"status": "already_running", "started": False, "health": existing, "endpoint": endpoint}
+            if desired_roots:
+                result["shared_model_roots"] = [str(item) for item in desired_roots]
+                result["shared_model_config_verified"] = managed_here and state.get("extra_model_paths_sha256") == desired_hash
+                if not managed_here:
+                    result["shared_model_config_note"] = "ComfyUI is user-managed; EVAVO cannot verify whether these shared roots were loaded"
+            return result
+
     if not allow_start:
         raise RuntimeError("COMFYUI_OFFLINE:native ComfyUI is not running")
 
@@ -367,11 +491,12 @@ def ensure_comfyui(endpoint: str = "http://127.0.0.1:8188", *, wait_seconds: flo
 
     if _evavo_mock_running(endpoint):
         if not _stop_managed_mock():
-            raise RuntimeError("COMFYUI_PORT_OCCUPIED:EVAVO mock is running but is not managed by the current checkout")
+            raise RuntimeError("COMFYUI_PORT_OCCUPIED:EVAVO mock is running but its recorded process identity could not be verified")
         time.sleep(0.75)
 
     install = installs[0]
-    extra_model_config = write_extra_model_paths_config()
+    extra_model_config = write_extra_model_paths_config(desired_roots)
+    command = install.command(extra_model_config=extra_model_config)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     log_handle = LOG_FILE.open("ab", buffering=0)
     kwargs: Dict[str, Any] = {
@@ -386,13 +511,18 @@ def ensure_comfyui(endpoint: str = "http://127.0.0.1:8188", *, wait_seconds: flo
         kwargs["start_new_session"] = True
 
     try:
-        process = subprocess.Popen(
-            install.command(extra_model_config=extra_model_config),
-            **kwargs,
-        )
+        process = subprocess.Popen(command, **kwargs)
     finally:
         log_handle.close()
-    _save_state(process.pid, endpoint, install, extra_model_config=extra_model_config)
+    _save_state(
+        process.pid,
+        endpoint,
+        install,
+        command,
+        extra_model_config=extra_model_config,
+        shared_roots=desired_roots,
+        config_sha256=desired_hash,
+    )
 
     deadline = time.monotonic() + max(1.0, wait_seconds)
     last_error = "not ready"
@@ -402,7 +532,7 @@ def ensure_comfyui(endpoint: str = "http://127.0.0.1:8188", *, wait_seconds: flo
             break
         health = native_health(endpoint)
         if health:
-            result: Dict[str, Any] = {
+            result = {
                 "status": "started",
                 "started": True,
                 "pid": process.pid,
@@ -410,39 +540,19 @@ def ensure_comfyui(endpoint: str = "http://127.0.0.1:8188", *, wait_seconds: flo
                 "install": install.to_dict(),
                 "log_file": str(LOG_FILE),
                 "health": health,
+                "shared_model_roots": [str(item) for item in desired_roots],
+                "shared_model_config_sha256": desired_hash,
             }
             if extra_model_config is not None:
                 result["extra_model_paths_config"] = str(extra_model_config)
-                result["shared_model_roots"] = [str(item) for item in configured_shared_model_roots()]
             return result
         last_error = "waiting for /system_stats"
         time.sleep(0.5)
 
     if process.poll() is None:
         try:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], capture_output=True, timeout=10)
-            else:
-                process.terminate()
+            _terminate_pid(process.pid)
         except Exception:
             pass
     _clear_state()
     raise RuntimeError(f"COMFYUI_START_FAILED:{last_error}; log={LOG_FILE}")
-
-
-def stop_managed_comfyui() -> Dict[str, Any]:
-    state = load_state()
-    pid = state.get("pid")
-    if not isinstance(pid, int) or pid <= 0:
-        return {"status": "not_managed", "stopped": False}
-    try:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, timeout=10)
-        else:
-            try:
-                os.kill(pid, 15)
-            except ProcessLookupError:
-                pass
-    finally:
-        _clear_state()
-    return {"status": "stopped", "stopped": True, "pid": pid}
