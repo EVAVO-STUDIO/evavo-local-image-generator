@@ -1,6 +1,7 @@
 # Install/update EVAVO MCP in Claude Desktop while preserving existing MCP servers.
 param(
-    [string]$ServerName = "evavo-local-image-generator"
+    [string]$ServerName = "evavo-local-image-generator",
+    [switch]$SkipValidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,10 +16,12 @@ if (-not (Test-Path $python)) {
     $python = $cmd.Source
 }
 
-Write-Host "Validating EVAVO MCP before installing Claude configuration..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "test-agent-integration.py")
-if ($LASTEXITCODE -ne 0) {
-    throw "Agent/MCP integration tests failed."
+if (-not $SkipValidation) {
+    Write-Host "Validating EVAVO MCP before installing Claude configuration..." -ForegroundColor Cyan
+    & $python (Join-Path $PSScriptRoot "test-agent-integration.py")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Agent/MCP integration tests failed."
+    }
 }
 
 $configDir = Join-Path $env:APPDATA "Claude"
