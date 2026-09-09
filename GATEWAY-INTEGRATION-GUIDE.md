@@ -33,6 +33,26 @@ CORS is **disabled by default**. If `EVAVO_GATEWAY_CORS_ORIGINS` is configured, 
 
 Cloud ChatGPT reaches the workstation through the OpenAI Secure MCP Tunnel described in `CHATGPT-TUNNEL.md`; do not expose port 8000 publicly.
 
+## Request and workflow safety
+
+The gateway bounds generation requests before they become large Pydantic objects. `EVAVO_GATEWAY_MAX_REQUEST_BYTES` defaults to 1 MiB and is clamped to a maximum of 16 MiB. The ASGI ingress middleware checks declared `Content-Length` immediately and also counts streaming/chunked request bytes, so omitting a length header does not bypass the limit.
+
+Additional request boundaries:
+
+```text
+EVAVO_GATEWAY_MAX_PROMPT_CHARS   default 100000, hard cap 1000000
+EVAVO_GATEWAY_MAX_PROJECT_CHARS  default 128, hard cap 1024
+EVAVO_GATEWAY_IMAGE_TIMEOUT      default 600 seconds, bounded 1..86400
+```
+
+Per-request `workflow_path` is **denied by default** on `/generate/image`. Prefer owner-configured `EVAVO_COMFYUI_WORKFLOW`. A workstation owner may deliberately opt into request-supplied workflow paths with:
+
+```powershell
+$env:EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS = "1"
+```
+
+Do not enable that switch for an untrusted HTTP client. The gateway is private loopback infrastructure, not a general arbitrary-file workflow service.
+
 ## Routes
 
 | Method | Path | Contract |
@@ -76,7 +96,10 @@ The service manager:
 - never treats the deterministic EVAVO mock as production rendering;
 - never kills an unknown process occupying a port;
 - stops only identity-verified EVAVO-managed processes;
-- reports auxiliary provider readiness separately from core image health.
+- reports auxiliary provider readiness separately from core image health;
+- fingerprints effective provider configuration without storing provider secrets;
+- restarts only an identity-verified **managed** gateway when provider configuration changes;
+- never kills an externally owned gateway merely to apply new provider settings.
 
 For fresh-machine repair/provisioning:
 
@@ -113,7 +136,7 @@ Before asking for delegated media, inspect:
 Invoke-RestMethod http://127.0.0.1:8000/services | ConvertTo-Json -Depth 8
 ```
 
-The provider layer is intentionally narrower than arbitrary shell execution. Depending on modality it uses reviewed sibling workers or explicit JSON argument arrays, requires a valid provider success receipt and real artifact, constrains output paths to the admitted task workspace, applies timeouts and verifies hashes when the provider supplies them.
+The provider layer is intentionally narrower than arbitrary shell execution. Depending on modality it uses reviewed sibling workers or explicit JSON argument arrays, requires a valid provider success receipt and real artifact, constrains output paths to the admitted task workspace, applies bounded timeouts and verifies hashes when the provider supplies them.
 
 Typical failure codes include:
 
@@ -143,12 +166,17 @@ See `GATEWAY-AUX-PROVIDERS.md` for the provider-specific controls.
 
 ```text
 .evavo/gateway/tasks.json
+.evavo/gateway/tasks.json.lock
 .evavo/gateway/results/<task_id>/
 .evavo/gateway/logs/gateway.log
 .evavo/gateway/service-manager.json
 ```
 
-Interrupted queued/running gateway tasks are marked failed with `GATEWAY_RESTARTED` after restart instead of remaining falsely active.
+Gateway task state is atomically written and guarded by the same cross-platform advisory lock used by EVAVO task history. Task-ID allocation and insertion occur inside one interprocess critical section, so two loopback gateway processes accidentally sharing a task file cannot reuse the same ID.
+
+Reads refresh from the persisted state under the same lock. Interrupted queued/running gateway tasks are marked failed with `GATEWAY_RESTARTED` after restart instead of remaining falsely active.
+
+Malformed/corrupt `tasks.json` is **not** treated as an empty task store. Gateway startup fails with `GATEWAY_TASK_STATE_CORRUPT` (or a read error) and leaves the original file untouched for diagnosis/recovery instead of silently overwriting task history.
 
 ## CORS
 
@@ -168,7 +196,7 @@ The authoritative verifier discovers root, `tests/`, and package suites:
 python evavo.py verify --full --require-powershell
 ```
 
-Coverage includes native image flow, unavailable-provider fail-closed behavior, provider receipt/output confinement, service-manager provider safety, loopback binding, and CORS defaults.
+Coverage includes native image flow, unavailable-provider fail-closed behavior, provider receipt/output confinement and digest evidence, service-manager provider safety, loopback binding, CORS defaults, declared and chunked request-size limits, workflow-path denial, bounded project names, restart-safe task IDs, shared-task-file interprocess locking, and corrupt-state fail-closed startup.
 
 For an already-running real gateway:
 
