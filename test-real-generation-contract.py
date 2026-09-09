@@ -44,17 +44,22 @@ class RealGenerationContractTests(unittest.TestCase):
         self.assertIn("signature-validated", source)
         self.assertNotIn("mock-comfyui-server.py", source)
 
-    def test_updater_requires_exactly_one_real_smoke_after_final_doctor(self) -> None:
+    def test_updater_requires_exactly_one_real_smoke_before_agent_config_and_success(self) -> None:
         source = UPDATER.read_text(encoding="utf-8")
-        final_doctor = source.index("& $python @finalDoctorArgs")
+        bootstrap = source.index("bootstrap --skip-pull --skip-verify")
         smoke = source.index('real-generation-smoke.py") --json')
+        claude = source.index("Installing/updating Claude Desktop stdio MCP configuration")
+        autostart = source.index("Installing/updating per-user private HTTP MCP autostart")
         final_status = source.index('evavo.py") status', smoke)
         completed = source.index("EVAVO workstation setup completed.")
         self.assertEqual(source.count('real-generation-smoke.py") --json'), 1)
-        self.assertLess(final_doctor, smoke)
+        self.assertLess(bootstrap, smoke)
+        self.assertLess(smoke, claude)
+        self.assertLess(smoke, autostart)
         self.assertLess(smoke, final_status)
         self.assertLess(final_status, completed)
-        self.assertIn("Setup will not report success until the active workflow actually renders a validated image", source)
+        self.assertIn("Agent configuration was not changed", source)
+        self.assertIn("active workflow actually renders a validated image", source)
 
 
 if __name__ == "__main__":
