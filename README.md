@@ -2,18 +2,20 @@
 
 A Windows-first local image-generation control plane for native ComfyUI, with one operational path shared by CLI automation, Claude Desktop and ChatGPT.
 
-The repository no longer treats its deterministic mock as a renderer. Real agent generation requires native ComfyUI; the mock remains only for isolated operational/integration testing.
+The deterministic EVAVO mock is test infrastructure, not a renderer. Real agent generation requires native ComfyUI.
 
 ## What works
 
 - native ComfyUI detection and health;
 - source + Windows-portable ComfyUI discovery;
+- reuse of already-running external ComfyUI even when its filesystem install is not discoverable;
 - optional official ComfyUI runtime provisioning;
 - native checkpoint discovery and constrained checkpoint repair;
 - shared external model libraries without copying multi-GB model files;
 - checkpoint/LoRA/VAE/ControlNet/UNET/text-encoder/CLIP-vision/upscaler inventory;
 - standard txt2img API workflow;
-- custom ComfyUI API workflow templates;
+- custom ComfyUI API workflow templates with live preflight validation;
+- checkpointless UNET/Flux workflow readiness when `CheckpointLoaderSimple` is absent;
 - real `/prompt` submission and prompt IDs;
 - `/history/<prompt_id>` completion tracking;
 - `/view` output collection and atomic local downloads;
@@ -24,7 +26,7 @@ The repository no longer treats its deterministic mock as a renderer. Real agent
 - Claude Desktop MCP installer;
 - private HTTP MCP Windows-login autostart;
 - OpenAI Secure MCP Tunnel tooling for real ChatGPT-to-workstation access;
-- strict diagnostics, safety tests and recovery tooling.
+- cross-platform read-only repository verification plus strict Windows setup gates.
 
 ## Canonical Windows setup
 
@@ -42,7 +44,7 @@ git pull --ff-only origin main
 .\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-The updater refuses destructive Git changes, installs dependencies, runs the repository test suites, configures local agent integrations, repairs/provisions native ComfyUI when allowed, validates checkpoint/shared-model readiness and configures the ChatGPT tunnel when a valid OpenAI tunnel ID is already available.
+The updater refuses destructive Git changes, parses the canonical PowerShell setup scripts before configuration writes, installs dependencies, runs the repository safety/integration suites, configures local agent integrations, repairs/provisions native ComfyUI when allowed, validates the active generation contract, and configures the ChatGPT tunnel when a valid OpenAI tunnel ID is already available.
 
 Useful switches:
 
@@ -52,6 +54,28 @@ Useful switches:
 .\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipComfyUIProvision
 .\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipChatGPTTunnel
 ```
+
+## Repository verification
+
+Fast read-only structural/source verification:
+
+```powershell
+python evavo.py verify
+```
+
+Full safety/integration verification:
+
+```powershell
+python evavo.py verify --full
+```
+
+On Windows, require the PowerShell AST parser rather than allowing that platform-specific check to be skipped:
+
+```powershell
+python evavo.py verify --full --require-powershell
+```
+
+Python syntax is compiled in memory; the verifier does not create `__pycache__` as part of its source check.
 
 ## CLI generation
 
@@ -117,7 +141,7 @@ $env:CONTROL_PLANE_API_KEY = "<runtime tunnel key>"
 .\INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1
 ```
 
-The installer dynamically resolves the latest public `openai/tunnel-client` release and verifies the downloaded Windows ZIP against the SHA-256 digest published in the release metadata before installing it.
+The installer dynamically resolves the latest public `openai/tunnel-client` release, verifies the downloaded Windows ZIP against its published SHA-256, records the SHA-256 of the extracted executable, and rechecks that executable before every manual/login tunnel run.
 
 Runtime-key login persistence uses current-user Windows DPAPI and never writes the plaintext key to Git, `.evavo`, Claude configuration or the Windows Startup command.
 
@@ -138,6 +162,7 @@ health_check
 discover_backends
 list_checkpoints
 model_inventory
+workflow_preflight
 generate_image
 generate_batch
 generation_status
@@ -148,7 +173,9 @@ task_statistics
 stop_managed_backend
 ```
 
-`generate_image` and `generate_batch` default to auto-starting the real backend and waiting for completed output files.
+`workflow_preflight` is a read-only compatibility check for custom ComfyUI API workflows. It renders the same template substitutions generation would use, then validates live node classes, required inputs and literal model/loader choices **without queueing a prompt or writing task history**.
+
+`generate_image` and `generate_batch` default to auto-starting the real backend and waiting for completed output files. Custom workflows are automatically preflighted before `/prompt`; `EVAVO_PREFLIGHT_CUSTOM_WORKFLOW=0` is an explicit escape hatch for unusual graphs.
 
 `read_output_image` returns an authorized generated image as native MCP image content so a host model can visually inspect the result instead of receiving only a Windows path.
 
@@ -164,13 +191,14 @@ Native routes used by EVAVO:
 
 ```text
 GET  /system_stats
+GET  /object_info
 GET  /object_info/<loader-node>
 POST /prompt
 GET  /history/<prompt_id>
 GET  /view?filename=...&subfolder=...&type=...
 ```
 
-EVAVO prefers real ComfyUI over its deterministic test mock. An existing user-managed native ComfyUI is reused and never killed by EVAVO.
+EVAVO prefers real ComfyUI over its deterministic test mock. An existing user-managed native ComfyUI is reused and never killed by EVAVO. Strict doctor probes endpoint health before provisioning, so a healthy non-standard external renderer is not replaced by an unnecessary second checkout.
 
 ## Provisioning ComfyUI
 
@@ -214,7 +242,7 @@ EVAVO_AUTO_PROVISION_COMFYUI=1
 EVAVO_AUTO_PROVISION_CHECKPOINT=1
 ```
 
-The built-in checkpoint workflow can repair from an owner-configured source. Custom UNET/Flux workflows do not trigger an unrelated checkpoint download merely because `CheckpointLoaderSimple` is empty.
+The built-in checkpoint workflow can repair from an owner-configured source. Custom UNET/Flux workflows do not trigger an unrelated checkpoint download merely because `CheckpointLoaderSimple` is empty **or not registered**.
 
 ## Shared model libraries
 
@@ -287,6 +315,12 @@ Uppercase and legacy lowercase placeholders are both supported:
 {{FILENAME_PREFIX}} / {{filename_prefix}}
 ```
 
+Custom workflow preflight validates only what live ComfyUI can prove: node classes, required inputs and literal choices. Node-to-node links such as `["12", 0]` remain dynamic and are not mistaken for model filenames.
+
+For MCP agents, call `workflow_preflight` before a long batch when explicit compatibility diagnostics are useful. Generation also performs the same validation automatically by default.
+
+Strict `agent-doctor.py --repair` is workflow-aware: with `EVAVO_COMFYUI_WORKFLOW` configured, that workflow becomes the readiness contract. A checkpoint is not required merely because the built-in graph would have needed one.
+
 ## Task history
 
 CLI and MCP share the same lock-protected atomic history:
@@ -308,6 +342,7 @@ Operations/backend:
 
 ```powershell
 python evavo.py doctor
+python evavo.py verify
 python evavo.py status
 ```
 
@@ -327,24 +362,31 @@ OpenAI `tunnel-client doctor` is treated as a **local preflight**, not standalon
 
 ## Tests
 
-Canonical setup runs:
+Full cross-platform gate:
+
+```powershell
+python evavo.py verify --full
+```
+
+Individual suites:
 
 ```powershell
 python test-provisioning.py
 python test-backend-automation.py
 python test-chatgpt-tunnel.py
 python test-agent-integration.py
+python test-agent-doctor-workflows.py
 python evavo.py test
 ```
 
-The suites cover provisioning safety, source/portable handling, runtime reuse, shared-model config/hash behavior, PID identity, checkpoint repair boundaries, MCP file-read boundaries, tunnel secret/install contracts, MCP negotiation, model inventory, single/batch generation, native image content, history/statistics, mock/native health and controller lifecycle.
+The suites cover provisioning safety, source/portable handling, runtime reuse, shared-model config/hash behavior, PID identity, checkpoint repair boundaries, custom workflow preflight, checkpointless UNET readiness, external-renderer reuse, MCP file-read boundaries, tunnel secret/install contracts, MCP negotiation, model inventory, single/batch generation, native image content, history/statistics, mock/native health and controller lifecycle.
 
 ## Security
 
 - ComfyUI remains loopback-only.
 - Private EVAVO HTTP MCP remains loopback-only.
 - ChatGPT access uses an outbound OpenAI Secure MCP Tunnel rather than public inbound exposure.
-- OpenAI tunnel-client downloads are SHA-256 verified before installation.
+- OpenAI tunnel-client downloads and installed executable integrity are SHA-256 checked.
 - Runtime tunnel keys are never committed and optional login persistence uses Windows DPAPI.
 - Signed checkpoint URLs are not persisted into generated agent configs/startup files.
 - MCP provisioning tools cannot accept arbitrary repository/model URLs from the model.
