@@ -54,6 +54,7 @@ CRITICAL_FILES: Sequence[str] = (
     "TEST-ALL-AI-SYSTEMS.py",
     "test-gateway.py",
     "test-git-safety.py",
+    "test-bootstrap-production.py",
     "test-legacy-compatibility.py",
     "test_autonomous.py",
     "test-operations.py",
