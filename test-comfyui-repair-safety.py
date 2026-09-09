@@ -192,19 +192,14 @@ class ComfyUIRepairSafetyTests(unittest.TestCase):
             self.assertEqual(standalone._discover_home(str(portable)), home.resolve())
             self.assertEqual(standalone._select_python(home), python.resolve())
 
-    def test_standalone_discovery_honors_extra_search_paths(self) -> None:
+    def test_standalone_discovery_includes_extra_search_paths_without_assuming_no_real_install(self) -> None:
         standalone = load_standalone_repair()
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "custom-search" / "ComfyUI"
             root.mkdir(parents=True)
-            (root / "main.py").write_text("# fixture\n", encoding="utf-8")
-            (root / "requirements.txt").write_text("# fixture\n", encoding="utf-8")
-            python = root / ".venv" / "Scripts" / "python.exe"
-            python.parent.mkdir(parents=True)
-            python.write_bytes(b"fixture")
             with patch.dict(os.environ, {"EVAVO_COMFYUI_SEARCH_PATHS": str(root)}, clear=False):
-                discovered = standalone._discover_home()
-            self.assertEqual(discovered, root.resolve())
+                candidates = list(standalone._candidate_homes())
+            self.assertIn(root.resolve(), candidates)
 
     def test_invalid_module_name_is_rejected_before_process_launch(self) -> None:
         with self.assertRaises(ValueError):
