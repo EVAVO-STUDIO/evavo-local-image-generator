@@ -13,6 +13,7 @@ PERSISTED_POLICY = {
     "EVAVO_MCP_ALLOW_WORKFLOW_PATHS",
     "EVAVO_MCP_WORKFLOW_ROOT",
 }
+POLICY_COMMAND = "-m evavo_local_image_generator.mcp_policy --json"
 
 
 def assert_profile_contract(test: unittest.TestCase, source: str) -> None:
@@ -24,6 +25,8 @@ def assert_profile_contract(test: unittest.TestCase, source: str) -> None:
     test.assertIn('[Environment]::GetEnvironmentVariable("COMFYUI_ENDPOINT")', source)
     test.assertIn('[Environment]::GetEnvironmentVariable("EVAVO_COMFYUI_ENDPOINT")', source)
     test.assertNotIn('"EVAVO_COMFYUI_ENDPOINT" =', source)
+    test.assertIn(POLICY_COMMAND, source)
+    test.assertIn("MCP filesystem policy is invalid", source)
 
 
 class McpProfilePolicyTests(unittest.TestCase):
@@ -34,6 +37,35 @@ class McpProfilePolicyTests(unittest.TestCase):
     def test_http_autostart_persists_same_non_secret_policy_and_canonical_endpoint(self) -> None:
         source = (ROOT / "INSTALL-AGENT-MCP-AUTOSTART.ps1").read_text(encoding="utf-8")
         assert_profile_contract(self, source)
+
+    def test_claude_policy_validation_precedes_any_config_write_or_backup(self) -> None:
+        source = (ROOT / "INSTALL-CLAUDE-MCP.ps1").read_text(encoding="utf-8")
+        policy = source.index(POLICY_COMMAND)
+        create_dir = source.index('New-Item -ItemType Directory -Force -Path $configDir')
+        backup = source.index("Copy-Item $configPath $backup")
+        write = source.index("Set-Content -Path $configPath")
+        self.assertLess(policy, create_dir)
+        self.assertLess(policy, backup)
+        self.assertLess(policy, write)
+
+    def test_http_policy_validation_precedes_startup_directory_and_launcher_write(self) -> None:
+        source = (ROOT / "INSTALL-AGENT-MCP-AUTOSTART.ps1").read_text(encoding="utf-8")
+        policy = source.index(POLICY_COMMAND)
+        create_dir = source.index('New-Item -ItemType Directory -Force -Path $startupDir')
+        write = source.index("Set-Content -Path $launcher")
+        start = source.index('Start-Process -FilePath "powershell.exe"')
+        self.assertLess(policy, create_dir)
+        self.assertLess(policy, write)
+        self.assertLess(policy, start)
+
+    def test_skip_validation_never_skips_policy_validation(self) -> None:
+        for name in ("INSTALL-CLAUDE-MCP.ps1", "INSTALL-AGENT-MCP-AUTOSTART.ps1"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+            with self.subTest(name=name):
+                skip_block = source.index("if (-not $SkipValidation)")
+                policy = source.index(POLICY_COMMAND)
+                self.assertGreater(policy, skip_block)
+                self.assertIn("Always validate", source[skip_block:policy])
 
     def test_root_mcp_profile_uses_canonical_endpoint(self) -> None:
         profile = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
