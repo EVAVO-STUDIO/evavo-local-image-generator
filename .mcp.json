@@ -4,14 +4,12 @@
       "command": "python",
       "args": ["-m", "evavo_local_image_generator.mcp_server", "--transport", "stdio"],
       "env": {
-        "EVAVO_LOCAL_IMAGE_GENERATOR_MODE": "production",
-        "EVAVO_LOCAL_IMAGE_GENERATOR_STORAGE": "bee://primary/EVAVO/ImageGeneration",
-        "EVAVO_COMFYUI_ENDPOINT": "http://127.0.0.1:8188",
+        "COMFYUI_ENDPOINT": "http://127.0.0.1:8188",
         "EVAVO_AUTO_PROVISION_COMFYUI": "1",
         "EVAVO_AUTO_PROVISION_CHECKPOINT": "1",
         "PYTHONUNBUFFERED": "1"
       },
-      "description": "EVAVO native ComfyUI image generation MCP server with constrained local auto-provisioning"
+      "description": "EVAVO native ComfyUI image-generation MCP v2 server with constrained local auto-provisioning"
     }
   }
 }
