@@ -29,6 +29,8 @@ class StubQualityBackend(QualityComfyUIBackend):
             return ["normal", "karras", "simple"]
         if node_class == "LatentUpscale" and input_name == "upscale_method":
             return ["nearest-exact", "bilinear", "area", "bicubic", "bislerp"]
+        if node_class == "LoraLoader" and input_name == "lora_name":
+            return ["detail-style.safetensors", "character-identity.safetensors"]
         return []
 
 
@@ -88,6 +90,7 @@ class QualityProfileTests(unittest.TestCase):
         self.assertEqual(sampler["scheduler"], "karras")
         self.assertNotIn("8", workflow)
         self.assertNotIn("9", workflow)
+        self.assertNotIn("10", workflow)
         self.assertEqual(workflow["6"]["inputs"]["samples"], ["5", 0])
 
     def test_detail_profile_uses_higher_quality_budget(self):
@@ -127,6 +130,63 @@ class QualityProfileTests(unittest.TestCase):
         self.assertEqual(second["latent_image"], ["8", 0])
         self.assertEqual(workflow["6"]["inputs"]["samples"], ["9", 0])
         self.assertEqual(workflow["7"]["inputs"]["images"], ["6", 0])
+
+    def test_lora_routes_model_and_clip_through_one_loader(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        workflow = backend.build_txt2img_workflow(
+            "LoRA regression",
+            seed=1337,
+            lora_name="detail-style.safetensors",
+            lora_model_strength=0.7,
+            lora_clip_strength=0.6,
+        )
+        loader = workflow["10"]
+        self.assertEqual(loader["class_type"], "LoraLoader")
+        self.assertEqual(loader["inputs"]["lora_name"], "detail-style.safetensors")
+        self.assertEqual(loader["inputs"]["strength_model"], 0.7)
+        self.assertEqual(loader["inputs"]["strength_clip"], 0.6)
+        self.assertEqual(loader["inputs"]["model"], ["1", 0])
+        self.assertEqual(loader["inputs"]["clip"], ["1", 1])
+        self.assertEqual(workflow["2"]["inputs"]["clip"], ["10", 1])
+        self.assertEqual(workflow["3"]["inputs"]["clip"], ["10", 1])
+        self.assertEqual(workflow["5"]["inputs"]["model"], ["10", 0])
+
+    def test_lora_also_drives_hero_second_pass_model(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        workflow = backend.build_txt2img_workflow(
+            "LoRA hero regression",
+            seed=1337,
+            quality_profile="hero",
+            lora_name="detail-style.safetensors",
+        )
+        self.assertEqual(workflow["5"]["inputs"]["model"], ["10", 0])
+        self.assertEqual(workflow["9"]["inputs"]["model"], ["10", 0])
+        self.assertEqual(workflow["2"]["inputs"]["clip"], ["10", 1])
+        self.assertEqual(workflow["6"]["inputs"]["samples"], ["9", 0])
+
+    def test_lora_not_in_inventory_is_rejected(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        with self.assertRaisesRegex(RuntimeError, "COMFYUI_LORA_NOT_FOUND"):
+            backend.build_txt2img_workflow("missing LoRA", lora_name="missing.safetensors")
+
+    def test_lora_strength_is_bounded(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        with self.assertRaisesRegex(ValueError, "between -4 and 4"):
+            backend.build_txt2img_workflow(
+                "invalid LoRA strength",
+                lora_name="detail-style.safetensors",
+                lora_model_strength=9,
+            )
+
+    def test_lora_refuses_arbitrary_custom_workflow_topology(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        with self.assertRaisesRegex(RuntimeError, "COMFYUI_LORA_CUSTOM_WORKFLOW_UNSUPPORTED"):
+            backend.build_txt2img_workflow(
+                "LoRA custom workflow regression",
+                seed=1337,
+                lora_name="detail-style.safetensors",
+                workflow_path="does-not-need-to-exist.json",
+            )
 
     def test_hero_scales_native_wide_bucket_without_changing_aspect(self):
         settings = resolve_quality_settings(quality_profile="hero", width=1344, height=768)
