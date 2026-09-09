@@ -31,6 +31,15 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Fail "Git is not installed or not available on PATH." 2
 }
 
+$origin = (git remote get-url origin).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $origin) {
+    Fail "Unable to resolve the repository origin remote." 2
+}
+$expectedOrigin = '^(?:https://github\.com/EVAVO-STUDIO/evavo-local-image-generator(?:\.git)?|git@github\.com:EVAVO-STUDIO/evavo-local-image-generator(?:\.git)?|ssh://git@github\.com/EVAVO-STUDIO/evavo-local-image-generator(?:\.git)?)$'
+if ($origin -notmatch $expectedOrigin) {
+    Fail "Refusing to update from unexpected origin: $origin" 2
+}
+
 $branch = (git branch --show-current).Trim()
 if ($LASTEXITCODE -ne 0 -or $branch -ne "main") {
     Fail "Repository must be on branch main. Current branch: $branch" 2
@@ -46,7 +55,7 @@ if ($dirty) {
     Fail "Refusing to overwrite local work. Commit or stash those changes first." 2
 }
 
-Write-Host "Updating EVAVO from origin/main..." -ForegroundColor Cyan
+Write-Host "Updating EVAVO from verified origin/main..." -ForegroundColor Cyan
 git pull --ff-only origin main
 if ($LASTEXITCODE -ne 0) {
     Fail "git pull --ff-only origin main failed." 3
@@ -284,6 +293,7 @@ elseif (-not $SkipChatGPTTunnel) {
 
 Write-Host ""
 Write-Host "EVAVO workstation setup completed." -ForegroundColor Green
+Write-Host "  Verified Git origin: $origin" -ForegroundColor Green
 Write-Host "  Authoritative full verifier: passed" -ForegroundColor Green
 Write-Host "  Python sources + PowerShell scripts: parsed successfully" -ForegroundColor Green
 Write-Host "  All registered safety/integration suites: passed" -ForegroundColor Green
