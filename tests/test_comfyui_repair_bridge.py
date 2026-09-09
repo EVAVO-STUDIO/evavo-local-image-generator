@@ -81,7 +81,7 @@ def test_missing_core_dependency_uses_structured_failure_module(monkeypatch, tmp
     assert command[command.index("--module") + 1] == "comfy_aimdo"
     assert command[command.index("--timeout") + 1] == "120"
     assert "--force-sync" not in command
-    assert captured["kwargs"]["shell"] if "shell" in captured["kwargs"] else True
+    assert "shell" not in captured["kwargs"]
     assert result["ok"] is True
     assert result["status"] == "repaired"
     assert result["source_failure_category"] == "missing_dependency"
