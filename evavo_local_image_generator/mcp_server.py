@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     from mcp.server import MCPServer
+    from mcp.server.mcpserver.utilities.types import Image
     from mcp.server.transport_security import TransportSecuritySettings
 except ImportError as exc:  # pragma: no cover
     raise RuntimeError('MCP SDK is required. Install with: python -m pip install "mcp[cli]>=2,<3"') from exc
@@ -23,6 +24,8 @@ from .backends import ComfyUIBackend
 from .comfyui_runtime import discover_comfyui, ensure_comfyui, stop_managed_comfyui
 
 mcp = MCPServer("EVAVO Local Image Generator")
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+MAX_MCP_IMAGE_BYTES = 32 * 1024 * 1024
 
 
 def _endpoint() -> str:
@@ -37,12 +40,15 @@ def _tracker() -> TaskTracker:
     return TaskTracker()
 
 
+def _output_root() -> Path:
+    return Path(os.getenv("EVAVO_GENERATION_OUTPUT_DIR", str(ROOT / ".evavo" / "outputs"))).expanduser().resolve()
+
+
 def _output_dir(project_name: str, output_dir: Optional[str]) -> Path:
     if output_dir:
         return Path(output_dir).expanduser().resolve()
-    root = Path(os.getenv("EVAVO_GENERATION_OUTPUT_DIR", str(ROOT / ".evavo" / "outputs"))).expanduser().resolve()
     safe_project = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in project_name)[:80] or "mcp"
-    return root / safe_project
+    return _output_root() / safe_project
 
 
 def _truthy_environment(name: str, default: bool = False) -> bool:
@@ -157,6 +163,45 @@ async def _track_update(
         return "task was not present in local history"
     except Exception as exc:
         return str(exc)
+
+
+def _recorded_output_paths() -> set[Path]:
+    allowed: set[Path] = set()
+    for task in _tracker().list_tasks(limit=200):
+        outputs = task.get("output_uris")
+        if isinstance(outputs, list):
+            for raw in outputs:
+                try:
+                    allowed.add(Path(str(raw)).expanduser().resolve())
+                except OSError:
+                    continue
+        raw = task.get("output_uri")
+        if raw:
+            try:
+                allowed.add(Path(str(raw)).expanduser().resolve())
+            except OSError:
+                pass
+    return allowed
+
+
+def _validated_output_image(path: str) -> Path:
+    candidate = Path(path).expanduser().resolve()
+    if not candidate.is_file():
+        raise ValueError(f"generated image does not exist: {candidate}")
+    if candidate.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise ValueError("generated output must be PNG/JPEG/GIF/WebP")
+    try:
+        within_default_root = candidate.is_relative_to(_output_root())
+    except ValueError:
+        within_default_root = False
+    if not within_default_root and candidate not in _recorded_output_paths():
+        raise PermissionError("image path is not a recorded EVAVO output")
+    size = candidate.stat().st_size
+    if size <= 0:
+        raise ValueError("generated image is empty")
+    if size > MAX_MCP_IMAGE_BYTES:
+        raise ValueError(f"generated image exceeds {MAX_MCP_IMAGE_BYTES // (1024 * 1024)} MiB MCP payload limit")
+    return candidate
 
 
 async def _generate_image_impl(
@@ -457,6 +502,12 @@ async def collect_generation(
     if warning and warning != "task was not present in local history":
         result["tracking_warning"] = warning
     return result
+
+
+@mcp.tool(structured_output=False)
+def read_output_image(path: str) -> Image:
+    """Return a generated EVAVO output as native MCP image content for visual inspection by the host model."""
+    return Image(path=_validated_output_image(path))
 
 
 @mcp.tool()
