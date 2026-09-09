@@ -13,11 +13,14 @@ import argparse
 import hashlib
 import json
 import os
-import sys
+import re
 from pathlib import Path
 from typing import Any
 
+from evavo_local_image_generator.audio_quality import speech_quality_checks, wav_diagnostics
 from evavo_local_image_generator.backends import KokoroBackend
+
+WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
 
 
 def _sha256(path: Path) -> str:
@@ -26,6 +29,10 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _read_request(path: Path) -> dict[str, Any]:
@@ -105,6 +112,18 @@ def main() -> int:
             validate_voice=True,
         )
 
+        technical_qc = None
+        metrics = None
+        if response_format == "wav":
+            metrics = wav_diagnostics(target, word_count=len(WORD_RE.findall(text)))
+            technical_qc = speech_quality_checks(metrics)
+            if not technical_qc["ok"]:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                raise RuntimeError("KOKORO_TECHNICAL_QC_FAILED:" + "; ".join(technical_qc["errors"]))
+
         receipt = {
             "ok": True,
             "provider": "kokoro-fastapi",
@@ -112,11 +131,15 @@ def main() -> int:
             "taskId": args.task_id,
             "output": str(target.resolve()),
             "sha256": _sha256(target),
+            "inputSha256": _text_sha256(text),
             "bytes": target.stat().st_size,
             "voice": generated.get("voice"),
             "speed": generated.get("speed"),
             "format": generated.get("response_format"),
+            "contentType": generated.get("content_type"),
             "endpoint": generated.get("endpoint"),
+            "metrics": metrics,
+            "technicalQc": technical_qc,
         }
         print(json.dumps(receipt, ensure_ascii=False, separators=(",", ":")))
         return 0
