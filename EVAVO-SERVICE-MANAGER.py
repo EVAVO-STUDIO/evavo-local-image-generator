@@ -29,6 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from evavo_operations import interprocess_lock
 from evavo_local_image_generator.comfyui_runtime import ensure_comfyui, native_health, stop_managed_comfyui
 
 
@@ -80,6 +81,8 @@ def _loopback_endpoint(name: str, default: str, default_port: int) -> str:
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = Path(os.getenv("EVAVO_GATEWAY_STATE_DIR", str(ROOT / ".evavo" / "gateway"))).expanduser().resolve()
 STATE_FILE = STATE_DIR / "service-manager.json"
+STATE_IO_LOCK = STATE_FILE.with_suffix(STATE_FILE.suffix + ".lock")
+LIFECYCLE_LOCK = STATE_FILE.with_suffix(STATE_FILE.suffix + ".lifecycle.lock")
 TOKEN_FILE = STATE_DIR / "3d-worker.token"
 LOG_DIR = STATE_DIR / "logs"
 GATEWAY_SCRIPT = ROOT / "EVAVO-GATEWAY.py"
@@ -105,7 +108,7 @@ def env_true(name: str, default: bool = False) -> bool:
 
 
 def http_json(url: str, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
-    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Manager/5"})
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Manager/6"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -190,7 +193,7 @@ def three_d_token_ready(token: str) -> bool:
         headers={
             "Accept": "application/json",
             "Authorization": f"Bearer {token}",
-            "User-Agent": "EVAVO-Gateway-Manager/5",
+            "User-Agent": "EVAVO-Gateway-Manager/6",
         },
     )
     try:
@@ -233,7 +236,7 @@ def provider_configuration_fingerprint() -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _read_state_strict() -> Dict[str, Any]:
+def _read_state_strict_unlocked() -> Dict[str, Any]:
     """Read manager ownership state without treating corruption as 'no state'."""
     if not STATE_FILE.exists():
         return {}
@@ -251,16 +254,23 @@ def _read_state_strict() -> Dict[str, Any]:
 
 
 def load_state() -> Dict[str, Any]:
-    """Read lifecycle-authority state; malformed state is a hard safety error."""
-    return _read_state_strict()
+    """Read lifecycle-authority state under a short cross-process lock."""
+    try:
+        with interprocess_lock(STATE_IO_LOCK, timeout=2.0):
+            return _read_state_strict_unlocked()
+    except TimeoutError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_STATE_BUSY:{STATE_FILE}") from exc
 
 
 def manager_state_health() -> Dict[str, Any]:
     """Read-only state diagnosis used by health/status without mutating anything."""
-    if not STATE_FILE.exists():
-        return {"healthy": True, "status": "missing", "path": str(STATE_FILE)}
     try:
-        state = _read_state_strict()
+        with interprocess_lock(STATE_IO_LOCK, timeout=0.5):
+            if not STATE_FILE.exists():
+                return {"healthy": True, "status": "missing", "path": str(STATE_FILE)}
+            state = _read_state_strict_unlocked()
+    except TimeoutError:
+        return {"healthy": False, "status": "busy", "path": str(STATE_FILE), "error": f"SERVICE_MANAGER_STATE_BUSY:{STATE_FILE}"}
     except RuntimeError as exc:
         message = str(exc)
         status = "unsafe" if message.startswith("SERVICE_MANAGER_STATE_UNSAFE:") else "corrupt"
@@ -295,7 +305,7 @@ def full_health() -> Dict[str, Any]:
     }
 
 
-def save_state(state: Dict[str, Any]) -> None:
+def _write_state_unlocked(state: Dict[str, Any]) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if STATE_FILE.is_symlink():
         raise RuntimeError(f"SERVICE_MANAGER_STATE_UNSAFE:{STATE_FILE}:state file must not be a symlink")
@@ -313,6 +323,29 @@ def save_state(state: Dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def save_state(state: Dict[str, Any]) -> None:
+    try:
+        with interprocess_lock(STATE_IO_LOCK, timeout=2.0):
+            _write_state_unlocked(state)
+    except TimeoutError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_STATE_BUSY:{STATE_FILE}") from exc
+
+
+def _delete_state() -> None:
+    try:
+        with interprocess_lock(STATE_IO_LOCK, timeout=2.0):
+            if STATE_FILE.is_symlink():
+                raise RuntimeError(f"SERVICE_MANAGER_STATE_UNSAFE:{STATE_FILE}:state file must not be a symlink")
+            try:
+                STATE_FILE.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                raise RuntimeError(f"SERVICE_MANAGER_STATE_DELETE_ERROR:{STATE_FILE}:{exc}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_STATE_BUSY:{STATE_FILE}") from exc
 
 
 def command_line(pid: int) -> Optional[str]:
@@ -687,7 +720,7 @@ def ensure_gateway_service(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def start_services() -> Dict[str, Any]:
+def _start_services_unlocked() -> Dict[str, Any]:
     endpoint_host_port(THREE_D_URL, expected_default_port=4314)
     state = load_state()
     audio = configure_audio_provider()
@@ -708,7 +741,15 @@ def start_services() -> Dict[str, Any]:
     return {"ok": True, "comfyui": comfy, "gateway": gateway, "audio": audio, "3d": model3d, "health": health}
 
 
-def stop_services() -> Dict[str, Any]:
+def start_services() -> Dict[str, Any]:
+    try:
+        with interprocess_lock(LIFECYCLE_LOCK, timeout=0.25):
+            return _start_services_unlocked()
+    except TimeoutError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_BUSY:{LIFECYCLE_LOCK}") from exc
+
+
+def _stop_services_unlocked() -> Dict[str, Any]:
     state = load_state()
     stopped: Dict[str, Any] = {"gateway": False, "comfyui": False, "3d_worker": False}
     gateway = _managed_gateway_state(state)
@@ -723,32 +764,43 @@ def stop_services() -> Dict[str, Any]:
         stopped["3d_worker"] = True
     native = stop_managed_comfyui()
     stopped["comfyui"] = bool(native.get("stopped"))
-    try:
-        STATE_FILE.unlink()
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        raise RuntimeError(f"SERVICE_MANAGER_STATE_DELETE_ERROR:{STATE_FILE}:{exc}") from exc
+    _delete_state()
     return {"ok": True, "stopped": stopped, "native": native, "timestamp": now_iso()}
+
+
+def stop_services() -> Dict[str, Any]:
+    try:
+        with interprocess_lock(LIFECYCLE_LOCK, timeout=0.25):
+            return _stop_services_unlocked()
+    except TimeoutError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_BUSY:{LIFECYCLE_LOCK}") from exc
+
+
+def _monitor_reconcile_once() -> None:
+    health = full_health()
+    print(json.dumps(health, ensure_ascii=False), flush=True)
+    if not health["manager_state"]["healthy"]:
+        raise RuntimeError(str(health["manager_state"].get("error") or "SERVICE_MANAGER_STATE_UNHEALTHY"))
+    if not health["comfyui"]["healthy"]:
+        ensure_comfyui_service()
+    if not health["3d_worker"]["healthy"] and discover_3d_repo() is not None:
+        try:
+            ensure_3d_worker_service(load_state())
+        except Exception as exc:
+            print(json.dumps({"provider": "3d", "status": "unavailable", "error": str(exc)}), file=sys.stderr, flush=True)
+    configure_audio_provider()
+    ensure_gateway_service(load_state())
 
 
 def monitor(interval: float) -> int:
     start_services()
     try:
         while True:
-            health = full_health()
-            print(json.dumps(health, ensure_ascii=False), flush=True)
-            if not health["manager_state"]["healthy"]:
-                raise RuntimeError(str(health["manager_state"].get("error") or "SERVICE_MANAGER_STATE_UNHEALTHY"))
-            if not health["comfyui"]["healthy"]:
-                ensure_comfyui_service()
-            if not health["3d_worker"]["healthy"] and discover_3d_repo() is not None:
-                try:
-                    ensure_3d_worker_service(load_state())
-                except Exception as exc:
-                    print(json.dumps({"provider": "3d", "status": "unavailable", "error": str(exc)}), file=sys.stderr, flush=True)
-            configure_audio_provider()
-            ensure_gateway_service(load_state())
+            try:
+                with interprocess_lock(LIFECYCLE_LOCK, timeout=0.25):
+                    _monitor_reconcile_once()
+            except TimeoutError:
+                print(json.dumps({"status": "busy", "error": f"SERVICE_MANAGER_BUSY:{LIFECYCLE_LOCK}"}), file=sys.stderr, flush=True)
             time.sleep(interval)
     except KeyboardInterrupt:
         return 0
