@@ -23,28 +23,65 @@ import time
 from typing import Any, Iterable, Sequence
 
 
+ROOT = Path(__file__).resolve().parent
 DEFAULT_COMFY_HOME = Path(r"C:\AI\ComfyUI")
 DEFAULT_MODULE = "comfy_aimdo"
 DEFAULT_TIMEOUT_SECONDS = 900.0
 
 
 def _candidate_homes(explicit: str | None = None) -> Iterable[Path]:
+    """Yield source/portable ComfyUI workdirs using the same practical search space as runtime discovery."""
     seen: set[str] = set()
+    home = Path.home()
+    repo_parent = ROOT.parent
+    local_appdata = Path(os.getenv("LOCALAPPDATA", str(home / "AppData" / "Local")))
+    configured_search = [item.strip() for item in os.getenv("EVAVO_COMFYUI_SEARCH_PATHS", "").split(os.pathsep) if item.strip()]
     values = [
         explicit,
         os.environ.get("EVAVO_COMFYUI_HOME"),
         os.environ.get("COMFYUI_HOME"),
+        str(repo_parent / "ComfyUI"),
+        str(repo_parent / "comfyui"),
+        str(repo_parent / "ComfyUI_windows_portable"),
+        r"C:\ComfyUI",
+        r"C:\Gitrepos\ComfyUI",
+        r"C:\GitRepos\ComfyUI",
+        r"C:\Gitrepos\ComfyUI_windows_portable",
+        r"C:\GitRepos\ComfyUI_windows_portable",
+        r"C:\AI",
         str(DEFAULT_COMFY_HOME),
+        r"C:\AI\ComfyUI_windows_portable",
+        r"C:\ComfyUI_windows_portable",
+        str(home / "ComfyUI"),
+        str(home / "Documents" / "ComfyUI"),
+        str(home / "Documents" / "ComfyUI_windows_portable"),
+        str(home / "Downloads" / "ComfyUI"),
+        str(home / "Downloads" / "ComfyUI_windows_portable"),
+        str(home / "Desktop" / "ComfyUI"),
+        str(home / "Desktop" / "ComfyUI_windows_portable"),
+        str(local_appdata / "ComfyUI"),
+        str(local_appdata / "Programs" / "ComfyUI"),
+        *configured_search,
     ]
     for raw in values:
         if not raw:
             continue
         candidate = Path(raw).expanduser()
-        key = str(candidate).lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        yield candidate
+        workdirs = [candidate]
+        # Windows portable packages commonly keep the real checkout one level
+        # below the portable root while the embedded Python lives beside it.
+        if candidate.name.lower() != "comfyui":
+            workdirs.append(candidate / "ComfyUI")
+        for workdir in workdirs:
+            try:
+                normalized = workdir.resolve(strict=False)
+            except OSError:
+                normalized = workdir.absolute()
+            key = os.path.normcase(str(normalized))
+            if key in seen:
+                continue
+            seen.add(key)
+            yield normalized
 
 
 def _discover_home(explicit: str | None = None) -> Path:
@@ -72,6 +109,8 @@ def _python_candidates(comfy_home: Path, explicit: str | None = None) -> Iterabl
         Path(env_override).expanduser() if env_override else None,
         comfy_home / ".venv" / "Scripts" / "python.exe",
         comfy_home / "venv" / "Scripts" / "python.exe",
+        comfy_home / ".venv" / "bin" / "python",
+        comfy_home / "venv" / "bin" / "python",
         comfy_home / "python_embeded" / "python.exe",
         comfy_home / "python_embedded" / "python.exe",
         comfy_home.parent / "python_embeded" / "python.exe",
@@ -81,11 +120,15 @@ def _python_candidates(comfy_home: Path, explicit: str | None = None) -> Iterabl
     for candidate in candidates:
         if candidate is None:
             continue
-        key = str(candidate).lower()
+        try:
+            normalized = candidate.resolve(strict=False)
+        except OSError:
+            normalized = candidate.absolute()
+        key = os.path.normcase(str(normalized))
         if key in seen:
             continue
         seen.add(key)
-        yield candidate
+        yield normalized
 
 
 def _select_python(comfy_home: Path, explicit: str | None = None) -> Path:
@@ -259,9 +302,7 @@ def repair_dependencies(
         payload["repair_performed"] = True
         if install["returncode"] != 0 or install["timed_out"]:
             payload["status"] = "requirements_sync_failed"
-            payload["message"] = (
-                "Failed to synchronize the local ComfyUI requirements with its selected Python interpreter."
-            )
+            payload["message"] = "Failed to synchronize the local ComfyUI requirements with its selected Python interpreter."
             payload["result_file"] = _write_last_result(home, payload)
             return 4, payload
 
@@ -294,7 +335,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Repair ComfyUI dependencies from the checkout's own requirements.txt using its own Python runtime."
     )
-    parser.add_argument("--comfy-home", help=r"ComfyUI checkout, e.g. C:\AI\ComfyUI")
+    parser.add_argument("--comfy-home", help=r"Explicit ComfyUI workdir containing main.py + requirements.txt")
     parser.add_argument("--python", dest="python_exe", help="Explicit ComfyUI Python interpreter")
     parser.add_argument("--module", default=DEFAULT_MODULE, help=f"Import used to decide whether repair is needed (default: {DEFAULT_MODULE})")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Maximum seconds for requirements synchronization")
