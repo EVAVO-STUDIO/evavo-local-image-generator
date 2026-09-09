@@ -1,0 +1,45 @@
+param(
+    [string]$Python = "python",
+    [string]$ComfyEndpoint = "http://127.0.0.1:8188",
+    [string]$Checkpoint = "",
+    [string]$Prompts = "product,portrait,landscape,interior,game_art",
+    [string]$Seeds = "1337,424242",
+    [string]$OutputRoot = ".evavo\quality-results\hero-release"
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+Set-Location $PSScriptRoot
+
+Write-Host "EVAVO HERO QUALITY RELEASE CHECK" -ForegroundColor Cyan
+Write-Host "ComfyUI: $ComfyEndpoint"
+Write-Host "Profiles: quality,hero,detail,euler_reference,legacy_768_reference"
+Write-Host "Prompts: $Prompts"
+Write-Host "Seeds: $Seeds"
+Write-Host ""
+
+& $Python .\test_quality_profiles.py
+if ($LASTEXITCODE -ne 0) {
+    throw "Offline quality-profile regressions failed. Hero rendering was not started."
+}
+
+$args = @(
+    ".\quality-benchmark.py",
+    "--endpoint", $ComfyEndpoint,
+    "--profiles", "quality,hero,detail,euler_reference,legacy_768_reference",
+    "--prompts", $Prompts,
+    "--seeds", $Seeds,
+    "--output", $OutputRoot
+)
+if (-not [string]::IsNullOrWhiteSpace($Checkpoint)) {
+    $args += @("--checkpoint", $Checkpoint)
+}
+
+& $Python @args
+if ($LASTEXITCODE -ne 0) {
+    throw "Hero A/B benchmark failed. Review the generated manifest before promotion."
+}
+
+Write-Host ""
+Write-Host "Hero A/B benchmark completed successfully." -ForegroundColor Green
+Write-Host "Do not make hero the universal default from timings alone; review the fixed-seed images at fit-to-screen and 100% zoom."
