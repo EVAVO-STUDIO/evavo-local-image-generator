@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 
@@ -34,6 +35,36 @@ class KokoroGatewayProviderContractTests(unittest.TestCase):
         request = {"prompt": "test", "options": {"voice": "af_heart", "speed": 0.98}}
         self.assertEqual(module._nested(request, "voice"), "af_heart")
         self.assertEqual(module._nested(request, "speed"), 0.98)
+
+    def test_provider_receipt_contains_input_output_and_wav_qc_evidence(self):
+        source = (ROOT / "kokoro-provider.py").read_text(encoding="utf-8-sig")
+        self.assertIn("wav_diagnostics", source)
+        self.assertIn("speech_quality_checks", source)
+        self.assertIn('"inputSha256"', source)
+        self.assertIn('"sha256"', source)
+        self.assertIn('"technicalQc"', source)
+        self.assertIn('"metrics"', source)
+        self.assertIn("KOKORO_TECHNICAL_QC_FAILED", source)
+        self.assertIn("target.unlink()", source)
+
+    def test_golden_speech_corpus_is_versioned_and_broad(self):
+        path = ROOT / "config" / "kokoro-golden-texts-v1.json"
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        self.assertEqual(payload["text_set_version"], "kokoro-golden-v1")
+        texts = payload["texts"]
+        for required in ("neutral", "numbers", "expressive", "technical", "proper_nouns"):
+            self.assertIn(required, texts)
+            self.assertTrue(texts[required]["text"].strip())
+            self.assertGreaterEqual(len(texts[required]["review_focus"]), 4)
+
+    def test_quality_runner_uses_versioned_corpus_and_listening_review(self):
+        source = (ROOT / "kokoro-quality-test.py").read_text(encoding="utf-8-sig")
+        self.assertIn("kokoro-golden-texts-v1.json", source)
+        self.assertIn("text_corpus", source)
+        self.assertIn("input_sha256", source)
+        self.assertIn("output_sha256", source)
+        self.assertIn("effective_wpm", source)
+        self.assertIn("human_review.csv", source)
 
     def test_gateway_prefers_audio_studio_before_kokoro_fallback(self):
         source = (ROOT / "START-GATEWAY.ps1").read_text(encoding="utf-8-sig")
