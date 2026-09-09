@@ -5,12 +5,18 @@ from __future__ import annotations
 
 import inspect
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from evavo_local_image_generator import comfyui_repair, mcp_server
 
 
 class ComfyUIRepairSafetyTests(unittest.TestCase):
+    def test_fixed_repair_module_and_script_are_present(self) -> None:
+        self.assertTrue(Path(comfyui_repair.__file__).is_file())
+        self.assertTrue(comfyui_repair.REPAIR_SCRIPT.is_file())
+        self.assertEqual(comfyui_repair.REPAIR_SCRIPT.name, "repair-comfyui-dependencies.py")
+
     def test_mcp_tool_does_not_accept_arbitrary_module_or_package_input(self) -> None:
         parameters = inspect.signature(mcp_server.repair_backend_dependencies).parameters
         self.assertEqual(set(parameters), {"force_sync", "verify_only", "timeout_seconds"})
@@ -41,11 +47,9 @@ class ComfyUIRepairSafetyTests(unittest.TestCase):
         self.assertIn("--module", command)
         self.assertIn("comfy_aimdo", command)
         self.assertIn("--verify-only", command)
-        source = comfyui_repair.__file__
-        self.assertTrue(source)
-        text = open(source, "r", encoding="utf-8").read()
-        self.assertIn("subprocess.run", text)
-        self.assertNotIn("shell=True", text)
+        source = Path(comfyui_repair.__file__).read_text(encoding="utf-8")
+        self.assertIn("subprocess.run", source)
+        self.assertNotIn("shell=True", source)
 
     def test_invalid_module_name_is_rejected_before_process_launch(self) -> None:
         with self.assertRaises(ValueError):
