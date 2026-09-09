@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from evavo_operations import TaskTracker
+from evavo_operations import TaskTracker, _interprocess_lock
 from evavo_local_image_generator.backends import ComfyUIBackend
 from evavo_local_image_generator.comfyui_runtime import ensure_comfyui, native_health
 
@@ -144,25 +144,39 @@ class TaskQueuedResponse(BaseModel):
 
 
 class TaskStore:
-    """Small atomic JSON task store with async serialization."""
+    """Atomic task store with process-local and cross-process serialization."""
 
     def __init__(self, path: Path):
         self.path = path
+        self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         self._lock = asyncio.Lock()
         self._tasks: Dict[str, Dict[str, Any]] = {}
         self._load()
 
-    def _load(self) -> None:
-        if not self.path.is_file():
-            return
+    def _read_unlocked(self) -> Dict[str, Dict[str, Any]]:
+        if not self.path.exists():
+            return {}
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
-        if isinstance(payload, dict):
-            tasks = payload.get("tasks", payload)
-            if isinstance(tasks, dict):
-                self._tasks = {str(key): value for key, value in tasks.items() if isinstance(value, dict)}
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"GATEWAY_TASK_STATE_CORRUPT:{self.path}:{exc}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"GATEWAY_TASK_STATE_READ_ERROR:{self.path}:{exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"GATEWAY_TASK_STATE_CORRUPT:{self.path}:root must be a JSON object")
+        tasks = payload.get("tasks", payload)
+        if not isinstance(tasks, dict):
+            raise RuntimeError(f"GATEWAY_TASK_STATE_CORRUPT:{self.path}:tasks must be a JSON object")
+        result: Dict[str, Dict[str, Any]] = {}
+        for key, value in tasks.items():
+            if not isinstance(value, dict):
+                raise RuntimeError(f"GATEWAY_TASK_STATE_CORRUPT:{self.path}:task {key!r} must be an object")
+            result[str(key)] = dict(value)
+        return result
+
+    def _load(self) -> None:
+        with _interprocess_lock(self.lock_path):
+            self._tasks = self._read_unlocked()
 
     def max_task_suffixes(self) -> Dict[str, int]:
         maxima: Dict[str, int] = {}
@@ -178,12 +192,12 @@ class TaskStore:
             maxima[prefix] = max(maxima.get(prefix, 0), suffix)
         return maxima
 
-    def _write(self) -> None:
+    def _write_unlocked(self, tasks: Dict[str, Dict[str, Any]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=str(self.path.parent))
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-                json.dump({"version": 2, "tasks": self._tasks}, handle, indent=2, ensure_ascii=False)
+                json.dump({"version": 2, "tasks": tasks}, handle, indent=2, ensure_ascii=False)
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -195,39 +209,64 @@ class TaskStore:
                 pass
             raise
 
-    async def put(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    def _put_sync(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(task["task_id"])
-        async with self._lock:
-            if task_id in self._tasks:
+        with _interprocess_lock(self.lock_path):
+            tasks = self._read_unlocked()
+            if task_id in tasks:
                 raise RuntimeError(f"GATEWAY_TASK_ID_COLLISION:{task_id}")
-            self._tasks[task_id] = dict(task)
-            await asyncio.to_thread(self._write)
-            return dict(task)
+            tasks[task_id] = dict(task)
+            self._write_unlocked(tasks)
+            self._tasks = tasks
+            return dict(tasks[task_id])
 
-    async def update(self, task_id: str, **fields: Any) -> Dict[str, Any]:
+    async def put(self, task: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
-            task = self._tasks.get(task_id)
+            return await asyncio.to_thread(self._put_sync, dict(task))
+
+    def _update_sync(self, task_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+        with _interprocess_lock(self.lock_path):
+            tasks = self._read_unlocked()
+            task = tasks.get(task_id)
             if task is None:
                 raise KeyError(task_id)
             task.update(fields)
             task["updated_at"] = _iso_now()
-            await asyncio.to_thread(self._write)
+            self._write_unlocked(tasks)
+            self._tasks = tasks
             return dict(task)
+
+    async def update(self, task_id: str, **fields: Any) -> Dict[str, Any]:
+        async with self._lock:
+            return await asyncio.to_thread(self._update_sync, task_id, dict(fields))
+
+    def _get_sync(self, task_id: str) -> Optional[Dict[str, Any]]:
+        with _interprocess_lock(self.lock_path):
+            tasks = self._read_unlocked()
+            self._tasks = tasks
+            task = tasks.get(task_id)
+            return dict(task) if task is not None else None
 
     async def get(self, task_id: str) -> Optional[Dict[str, Any]]:
         async with self._lock:
-            task = self._tasks.get(task_id)
-            return dict(task) if task is not None else None
+            return await asyncio.to_thread(self._get_sync, task_id)
+
+    def _list_sync(self, limit: int) -> list[Dict[str, Any]]:
+        with _interprocess_lock(self.lock_path):
+            tasks = self._read_unlocked()
+            self._tasks = tasks
+            values = list(tasks.values())[-max(1, min(limit, 1000)) :]
+            return [dict(item) for item in reversed(values)]
 
     async def list(self, limit: int = 100) -> list[Dict[str, Any]]:
         async with self._lock:
-            values = list(self._tasks.values())[-max(1, min(limit, 1000)) :]
-            return [dict(item) for item in reversed(values)]
+            return await asyncio.to_thread(self._list_sync, limit)
 
-    async def recover_interrupted(self) -> None:
-        changed = False
-        async with self._lock:
-            for task in self._tasks.values():
+    def _recover_interrupted_sync(self) -> None:
+        with _interprocess_lock(self.lock_path):
+            tasks = self._read_unlocked()
+            changed = False
+            for task in tasks.values():
                 if task.get("status") in {"queued", "running"}:
                     task.update(
                         status="failed",
@@ -238,7 +277,12 @@ class TaskStore:
                     )
                     changed = True
             if changed:
-                await asyncio.to_thread(self._write)
+                self._write_unlocked(tasks)
+            self._tasks = tasks
+
+    async def recover_interrupted(self) -> None:
+        async with self._lock:
+            await asyncio.to_thread(self._recover_interrupted_sync)
 
 
 STORE = TaskStore(TASK_STATE_FILE)
