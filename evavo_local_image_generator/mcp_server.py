@@ -380,6 +380,56 @@ async def model_inventory(auto_start: bool = True, limit_per_category: int = 200
 
 
 @mcp.tool()
+async def workflow_preflight(
+    workflow_path: str,
+    prompt: str = "EVAVO workflow preflight",
+    negative_prompt: str = "",
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 24,
+    cfg_scale: float = 7.0,
+    seed: int = 1,
+    checkpoint: Optional[str] = None,
+    auto_start: bool = True,
+) -> Dict[str, Any]:
+    """Validate a custom ComfyUI API workflow against live node classes, required inputs and literal loader/model choices without queueing work."""
+    if not isinstance(workflow_path, str) or not workflow_path.strip():
+        return {"ok": False, "status": "failed", "error_code": "INVALID_WORKFLOW_PATH", "message": "workflow_path must be a non-empty string"}
+    await _ensure(auto_start=auto_start)
+    backend = _backend()
+    path = str(Path(workflow_path).expanduser().resolve())
+    try:
+        workflow = await asyncio.to_thread(
+            backend.build_txt2img_workflow,
+            prompt,
+            negative_prompt=negative_prompt,
+            width=width,
+            height=height,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            seed=seed,
+            checkpoint=checkpoint,
+            filename_prefix="EVAVO/preflight",
+            workflow_path=path,
+        )
+        preflight = await asyncio.to_thread(backend.preflight_workflow, workflow)
+    except RuntimeError as exc:
+        message = str(exc)
+        prefix = "COMFYUI_WORKFLOW_PREFLIGHT_FAILED:"
+        if message.startswith(prefix):
+            raw = message[len(prefix):]
+            try:
+                details = json.loads(raw)
+            except json.JSONDecodeError:
+                details = {"message": raw}
+            return {"ok": False, "status": "incompatible", "workflow_path": path, "preflight": details}
+        return {"ok": False, "status": "failed", "error_code": "WORKFLOW_PREFLIGHT_FAILED", "workflow_path": path, "message": message}
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "status": "failed", "error_code": "WORKFLOW_PREFLIGHT_FAILED", "workflow_path": path, "message": str(exc)}
+    return {"ok": True, "status": "compatible", "workflow_path": path, "preflight": preflight}
+
+
+@mcp.tool()
 async def generate_image(
     prompt: str,
     project_name: str = "mcp",
