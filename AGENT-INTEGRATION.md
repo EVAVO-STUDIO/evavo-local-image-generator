@@ -1,10 +1,12 @@
 # EVAVO Agent Integration
 
-This repository owns one production generation capability: **local image generation through native ComfyUI**. Claude, ChatGPT, local MCP clients, direct Python automation and `evavo.py` share the same lifecycle, model, workflow, task-history and output-integrity contract.
+This repository owns one production generation capability: **local image generation through native ComfyUI**. Claude, ChatGPT, Codex, local MCP clients, direct Python automation and `evavo.py` share the same lifecycle, model, workflow, task-history, recovery and output-integrity contract.
 
 The deterministic EVAVO mock is test infrastructure only.
 
 The optional loopback HTTP gateway may separately **delegate** video/audio/3D jobs to governed sibling EVAVO Studio providers. Those delegated routes are not MCP/package-owned capabilities of this image-generator repository.
+
+Read `AGENTS.md` for cross-agent operating rules and `COMFYUI-STARTUP-DIAGNOSTICS.md` for the canonical recovery sequence.
 
 ## Canonical Windows convergence
 
@@ -45,6 +47,8 @@ $env:CONTROL_PLANE_API_KEY = "<runtime tunnel key>"
 
 See `CHATGPT-TUNNEL.md`.
 
+Claude and ChatGPT use different transports but the **same MCP tool implementation**. Do not maintain separate repair or generation behavior per client.
+
 ## MCP tool surface
 
 ```text
@@ -52,6 +56,7 @@ provision_backend
 ensure_backend
 diagnose_backend
 last_startup_failure
+repair_backend_dependencies
 health_check
 discover_backends
 list_checkpoints
@@ -90,18 +95,36 @@ There are intentionally no `generate_video`, `generate_audio` or `generate_3d` M
 
 Invalid file/wait policy is rejected **before ComfyUI is started, before queueing and before task creation**.
 
-## Diagnostics
+## Diagnostics and dependency repair
 
-Use:
+Normal connected-agent recovery is:
 
 ```text
-diagnose_backend
 last_startup_failure
+diagnose_backend(seconds=60, cpu=true)
+repair_backend_dependencies()  # only for missing_dependency
+diagnose_backend(seconds=60, cpu=true)
+ensure_backend
+real generation proof
 ```
 
 `diagnose_backend` performs a bounded startup diagnostic against only the process tree created by that probe. `last_startup_failure` returns the last structured startup failure without changing process state.
 
-This is preferred over broad process cleanup.
+`repair_backend_dependencies` is a constrained shared MCP repair primitive for Claude and ChatGPT. It:
+
+- admits normal mutation only when the last structured failure category is `missing_dependency`;
+- derives the import to verify from structured diagnostic evidence rather than accepting arbitrary package names;
+- uses the discovered ComfyUI checkout's own `requirements.txt` and selected Python interpreter;
+- invokes no shell;
+- accepts no arbitrary Python or ComfyUI filesystem path through MCP;
+- never starts, stops or broadly kills Python/ComfyUI processes;
+- returns a structured repair receipt.
+
+For `custom_node_dependency`, the core repair tool refuses mutation. Use `diagnose_backend(..., disable_all_custom_nodes=true)` to isolate the node fault, then repair that reviewed node separately.
+
+`force_sync=true` is an explicit operator/agent override, not the normal recovery path.
+
+This is preferred over broad process cleanup or ad-hoc `pip install <guessed package>` commands.
 
 ## Generation status
 
@@ -225,3 +248,5 @@ python agent-doctor.py --repair --provision
 ```
 
 See `AGENT-RECOVERY.md`. Recovery must never broadly kill `python.exe`, expose raw local ports publicly, overwrite `.git`, force-push or regenerate current source from historical templates.
+
+When the image MCP does not expose the local operation an agent needs, use the EVAVO Local Compute workstation bridge/operator. Connected agents should execute permitted routine PowerShell/Python work themselves and wait for the terminal receipt rather than returning a manual double-click instruction. If no workstation execution authority is connected, state that limitation instead of claiming local execution occurred.
