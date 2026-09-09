@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,6 +90,15 @@ def _inside(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _lexical_absolute(path: Path) -> Path:
+    """Normalize an absolute path without following symlinks/junctions."""
+    return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
 
 
 def _loopback_endpoint(url: str, *, default_port: int) -> str:
@@ -218,19 +228,54 @@ def _receipt_sha256(receipt: dict[str, Any]) -> str | None:
 
 
 def _copy_verified(source: Path, destination: Path, *, admitted_root: Path) -> Path:
+    source_lexical = _lexical_absolute(source)
+    if source_lexical.is_symlink():
+        raise ProviderError("PROVIDER_OUTPUT_INVALID", "provider artifact must not be a symlink")
     try:
-        resolved = source.expanduser().resolve(strict=True)
+        resolved = source_lexical.resolve(strict=True)
     except OSError as exc:
         raise ProviderError("PROVIDER_OUTPUT_INVALID", f"provider artifact is unavailable: {source}") from exc
-    if not resolved.is_file() or resolved.is_symlink():
+    if not _same_path(source_lexical, resolved):
+        raise ProviderError("PROVIDER_OUTPUT_INVALID", "provider artifact traversed a symlink or redirected parent path")
+    if not resolved.is_file():
         raise ProviderError("PROVIDER_OUTPUT_INVALID", "provider artifact must be an ordinary file")
     if not _inside(resolved, admitted_root):
         raise ProviderError("PROVIDER_OUTPUT_INVALID", "provider artifact escaped its admitted workspace")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(resolved, destination)
-    if not destination.is_file() or destination.stat().st_size < 1:
-        raise ProviderError("PROVIDER_OUTPUT_INVALID", "copied provider artifact is empty")
-    return destination.resolve()
+
+    destination_lexical = _lexical_absolute(destination)
+    destination_parent = destination_lexical.parent
+    destination_parent.mkdir(parents=True, exist_ok=True)
+    if destination_parent.is_symlink():
+        raise ProviderError("PROVIDER_OUTPUT_INVALID", "provider result directory must not be a symlink")
+    try:
+        resolved_parent = destination_parent.resolve(strict=True)
+    except OSError as exc:
+        raise ProviderError("PROVIDER_OUTPUT_INVALID", f"provider result directory is unavailable: {destination_parent}") from exc
+    if not _same_path(destination_parent, resolved_parent):
+        raise ProviderError("PROVIDER_OUTPUT_INVALID", "provider result directory traversed a symlink or redirected parent path")
+    if destination_lexical.is_symlink():
+        raise ProviderError("PROVIDER_OUTPUT_INVALID", "provider destination must not be a symlink")
+
+    fd, temp_name = tempfile.mkstemp(prefix=destination_lexical.name + ".", suffix=".part", dir=str(resolved_parent))
+    os.close(fd)
+    try:
+        shutil.copyfile(resolved, temp_name, follow_symlinks=False)
+        temp_path = Path(temp_name)
+        if not temp_path.is_file() or temp_path.is_symlink() or temp_path.stat().st_size < 1:
+            raise ProviderError("PROVIDER_OUTPUT_INVALID", "copied provider artifact is empty or unsafe")
+        with temp_path.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temp_name, destination_lexical)
+        final = destination_lexical.resolve(strict=True)
+        if destination_lexical.is_symlink() or not _same_path(destination_lexical, final) or not final.is_file() or final.stat().st_size < 1:
+            raise ProviderError("PROVIDER_OUTPUT_INVALID", "final provider artifact path is unsafe")
+        return final
+    except Exception:
+        try:
+            Path(temp_name).unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _generic_output(receipt: dict[str, Any]) -> str | None:
