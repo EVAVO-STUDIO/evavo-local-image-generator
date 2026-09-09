@@ -14,6 +14,7 @@ PERSISTED_POLICY = {
     "EVAVO_MCP_WORKFLOW_ROOT",
 }
 POLICY_COMMAND = "-m evavo_local_image_generator.mcp_policy --json"
+VALIDATED_ENTRY = "evavo_local_image_generator.mcp_entry"
 
 
 def assert_profile_contract(test: unittest.TestCase, source: str) -> None:
@@ -36,10 +37,14 @@ class McpProfilePolicyTests(unittest.TestCase):
     def test_claude_installer_persists_non_secret_owner_path_policy_and_canonical_endpoint(self) -> None:
         source = (ROOT / "INSTALL-CLAUDE-MCP.ps1").read_text(encoding="utf-8")
         assert_profile_contract(self, source)
+        self.assertIn(VALIDATED_ENTRY, source)
+        self.assertNotIn('"args" = @("-m", "evavo_local_image_generator.mcp_server"', source)
 
     def test_http_autostart_persists_same_non_secret_policy_and_canonical_endpoint(self) -> None:
         source = (ROOT / "INSTALL-AGENT-MCP-AUTOSTART.ps1").read_text(encoding="utf-8")
         assert_profile_contract(self, source)
+        start = (ROOT / "START-AGENT-MCP.ps1").read_text(encoding="utf-8")
+        self.assertIn(VALIDATED_ENTRY, start)
 
     def test_claude_policy_validation_precedes_any_config_write_or_backup(self) -> None:
         source = (ROOT / "INSTALL-CLAUDE-MCP.ps1").read_text(encoding="utf-8")
@@ -74,10 +79,11 @@ class McpProfilePolicyTests(unittest.TestCase):
                 self.assertGreater(policy, skip_block)
                 self.assertIn("Always validate", source[skip_block:policy])
 
-    def test_root_mcp_profile_uses_canonical_endpoint(self) -> None:
+    def test_root_mcp_profile_uses_validated_entry_and_canonical_endpoint(self) -> None:
         profile = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
         server = profile["mcpServers"]["evavo-local-image-generator"]
         environment = server["env"]
+        self.assertEqual(server["args"][:2], ["-m", VALIDATED_ENTRY])
         self.assertEqual(environment["COMFYUI_ENDPOINT"], "http://127.0.0.1:8188")
         self.assertNotIn("EVAVO_COMFYUI_ENDPOINT", environment)
 
