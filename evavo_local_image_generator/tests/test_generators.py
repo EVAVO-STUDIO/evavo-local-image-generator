@@ -1,29 +1,40 @@
-"""Tests for EVAVO generators"""
+"""Package-level tests for current EVAVO storage and MCP v2 integration."""
 
-import pytest
+from __future__ import annotations
+
+import unittest
+
+from evavo_local_image_generator import mcp_server
 from evavo_local_image_generator.storage import BeeStorageClient
-from evavo_local_image_generator.mcp_server import EvavoLocalImageGeneratorMCPServer
 
 
-def test_storage_client():
-    """Test storage client"""
-    client = BeeStorageClient()
-    data = b"test data"
-    digest = client.compute_digest(data)
-    assert len(digest) == 64  # SHA-256 hex string
+class StorageTests(unittest.TestCase):
+    def test_storage_client_digest_and_verification(self) -> None:
+        client = BeeStorageClient()
+        data = b"test data"
+        digest = client.compute_digest(data)
+        self.assertEqual(len(digest), 64)
+        saved = client.save_file(data, "fixture.bin")
+        self.assertEqual(saved, digest)
+        self.assertTrue(client.verify_digest("fixture.bin", digest))
+        self.assertFalse(client.verify_digest("missing.bin", digest))
 
 
-def test_mcp_server_initialization():
-    """Test MCP server initialization"""
-    server = EvavoLocalImageGeneratorMCPServer()
-    assert len(server.tools) == 5
-    assert any(t["name"] == "generate_image" for t in server.tools)
+class MCPV2ContractTests(unittest.IsolatedAsyncioTestCase):
+    def test_current_mcp_server_surface_is_present(self) -> None:
+        self.assertIsNotNone(mcp_server.mcp)
+        self.assertTrue(callable(mcp_server.generate_image))
+        self.assertTrue(callable(mcp_server.generate_batch))
+        self.assertTrue(callable(mcp_server.workflow_preflight))
+        self.assertTrue(callable(mcp_server.read_output_image))
+        self.assertFalse(hasattr(mcp_server, "EvavoLocalImageGeneratorMCPServer"))
+
+    async def test_invalid_prompt_fails_without_touching_backend(self) -> None:
+        result = await mcp_server._generate_image_impl("   ", auto_start=False)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error_code"], "INVALID_PROMPT")
 
 
-@pytest.mark.asyncio
-async def test_tool_call():
-    """Test tool call handling"""
-    server = EvavoLocalImageGeneratorMCPServer()
-    result = await server.handle_tool_call("generate_image", {"prompt": "test"})
-    assert result["status"] == "queued"
-    assert result["tool"] == "generate_image"
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
