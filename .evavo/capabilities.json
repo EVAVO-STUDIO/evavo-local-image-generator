@@ -2,7 +2,7 @@
   "contractVersion": "evavo_repository_capabilities_v1",
   "repository": "EVAVO-STUDIO/evavo-local-image-generator",
   "authority": "local-image-generation-control-plane",
-  "summary": "EVAVO's Windows-first native-ComfyUI image-generation control plane and agent transport layer. It owns backend discovery/provisioning/health, bounded startup diagnostics, exact-runtime evidence-gated dependency repair, model inventory, workflow preflight, real prompt submission, normalized jobs/history/queue status, targeted per-generation cancellation, output collection/inspection, bounded batches, shared task history, MCP delivery and secure ChatGPT tunnelling. Claude and ChatGPT use the same MCP implementation through different transports. MCP file access is owner-confined and generated images require ordinary-file identity plus valid image signatures. Its optional hardened loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. The deterministic mock is test infrastructure only.",
+  "summary": "EVAVO's Windows-first native-ComfyUI image-generation control plane and agent transport layer. It owns backend discovery/provisioning/health, bounded startup diagnostics, exact-runtime evidence-gated dependency repair, model inventory, workflow preflight, real prompt submission, normalized jobs/history/queue status, targeted per-generation cancellation, output collection/inspection, bounded batches, shared task history, MCP delivery, secure ChatGPT tunnelling and a mandatory post-bootstrap real-image proof for canonical workstation setup. Claude and ChatGPT use the same MCP implementation through different transports. MCP file access is owner-confined and generated images require ordinary-file identity plus valid image signatures. Its optional hardened loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. The deterministic mock is test infrastructure only and cannot satisfy production readiness.",
   "capabilities": [
     {
       "id": "local-image.backend.discover-health",
@@ -135,20 +135,30 @@
       "requires": ["Loopback gateway", "Ready reviewed provider for the requested delegated modality"]
     },
     {
+      "id": "local-image.validation.real-generation-proof",
+      "title": "Prove production readiness with one real native image render",
+      "description": "After strict backend repair/bootstrap, submit the active owner workflow to native ComfyUI, retain the real prompt ID, wait for terminal completion, download through /view, require EVAVO image/signature validation and persist the proof in shared task history. Repository simulator tests validate the contract but never satisfy this production workstation readiness gate.",
+      "interfaces": ["cli", "automation", "testing"],
+      "effects": ["read", "compute", "network", "execute", "write"],
+      "entrypoints": ["python real-generation-smoke.py --json", "UPDATE-AND-VERIFY-EVAVO.ps1"],
+      "tags": ["image", "production-readiness", "real-render", "comfyui", "proof", "smoke"],
+      "requires": ["Healthy native ComfyUI", "Ready active owner workflow/model contract", "Writable EVAVO smoke output/task-history paths"]
+    },
+    {
       "id": "local-image.validation.execute",
       "title": "Run repository and Windows integration verification",
-      "description": "Run read-only structural verification plus all discovered root, provider and package safety/integration suites, optionally requiring PowerShell AST validation. The canonical updater may perform one evidence-gated ComfyUI dependency recovery retry after strict doctor failure, then requires strict doctor proof before configuring agents.",
+      "description": "Run read-only structural verification plus all discovered root, provider and package safety/integration suites, optionally requiring PowerShell AST validation. The canonical updater may perform one evidence-gated ComfyUI dependency recovery retry after strict doctor failure, then requires strict doctor proof and a real native image render before reporting workstation setup success.",
       "interfaces": ["cli", "testing", "automation"],
       "effects": ["read", "compute", "execute", "write"],
-      "entrypoints": ["python evavo.py verify", "python evavo.py verify --full", "python evavo.py verify --full --require-powershell", "UPDATE-AND-VERIFY-EVAVO.ps1", "python recover-comfyui.py"],
-      "tags": ["image", "validation", "recovery", "providers", "powershell", "windows", "testing"],
-      "requires": ["Repository Python/PowerShell environment", "Native ComfyUI only for live generation readiness"]
+      "entrypoints": ["python evavo.py verify", "python evavo.py verify --full", "python evavo.py verify --full --require-powershell", "UPDATE-AND-VERIFY-EVAVO.ps1", "python recover-comfyui.py", "python real-generation-smoke.py --json"],
+      "tags": ["image", "validation", "recovery", "real-render", "providers", "powershell", "windows", "testing"],
+      "requires": ["Repository Python/PowerShell environment", "Native ComfyUI for final live generation readiness proof"]
     }
   ],
   "brain": {
     "consult": true,
     "sanityCheck": true,
-    "topics": ["local image generation", "ComfyUI readiness", "startup diagnostics", "exact-runtime evidence-gated dependency repair", "owner-gated forced repair", "Claude/ChatGPT MCP parity", "model inventory", "workflow preflight", "owner-confined MCP file policy", "generation status", "targeted cancellation", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "hardened private gateway", "governed gateway provider delegation"]
+    "topics": ["local image generation", "ComfyUI readiness", "startup diagnostics", "exact-runtime evidence-gated dependency repair", "owner-gated forced repair", "Claude/ChatGPT MCP parity", "model inventory", "workflow preflight", "owner-confined MCP file policy", "generation status", "targeted cancellation", "batch rendering", "real native generation readiness proof", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "hardened private gateway", "governed gateway provider delegation"]
   },
-  "reviewedAt": "2026-09-09T21:46:00+10:00"
+  "reviewedAt": "2026-09-09T23:55:00+10:00"
 }
