@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from evavo_local_image_generator import mcp_server
 
@@ -19,9 +19,8 @@ ROOT = Path(__file__).resolve().parent
 class McpRequestValidationTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_wait_timeout_does_not_start_backend_or_create_task(self) -> None:
         ensure = AsyncMock()
-        tracker = mcp_server._tracker()
-        before = tracker.get_statistics()["total_tasks"]
-        with patch.object(mcp_server, "_ensure", ensure):
+        tracker = Mock()
+        with patch.object(mcp_server, "_ensure", ensure), patch.object(mcp_server, "_tracker", return_value=tracker) as tracker_factory:
             result = await mcp_server._generate_image_impl(
                 "invalid wait should not start anything",
                 wait_timeout=float("nan"),
@@ -31,10 +30,12 @@ class McpRequestValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error_code"], "INVALID_FILE_OR_WAIT_POLICY")
         self.assertNotIn("task_id", result)
         ensure.assert_not_awaited()
-        self.assertEqual(mcp_server._tracker().get_statistics()["total_tasks"], before)
+        tracker_factory.assert_not_called()
+        tracker.add_task.assert_not_called()
 
     async def test_invalid_output_directory_does_not_start_backend(self) -> None:
         ensure = AsyncMock()
+        tracker = Mock()
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
             root = base / "allowed"
@@ -45,7 +46,7 @@ class McpRequestValidationTests(unittest.IsolatedAsyncioTestCase):
                 "EVAVO_GENERATION_OUTPUT_DIR": str(root),
                 "EVAVO_MCP_OUTPUT_ROOTS": "",
             }
-            with patch.dict(os.environ, env, clear=False), patch.object(mcp_server, "_ensure", ensure):
+            with patch.dict(os.environ, env, clear=False), patch.object(mcp_server, "_ensure", ensure), patch.object(mcp_server, "_tracker", return_value=tracker) as tracker_factory:
                 result = await mcp_server._generate_image_impl(
                     "invalid output should not start anything",
                     output_dir=str(outside),
@@ -55,6 +56,7 @@ class McpRequestValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_code"], "INVALID_FILE_OR_WAIT_POLICY")
         ensure.assert_not_awaited()
+        tracker_factory.assert_not_called()
 
     async def test_batch_file_policy_is_checked_before_backend_start(self) -> None:
         ensure = AsyncMock()
