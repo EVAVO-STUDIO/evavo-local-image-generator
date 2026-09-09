@@ -1,3 +1,9 @@
+# HISTORICAL MILESTONE — SUPERSEDED
+
+> This file records an earlier 2026-09-08 architecture milestone. **Do not use it as current setup or agent guidance.** The BeeStation/`bee://`/digest-bound MCP architecture described below is not the verified production contract of the current repository. Current image generation uses native ComfyUI with the MCP v2/CLI control plane documented in `README.md`, `CLAUDE.md`, `AGENT-INTEGRATION.md`, `OPERATIONS-GUIDE.md`, `CHATGPT-TUNNEL.md`, and `QUICK-REFERENCE.md`. `BeeStorageClient` remains only for backwards compatibility.
+
+---
+
 # BeeStation & evavo-local-storage Integration Upgrade - COMPLETE ✅
 
 ## Overview
