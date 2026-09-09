@@ -1,84 +1,77 @@
-# EVAVO Autonomous Generation System
+# EVAVO Autonomous Image Setup
 
-**Status:** Ready for Claude/ChatGPT autonomous control
+This repository supports automated **native ComfyUI image generation** for CLI, Claude Desktop and ChatGPT. Historical video-generation and hardcoded `C:\AI\ComfyUI` instructions are retired.
 
-## Quick Start
+## Canonical Windows setup
 
-### Prerequisites
-- ComfyUI running on http://127.0.0.1:8188
-- Python 3.10+
-- Dependencies: requests (minimal)
-
-### Installation
-
-```bash
+```powershell
 cd C:\Gitrepos\evavo-local-image-generator
-pip install requests
+git pull --ff-only origin main
+.\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-### Running Autonomous Generation
+The updater verifies the repository before changing agent configuration, provisions/repairs ComfyUI when allowed, validates the active image workflow/model contract, installs Claude stdio MCP, installs the private loopback MCP listener, and configures the ChatGPT tunnel when OpenAI tunnel credentials are already available.
 
-```bash
-python run_autonomous.py
+## Direct readiness repair
+
+```powershell
+python agent-doctor.py --repair --provision
 ```
 
-This will:
-1. Verify ComfyUI server is ready
-2. Generate image series automatically
-3. Orchestrate complete projects
-4. Report statistics and results
+This strict gate requires a real native renderer and the model assets required by the active workflow. The deterministic mock does not count as ready.
 
-## Claude/ChatGPT Integration
+## Direct image generation
 
-Claude can now call:
+```powershell
+python evavo.py generate --prompts "landscape at sunset" --project demo --wait
+```
+
+Batch:
+
+```powershell
+python evavo.py generate --prompts "scene one" "scene two" "scene three" --project game_assets --wait
+```
+
+## Claude Desktop
+
+```powershell
+.\INSTALL-CLAUDE-MCP.ps1
+```
+
+Claude uses local stdio MCP. Restart Claude Desktop after changing its MCP configuration.
+
+## ChatGPT
+
+ChatGPT uses OpenAI Secure MCP Tunnel to reach the private workstation MCP endpoint. See `CHATGPT-TUNNEL.md`.
+
+## Backward-compatible Python API
+
+Older code may still use:
 
 ```python
 from claude_control import ClaudeController
 
 controller = ClaudeController()
-
-# Single image
-result = controller.generate_image_simple("landscape at sunset", quality="ultra")
-
-# Batch images
-results = controller.generate_image_series([
-    "Image 1",
-    "Image 2",
-    "Image 3"
-], quality="high")
-
-# Full project
-project = controller.orchestrate_content_creation(
-    project_name="game_assets",
-    scene_descriptions=[...],
-    output_format="ultra"
-)
+result = controller.generate_image_simple("landscape at sunset", quality="high")
 ```
 
-## System Architecture
+That compatibility API now performs real native-ComfyUI image generation. Its historical video method deliberately returns `NOT_IMPLEMENTED` instead of fabricating a completed MP4.
 
-- **claude_control.py** - Simplified interface for Claude to call
-- **run_autonomous.py** - Full autonomous orchestration demonstration
-- **AUTONOMOUS_SETUP.md** - This guide
+## Historical launchers
 
-## Features
+`run_autonomous.py`, `demo_autonomous.py`, `RUN-GENERATION.py`, `RUN-FULL-GENERATION.py`, `LAUNCH-GENERATION.py`, `EXECUTE-GENERATION.py` and related batch/PowerShell shortcuts now delegate to the same canonical image runtime. They do not start unrelated services, write fake output files, copy to hardcoded storage, or generate without explicit intent.
 
-✅ Single image generation
-✅ Batch image processing
-✅ Video generation
-✅ Project orchestration
-✅ Statistics tracking
-✅ Result reporting
-✅ Full Claude autonomy
+## Verification
 
-## Next Steps
+```powershell
+python evavo.py verify --full --require-powershell
+python evavo.py status
+```
 
-1. Ensure ComfyUI is running: `cd C:\AI\ComfyUI && python main.py`
-2. Run autonomous demo: `python run_autonomous.py`
-3. Claude now has full control for unlimited generations
+For deeper details see:
 
----
-
-**Created:** 2026-09-08  
-**Version:** 1.0.0  
-**Status:** Production Ready
+- `README.md`
+- `AGENT-INTEGRATION.md`
+- `OPERATIONS-GUIDE.md`
+- `CHATGPT-TUNNEL.md`
+- `QUICK-REFERENCE.md`
