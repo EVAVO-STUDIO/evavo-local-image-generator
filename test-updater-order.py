@@ -20,10 +20,8 @@ class UpdaterOrderingTests(unittest.TestCase):
         verify_index = source.index("verify --full --require-powershell")
         backend_index = source.index("Preparing and validating the native ComfyUI generation contract")
         bootstrap_index = source.index("bootstrap --skip-pull --skip-verify")
-        claude_index = source.index("Installing/updating Claude Desktop stdio MCP configuration")
         self.assertLess(verify_index, backend_index)
         self.assertLess(backend_index, bootstrap_index)
-        self.assertLess(bootstrap_index, claude_index)
 
     def test_prebootstrap_doctor_supports_optional_provisioning(self) -> None:
         source = self.source
@@ -52,17 +50,19 @@ class UpdaterOrderingTests(unittest.TestCase):
         self.assertNotIn("--force-sync", source)
         self.assertNotIn("force_sync", source)
 
-    def test_agent_configuration_occurs_only_after_backend_recovery_and_bootstrap_proof(self) -> None:
+    def test_real_generation_proof_precedes_all_agent_configuration_writes(self) -> None:
         source = self.source
-        recovery = source.index('recover-comfyui.py") --json')
-        doctor_retry = source.index("& $python @backendDoctorArgs", source.index("& $python @backendDoctorArgs") + 1)
         bootstrap = source.index("bootstrap --skip-pull --skip-verify")
+        smoke = source.index('real-generation-smoke.py") --json')
         claude = source.index("Installing/updating Claude Desktop stdio MCP configuration")
         http = source.index("Installing/updating per-user private HTTP MCP autostart")
-        self.assertLess(recovery, doctor_retry)
-        self.assertLess(doctor_retry, bootstrap)
-        self.assertLess(bootstrap, claude)
+        final_doctor = source.index("& $python @finalDoctorArgs")
+        self.assertLess(bootstrap, smoke)
+        self.assertLess(smoke, claude)
+        self.assertLess(smoke, http)
         self.assertLess(claude, http)
+        self.assertLess(http, final_doctor)
+        self.assertIn("Agent configuration was not changed", source)
 
     def test_final_doctor_does_not_reprovision_or_dependency_repair_late_in_setup(self) -> None:
         source = self.source
@@ -73,18 +73,17 @@ class UpdaterOrderingTests(unittest.TestCase):
         self.assertNotIn('"--provision"', final_block)
         late = source[final_start:]
         self.assertNotIn('recover-comfyui.py") --json', late)
+        self.assertNotIn('real-generation-smoke.py") --json', late)
 
-    def test_real_generation_smoke_is_required_after_final_doctor_and_before_final_status(self) -> None:
+    def test_real_generation_smoke_is_required_before_final_status_and_setup_success(self) -> None:
         source = self.source
-        final_doctor = source.index("& $python @finalDoctorArgs")
         smoke = source.index('real-generation-smoke.py") --json')
         final_status = source.index('evavo.py") status', smoke)
         completed = source.index("EVAVO workstation setup completed.")
-        self.assertLess(final_doctor, smoke)
         self.assertLess(smoke, final_status)
         self.assertLess(final_status, completed)
         self.assertIn("Real native generation smoke proof failed", source)
-        self.assertIn("Real native generation smoke proof: passed", source)
+        self.assertIn("Real native generation smoke proof: passed before agent config writes", source)
 
     def test_real_generation_smoke_command_is_repository_owned_and_not_skippable_by_default(self) -> None:
         source = self.source
