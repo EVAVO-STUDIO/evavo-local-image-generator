@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "text_set_version": "kokoro-golden-v1",
+  "description": "Controlled speech corpus for voice/runtime comparisons. Add a new version rather than silently rewriting after release evidence exists.",
+  "texts": {
+    "neutral": {
+      "text": "At first light, the harbour was almost silent. Rain moved across the roofs in narrow sheets, and a tug sounded once beyond the fog.",
+      "review_focus": ["naturalness", "breath and pause timing", "consonant clarity", "sentence cadence"]
+    },
+    "numbers": {
+      "text": "Delivery is scheduled for seven forty-five a.m. on Thursday, the eighteenth of September, twenty twenty-six. The invoice total is twelve thousand four hundred and eighty-seven dollars and thirty cents.",
+      "review_focus": ["numbers", "date phrasing", "currency", "steady pacing"]
+    },
+    "expressive": {
+      "text": "No. Leave it there. I said leave it there! Then, after a long pause, he lowered his voice. We can still fix this.",
+      "review_focus": ["emotion", "punctuation response", "pause contrast", "volume consistency"]
+    },
+    "technical": {
+      "text": "The render finished at one thousand five hundred and thirty-six pixels square, using a fixed seed of thirteen thirty-seven. The GPU reported twelve gigabytes of video memory, and the final checksum matched the production manifest.",
+      "review_focus": ["technical terms", "numbers", "compound phrasing", "clarity at normal speed"]
+    },
+    "proper_nouns": {
+      "text": "Naomi reviewed the Melbourne delivery while the Sydney team checked the ComfyUI render, the Kokoro voice track, and the final EVAVO production manifest.",
+      "review_focus": ["proper nouns", "acronym-like brand names", "Australian place names", "sentence flow"]
+    }
+  }
+}
