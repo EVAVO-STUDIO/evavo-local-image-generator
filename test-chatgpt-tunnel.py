@@ -43,6 +43,15 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:$McpPort/mcp", source)
         self.assertNotIn("--listen 0.0.0.0", source)
 
+    def test_tunnel_id_validation_matches_openai_shape(self) -> None:
+        installer = text("install")
+        doctor = text("doctor")
+        exact_pattern = r"\^tunnel_\[0-9a-f\]\{32\}\$"
+        self.assertRegex(installer, exact_pattern)
+        self.assertRegex(doctor, exact_pattern)
+        self.assertNotIn("[A-Za-z0-9_-]{8,}", installer)
+        self.assertNotIn("[A-Za-z0-9_-]{8,}", doctor)
+
     def test_runtime_key_store_uses_current_user_dpapi(self) -> None:
         source = text("save_key")
         self.assertIn("ConvertFrom-SecureString", source)
@@ -60,11 +69,13 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
         self.assertIn("127.0.0.1", source)
         self.assertNotIn("0.0.0.0", source)
 
-    def test_login_autostart_never_embeds_plaintext_control_plane_key(self) -> None:
+    def test_login_autostart_requires_dpapi_and_never_embeds_plaintext_key(self) -> None:
         source = text("autostart")
         self.assertIn("START-CHATGPT-MCP-TUNNEL.ps1", source)
         self.assertIn("-SkipDoctor", source)
         self.assertIn("chatgpt-tunnel-runtime-key.dpapi", source)
+        self.assertIn("login autostart requires the DPAPI key blob", source)
+        self.assertIn("ConvertTo-SecureString", source)
         # References/checks are allowed, but generated CMD must never contain a SET
         # assignment for the runtime secret.
         self.assertNotRegex(source, r"(?i)set\s+[\"']?CONTROL_PLANE_API_KEY\s*=")
@@ -77,6 +88,12 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
         self.assertIn("runtime_key", source)
         self.assertNotRegex(source, r"Write-Host[^\n]*\$env:CONTROL_PLANE_API_KEY")
         self.assertNotRegex(source, r"ConvertTo-Json[^\n]*CONTROL_PLANE_API_KEY")
+
+    def test_doctor_does_not_overclaim_chatgpt_workspace_visibility(self) -> None:
+        source = text("doctor")
+        self.assertIn("local preflight", source.lower())
+        self.assertIn("does not prove ChatGPT workspace visibility", source)
+        self.assertNotIn('status = "chatgpt_connected"', source)
 
     def test_non_secret_tunnel_state_contains_no_api_key_field(self) -> None:
         source = text("install")
