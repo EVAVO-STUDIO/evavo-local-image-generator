@@ -25,6 +25,7 @@ CRITICAL_FILES: Sequence[str] = (
     ".mcp.json",
     "evavo.py",
     "verify-evavo.py",
+    "safe_main_git.py",
     "evavo_operations.py",
     "evavo-wrapper.py",
     "generate-batch.py",
@@ -52,6 +53,7 @@ CRITICAL_FILES: Sequence[str] = (
     "COMPLETE-MULTIMODAL-TEST.py",
     "TEST-ALL-AI-SYSTEMS.py",
     "test-gateway.py",
+    "test-git-safety.py",
     "test-legacy-compatibility.py",
     "test_autonomous.py",
     "test-operations.py",
@@ -81,6 +83,13 @@ CRITICAL_FILES: Sequence[str] = (
     "MASTER-AUTOMATION-CONTROLLER.ps1",
     "RUN-FULL-GENERATION.ps1",
     "START-SERVICES.ps1",
+    "COMMIT-UPGRADE.ps1",
+    "COMMIT_AND_PUSH.ps1",
+    "PUSH-UPGRADE-TO-MAIN.ps1",
+    "COMPLETE_EVAVO_GIT_COMMIT.ps1",
+    "create_github_repo.ps1",
+    "AUTO-COMMIT-AND-PUSH.py",
+    "DO-THIS-TO-COMMIT.txt",
     "START-EVAVO-SERVICES.bat",
     "START-ALL-SERVICES-AND-GENERATE.bat",
     "FULL-GENERATION-START.bat",
@@ -121,6 +130,11 @@ POWERSHELL_SCRIPTS: Sequence[str] = (
     "MASTER-AUTOMATION-CONTROLLER.ps1",
     "RUN-FULL-GENERATION.ps1",
     "START-SERVICES.ps1",
+    "COMMIT-UPGRADE.ps1",
+    "COMMIT_AND_PUSH.ps1",
+    "PUSH-UPGRADE-TO-MAIN.ps1",
+    "COMPLETE_EVAVO_GIT_COMMIT.ps1",
+    "create_github_repo.ps1",
 )
 
 LEGACY_DELEGATION_MARKERS: Mapping[str, Sequence[str]] = {
@@ -151,6 +165,13 @@ LEGACY_DELEGATION_MARKERS: Mapping[str, Sequence[str]] = {
     "START-GENERATION.bat": ("legacy_image_cli.py",),
     "run_full_generation.sh": ("legacy_image_cli.py",),
     "START-GATEWAY.ps1": ("EVAVO-SERVICE-MANAGER.py",),
+    "AUTO-COMMIT-AND-PUSH.py": ("safe_main_git",),
+    "COMMIT-UPGRADE.ps1": ("safe_main_git.py",),
+    "COMMIT_AND_PUSH.ps1": ("safe_main_git.py",),
+    "PUSH-UPGRADE-TO-MAIN.ps1": ("safe_main_git.py",),
+    "COMPLETE_EVAVO_GIT_COMMIT.ps1": ("safe_main_git.py",),
+    "create_github_repo.ps1": ("remote get-url origin", "no repository creation"),
+    "DO-THIS-TO-COMMIT.txt": ("safe_main_git.py", "git pull --ff-only origin main"),
 }
 
 # These are checked only on active, non-comment lines. Explanatory comments may
@@ -167,6 +188,16 @@ RETIRED_ACTIVE_PATTERNS: Sequence[str] = (
     "register-scheduledtask",
     "mock_video_data",
     "shutil.copytree",
+    "remove-item \".git\\index.lock\"",
+    "remove-item -path .\\.git",
+    "git init --initial-branch=main",
+    "git config user.name",
+    "git config user.email",
+    "tar -xzf evavo-upgrade-commit.tar.gz",
+    "expand-archive -path evavo-upgrade-commit.tar.gz",
+    "gh repo create",
+    "git push --force",
+    "git push -f",
 )
 
 
