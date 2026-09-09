@@ -13,6 +13,8 @@ from evavo_local_image_generator import mcp_policy, mcp_server
 
 
 POLICY_ENV = (
+    "COMFYUI_ENDPOINT",
+    "EVAVO_COMFYUI_ENDPOINT",
     "EVAVO_GENERATION_OUTPUT_DIR",
     "EVAVO_MCP_OUTPUT_ROOTS",
     "EVAVO_COMFYUI_WORKFLOW",
@@ -29,6 +31,61 @@ def clean_env() -> dict[str, str]:
 
 
 class McpPolicyParityTests(unittest.TestCase):
+    def test_default_loopback_endpoint_matches_server_default(self) -> None:
+        with patch.dict(os.environ, clean_env(), clear=True):
+            policy = mcp_policy.validate_environment()
+            endpoint = mcp_server._endpoint()
+        self.assertTrue(policy["ok"], policy)
+        self.assertEqual(policy["policy"]["comfyui_endpoint"], "http://127.0.0.1:8188")
+        self.assertEqual(endpoint, "http://127.0.0.1:8188")
+
+    def test_canonical_endpoint_wins_over_conflicting_legacy_alias(self) -> None:
+        env = clean_env()
+        env["COMFYUI_ENDPOINT"] = "http://localhost:18188/"
+        env["EVAVO_COMFYUI_ENDPOINT"] = "http://127.0.0.1:9999"
+        with patch.dict(os.environ, env, clear=True):
+            policy = mcp_policy.validate_environment()
+            endpoint = mcp_server._endpoint()
+        self.assertTrue(policy["ok"], policy)
+        self.assertEqual(policy["policy"]["comfyui_endpoint"], "http://localhost:18188")
+        self.assertEqual(endpoint, "http://localhost:18188")
+        self.assertTrue(any("ignored" in warning for warning in policy["warnings"]))
+
+    def test_legacy_endpoint_is_migration_input_with_warning(self) -> None:
+        env = clean_env()
+        env["EVAVO_COMFYUI_ENDPOINT"] = "http://127.0.0.1:18189/"
+        with patch.dict(os.environ, env, clear=True):
+            policy = mcp_policy.validate_environment()
+        self.assertTrue(policy["ok"], policy)
+        self.assertEqual(policy["policy"]["comfyui_endpoint"], "http://127.0.0.1:18189")
+        self.assertTrue(any("migration input" in warning for warning in policy["warnings"]))
+
+    def test_remote_or_nonlocal_endpoint_is_rejected_before_mcp_start(self) -> None:
+        for endpoint in (
+            "http://192.168.1.50:8188",
+            "http://example.com:8188",
+            "https://127.0.0.1:8188",
+            "http://user:pass@127.0.0.1:8188",
+            "http://127.0.0.1:8188/api",
+            "http://127.0.0.1:8188?x=1",
+            "http://127.0.0.1:8188#fragment",
+        ):
+            env = clean_env()
+            env["COMFYUI_ENDPOINT"] = endpoint
+            with self.subTest(endpoint=endpoint), patch.dict(os.environ, env, clear=True):
+                policy = mcp_policy.validate_environment()
+            self.assertFalse(policy["ok"])
+            self.assertIsNone(policy["policy"]["comfyui_endpoint"])
+            self.assertTrue(any("COMFYUI_ENDPOINT" in error for error in policy["errors"]))
+
+    def test_ipv6_loopback_is_normalized(self) -> None:
+        env = clean_env()
+        env["COMFYUI_ENDPOINT"] = "http://[::1]:8188/"
+        with patch.dict(os.environ, env, clear=True):
+            policy = mcp_policy.validate_environment()
+        self.assertTrue(policy["ok"], policy)
+        self.assertEqual(policy["policy"]["comfyui_endpoint"], "http://[::1]:8188")
+
     def test_default_and_additional_output_roots_match_server_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp)
