@@ -7,13 +7,14 @@ cd C:\Gitrepos\evavo-local-image-generator
 .\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-The updater safely fast-forwards `main`, installs dependencies, runs provisioning/runtime tests, operational tests and negotiated MCP tests, configures Claude stdio + HTTP MCP autostart, provisions/repairs ComfyUI when allowed, runs strict agent readiness checks and verifies final backend status.
+The updater safely fast-forwards `main`, parses canonical PowerShell scripts before configuration writes, installs dependencies, runs all offline/integration suites, configures Claude + private HTTP MCP, provisions/repairs ComfyUI when allowed, runs strict real-renderer readiness checks, and configures the ChatGPT Secure MCP Tunnel when a valid tunnel ID is already available.
 
 Troubleshooting switches:
 
 ```powershell
 .\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipAgentConfiguration
 .\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipComfyUIProvision
+.\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipChatGPTTunnel
 ```
 
 ## Agent readiness
@@ -32,9 +33,9 @@ Strict repair requires real native ComfyUI plus at least one checkpoint for the 
 .\INSTALL-CLAUDE-MCP.ps1
 ```
 
-Claude uses stdio MCP. Restart Claude Desktop after changing its config.
+Claude uses **local stdio MCP**. Restart Claude Desktop after changing its config.
 
-## ChatGPT/local MCP clients
+## Private local HTTP MCP
 
 ```text
 http://127.0.0.1:8765/mcp
@@ -45,7 +46,53 @@ http://127.0.0.1:8765/mcp
 .\INSTALL-AGENT-MCP-AUTOSTART.ps1
 ```
 
-The listener remains loopback-only. The login installer persists safe local settings but deliberately does not persist potentially secret checkpoint URLs.
+This listener is loopback-only. It is for local MCP clients, integration testing, and as the private target of the ChatGPT tunnel. It is **not** directly reachable by cloud ChatGPT and should not be publicly exposed.
+
+## ChatGPT Secure MCP Tunnel
+
+ChatGPT reaches EVAVO through the official outbound OpenAI Secure MCP Tunnel, not by connecting directly to workstation localhost.
+
+One-time prerequisite: obtain/associate a tunnel ID for the intended OpenAI workspace. EVAVO validates the exact shape:
+
+```text
+tunnel_<32 lowercase hexadecimal characters>
+```
+
+Configure/start:
+
+```powershell
+$env:EVAVO_OPENAI_TUNNEL_ID = "tunnel_<32 lowercase hex characters>"
+$env:CONTROL_PLANE_API_KEY = "<runtime tunnel key>"
+.\INSTALL-CHATGPT-MCP-TUNNEL.ps1 -PersistRuntimeKey
+.\INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1
+```
+
+Diagnostics:
+
+```powershell
+.\CHATGPT-TUNNEL-DOCTOR.ps1
+.\CHATGPT-TUNNEL-DOCTOR.ps1 -RequireRuntimeKey -RequireRunning
+```
+
+Session-only start without persisting the runtime key:
+
+```powershell
+$env:CONTROL_PLANE_API_KEY = "<runtime tunnel key>"
+.\START-CHATGPT-MCP-TUNNEL.ps1
+```
+
+Persistent login startup requires the runtime key to be stored with Windows current-user DPAPI:
+
+```powershell
+.\SAVE-CHATGPT-TUNNEL-KEY.ps1 -FromEnvironment
+.\INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1
+```
+
+The installer downloads the latest official `openai/tunnel-client` Windows release and verifies the SHA-256 digest published in GitHub release metadata before extraction. The runtime key is never stored in Git, `.evavo/chatgpt-tunnel.json`, or Windows Startup plaintext.
+
+`CHATGPT-TUNNEL-DOCTOR.ps1` is a local preflight/process diagnostic. It deliberately does not claim that a passing local doctor alone proves ChatGPT workspace visibility.
+
+See `CHATGPT-TUNNEL.md` for the full runbook.
 
 ## MCP tools
 
@@ -66,7 +113,7 @@ task_statistics
 stop_managed_backend
 ```
 
-`generate_image` / `generate_batch` auto-start and wait by default. `read_output_image` returns an authorized generated file as native MCP image content so Claude/ChatGPT can visually inspect it.
+`generate_image` / `generate_batch` auto-start and wait by default. `read_output_image` returns an authorized generated file as native MCP image content so an agent can visually inspect it.
 
 ## Real image generation
 
@@ -117,7 +164,7 @@ EVAVO_AUTO_PROVISION_COMFYUI=1
 EVAVO_AUTO_PROVISION_CHECKPOINT=1
 ```
 
-Checkpoint repair only uses workstation-configured sources. Custom UNET/Flux workflows do not trigger checkpoint provisioning merely because `CheckpointLoaderSimple` is empty.
+Checkpoint repair uses only workstation-configured sources. Custom UNET/Flux workflows do not trigger checkpoint provisioning merely because `CheckpointLoaderSimple` is empty.
 
 ## Shared model libraries
 
@@ -190,21 +237,25 @@ $env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\image-generation-history.json"
 | Statistics | `python evavo.py stats` |
 | Operational tests | `python evavo.py test` |
 | Agent/MCP tests | `python test-agent-integration.py` |
-| Provision/runtime safety tests | `python test-provisioning.py` |
+| Provision/runtime safety | `python test-provisioning.py` |
+| Backend/file-boundary safety | `python test-backend-automation.py` |
+| ChatGPT tunnel contracts | `python test-chatgpt-tunnel.py` |
 | Stop EVAVO-owned processes | `python evavo.py stop` |
 
 ## Custom workflow placeholders
 
+Current uppercase and legacy lowercase forms are both accepted:
+
 ```text
-{{PROMPT}}
-{{NEGATIVE_PROMPT}}
-{{WIDTH}}
-{{HEIGHT}}
-{{STEPS}}
-{{CFG}}
-{{SEED}}
-{{CHECKPOINT}}
-{{FILENAME_PREFIX}}
+{{PROMPT}} / {{prompt}}
+{{NEGATIVE_PROMPT}} / {{negative_prompt}}
+{{WIDTH}} / {{width}}
+{{HEIGHT}} / {{height}}
+{{STEPS}} / {{steps}}
+{{CFG}} / {{CFG_SCALE}} / {{cfg}} / {{cfg_scale}}
+{{SEED}} / {{seed}}
+{{CHECKPOINT}} / {{checkpoint}}
+{{FILENAME_PREFIX}} / {{filename_prefix}}
 ```
 
 Set default workflow:
@@ -222,9 +273,17 @@ $env:EVAVO_COMFYUI_WORKFLOW = "C:\EVAVO\workflows\workflow-api.json"
 .evavo/native-comfyui.log            native startup log
 .evavo/comfyui-provision.json        provisioning result
 .evavo/extra-model-paths.yaml        EVAVO-managed shared model config
+.evavo/chatgpt-tunnel.json           non-secret tunnel/profile state
+.evavo/tools/tunnel-client.exe       verified official tunnel client
 .evavo/outputs/                      default downloaded images
 task_history.json                    shared CLI + MCP history
 task_history.json.lock               inter-process lock
+```
+
+Persistent tunnel runtime key (outside the repository):
+
+```text
+%LOCALAPPDATA%\EVAVO\Secure\chatgpt-tunnel-runtime-key.dpapi
 ```
 
 ## Recovery
@@ -234,8 +293,11 @@ python agent-doctor.py --repair --provision
 python evavo.py doctor
 python monitor-evavo.py --json
 python test-provisioning.py
+python test-backend-automation.py
+python test-chatgpt-tunnel.py
 python test-agent-integration.py
 python evavo.py test
+.\CHATGPT-TUNNEL-DOCTOR.ps1 -RequireRuntimeKey -RequireRunning
 Get-Content .\.evavo\native-comfyui.log -Tail 100
 Get-Content .\.evavo\mock-service.log -Tail 100
 ```
