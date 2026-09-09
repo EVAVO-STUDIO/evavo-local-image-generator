@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +15,18 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from evavo_local_image_generator import comfyui_repair, mcp_server
+
+ROOT = Path(__file__).resolve().parent
+STANDALONE_REPAIR = ROOT / "repair-comfyui-dependencies.py"
+
+
+def load_standalone_repair():
+    spec = importlib.util.spec_from_file_location("evavo_standalone_repair_test", STANDALONE_REPAIR)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load repair-comfyui-dependencies.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class ComfyUIRepairSafetyTests(unittest.TestCase):
@@ -95,8 +109,7 @@ class ComfyUIRepairSafetyTests(unittest.TestCase):
             base = Path(temp)
             home = base / "ComfyUI"
             home.mkdir()
-            main_py = home / "main.py"
-            main_py.write_text("# fixture\n", encoding="utf-8")
+            (home / "main.py").write_text("# fixture\n", encoding="utf-8")
             (home / "requirements.txt").write_text("# fixture\n", encoding="utf-8")
             python = home / ".venv" / "Scripts" / "python.exe"
             python.parent.mkdir(parents=True)
@@ -140,6 +153,34 @@ class ComfyUIRepairSafetyTests(unittest.TestCase):
         self.assertEqual(result["target_source"], "startup_failure")
         self.assertEqual(result["selected_comfy_home"], str(home.resolve()))
         self.assertEqual(result["selected_python"], str(python.resolve()))
+
+    def test_standalone_discovery_accepts_portable_parent_layout(self) -> None:
+        standalone = load_standalone_repair()
+        with tempfile.TemporaryDirectory() as temp:
+            portable = Path(temp) / "ComfyUI_windows_portable"
+            home = portable / "ComfyUI"
+            home.mkdir(parents=True)
+            (home / "main.py").write_text("# fixture\n", encoding="utf-8")
+            (home / "requirements.txt").write_text("# fixture\n", encoding="utf-8")
+            python = portable / "python_embeded" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"fixture")
+            self.assertEqual(standalone._discover_home(str(portable)), home.resolve())
+            self.assertEqual(standalone._select_python(home), python.resolve())
+
+    def test_standalone_discovery_honors_extra_search_paths(self) -> None:
+        standalone = load_standalone_repair()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "custom-search" / "ComfyUI"
+            root.mkdir(parents=True)
+            (root / "main.py").write_text("# fixture\n", encoding="utf-8")
+            (root / "requirements.txt").write_text("# fixture\n", encoding="utf-8")
+            python = root / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"fixture")
+            with patch.dict(os.environ, {"EVAVO_COMFYUI_SEARCH_PATHS": str(root)}, clear=False):
+                discovered = standalone._discover_home()
+            self.assertEqual(discovered, root.resolve())
 
     def test_invalid_module_name_is_rejected_before_process_launch(self) -> None:
         with self.assertRaises(ValueError):
