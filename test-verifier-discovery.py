@@ -52,6 +52,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "test-task-cancellation-history.py",
             "test-updater-dependency-recovery.py",
             "test-updater-order.py",
+            "test-updater-venv-isolation.py",
             "test-verifier-timeout.py",
             "test-legacy-compatibility.py",
             "test-package-direct-execution.py",
