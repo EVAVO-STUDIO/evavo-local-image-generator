@@ -1,55 +1,27 @@
-# EVAVO Local Image Generator - Quick Reference
+# EVAVO Local Image Generator — Quick Reference
 
 ## Canonical Windows setup
 
 ```powershell
 cd C:\Gitrepos\evavo-local-image-generator
-git pull --ff-only origin main
 .\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-Current checkout:
+For a stale clean checkout first run `git pull --ff-only origin main`.
 
-```powershell
-.\UPDATE-AND-VERIFY-EVAVO.ps1
-```
+The updater safely fast-forwards `main`, installs dependencies, runs all discovered verifier suites, configures Claude/private MCP, provisions or repairs native ComfyUI when allowed, validates the real generation contract and conditionally configures the ChatGPT Secure MCP Tunnel.
 
-Troubleshooting switches:
-
-```powershell
-.\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipAgentConfiguration
-.\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipComfyUIProvision
-.\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipChatGPTTunnel
-```
-
-## Verification
+## Verification / readiness
 
 ```powershell
 python evavo.py verify
 python evavo.py verify --full
 python evavo.py verify --full --require-powershell
-```
-
-`verify --full` auto-discovers maintained root, `tests/`, and package suites.
-
-## Real-agent readiness
-
-```powershell
-python agent-doctor.py
 python agent-doctor.py --repair --provision
-python agent-doctor.py --repair --provision --json
-```
-
-The strict gate requires a native renderer and the active workflow/model contract. The deterministic mock does not satisfy it.
-
-## Aggregate read-only status
-
-```powershell
 .\AGENT-STATUS.ps1
-.\AGENT-STATUS.ps1 -Json
 ```
 
-Optional gateway/provider readiness is reported separately from owned native-image readiness.
+The deterministic mock cannot satisfy strict production readiness.
 
 ## Claude
 
@@ -57,46 +29,33 @@ Optional gateway/provider readiness is reported separately from owned native-ima
 .\INSTALL-CLAUDE-MCP.ps1
 ```
 
-Claude uses local stdio MCP. Restart Claude Desktop after config changes.
+Claude uses local **stdio MCP**. Restart Claude Desktop after configuration changes.
 
-## Private HTTP MCP
+## ChatGPT
 
-```powershell
-.\START-AGENT-MCP.ps1
-.\INSTALL-AGENT-MCP-AUTOSTART.ps1
-```
+Private local MCP target:
 
 ```text
 http://127.0.0.1:8765/mcp
 ```
 
-Loopback only; do not expose it publicly.
-
-## ChatGPT
-
-Cloud ChatGPT uses the outbound OpenAI Secure MCP Tunnel rather than direct workstation localhost.
+Cloud ChatGPT reaches it through the **OpenAI Secure MCP Tunnel**, not by connecting directly to localhost.
 
 ```powershell
 $env:EVAVO_OPENAI_TUNNEL_ID = "tunnel_<32 lowercase hex characters>"
 $env:CONTROL_PLANE_API_KEY = "<runtime tunnel key>"
 .\INSTALL-CHATGPT-MCP-TUNNEL.ps1 -PersistRuntimeKey
 .\INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1
-```
-
-Diagnostics:
-
-```powershell
-.\CHATGPT-TUNNEL-DOCTOR.ps1
 .\CHATGPT-TUNNEL-DOCTOR.ps1 -RequireRuntimeKey -RequireRunning
 ```
-
-See `CHATGPT-TUNNEL.md`.
 
 ## MCP tools
 
 ```text
 provision_backend
 ensure_backend
+diagnose_backend
+last_startup_failure
 health_check
 discover_backends
 list_checkpoints
@@ -105,6 +64,7 @@ workflow_preflight
 generate_image
 generate_batch
 generation_status
+cancel_generation
 collect_generation
 read_output_image
 task_history
@@ -112,97 +72,76 @@ task_statistics
 stop_managed_backend
 ```
 
-`generate_image` / `generate_batch` auto-start and wait by default.
+### Startup diagnosis
 
-Invalid file/wait policy is rejected before backend startup and before queueing.
+`diagnose_backend` performs a bounded ComfyUI startup diagnostic. `last_startup_failure` returns the last structured failure without changing process state.
 
-## MCP output policy
+### Generation status
 
-Default generated-output root:
+`generation_status` prefers the current ComfyUI jobs API and falls back to legacy history/queue. States are:
+
+```text
+queued
+running
+completed
+failed
+cancelled
+unknown
+```
+
+### Targeted cancellation
+
+`cancel_generation` targets exactly one prompt/job.
+
+- current ComfyUI: per-job cancel endpoint;
+- older ComfyUI + pending prompt: exact pending queue delete;
+- older ComfyUI + running prompt: EVAVO **refuses broad `/interrupt`** and reports targeted cancellation unsupported.
+
+This avoids cancelling unrelated renderer work.
+
+## MCP output/workflow policy
+
+Default output root:
 
 ```text
 <repo>\.evavo\outputs\
 ```
 
-Override default:
-
-```powershell
-$env:EVAVO_GENERATION_OUTPUT_DIR = "D:\EVAVO\generated"
-```
-
-Additional owner-approved roots:
+Owner-approved extras:
 
 ```powershell
 $env:EVAVO_MCP_OUTPUT_ROOTS = "D:\EVAVO\ProjectA;E:\ApprovedRenders"
 ```
 
-A tool-supplied `output_dir` outside approved roots is rejected.
-
-`read_output_image` requires an authorized ordinary PNG/JPEG/GIF/WebP file, rejects symlinked/redirected paths and validates the image file signature.
-
-## MCP custom workflow policy
-
-Preferred owner default:
+Preferred custom workflow:
 
 ```powershell
 $env:EVAVO_COMFYUI_WORKFLOW = "D:\EVAVO\workflows\production-api.json"
 ```
 
-Tool-supplied workflow paths are disabled by default. To expose only a reviewed workflow library:
+Allow agent selection only from a reviewed library:
 
 ```powershell
 $env:EVAVO_MCP_ALLOW_WORKFLOW_PATHS = "1"
 $env:EVAVO_MCP_WORKFLOW_ROOT = "D:\EVAVO\workflows\approved"
 ```
 
-Files outside that root, symlinks and redirected parent paths are rejected.
+Arbitrary output directories/workflow files are denied. Symlinked or redirected paths are rejected. Generated images are signature-validated before promotion and again before MCP image delivery.
 
-Claude and HTTP-login installers persist these approved **non-secret** path-policy values when configured.
+Invalid file/wait policy is rejected **before ComfyUI startup, queueing or task creation**.
 
-## CLI image generation
+## Real CLI image generation
 
 ```powershell
-# Queue
-python evavo.py generate --prompts "PS1 horror corridor" --project ps1
-
-# Wait + download
 python evavo.py generate --prompts "PS1 horror corridor" --project ps1 --wait
-
-# Batch
 python evavo.py generate --prompts "corridor one" "corridor two" --project ps1 --wait
-
-# CLI custom destination (CLI policy is separate from MCP file authority)
-python evavo.py generate --prompts "PS1 corridor" --project ps1 --wait --output-dir "C:\EVAVO\Generated"
 ```
 
-## Workflow preflight
-
-MCP:
-
-```text
-workflow_preflight
-```
-
-Custom workflows are also preflighted automatically before `/prompt` unless `EVAVO_PREFLIGHT_CUSTOM_WORKFLOW=0` is explicitly set for an unusual graph.
-
-Supported template placeholders include:
-
-```text
-{{PROMPT}} / {{prompt}}
-{{NEGATIVE_PROMPT}} / {{negative_prompt}}
-{{WIDTH}} / {{width}}
-{{HEIGHT}} / {{height}}
-{{STEPS}} / {{steps}}
-{{CFG}} / {{CFG_SCALE}} / {{cfg}} / {{cfg_scale}}
-{{SEED}} / {{seed}}
-{{CHECKPOINT}} / {{checkpoint}}
-{{FILENAME_PREFIX}} / {{filename_prefix}}
-```
-
-## ComfyUI provisioning
+## Models / provisioning
 
 ```powershell
 python provision-comfyui.py
+$env:EVAVO_SHARED_MODEL_ROOTS = "D:\AI\Models;E:\SharedModels"
 ```
 
 Owner-configured checkpoint repair:
@@ -210,48 +149,9 @@ Owner-configured checkpoint repair:
 ```powershell
 $env:EVAVO_CHECKPOINT_FILE = "D:\AI\Models\model.safetensors"
 $env:EVAVO_CHECKPOINT_SHA256 = "<optional sha256>"
-$env:EVAVO_CHECKPOINT_NAME = "model.safetensors"
 ```
 
-or HTTPS:
-
-```powershell
-$env:EVAVO_CHECKPOINT_URL = "https://example.com/model.safetensors"
-$env:EVAVO_CHECKPOINT_SHA256 = "<recommended sha256>"
-```
-
-Agent profiles can enable:
-
-```text
-EVAVO_AUTO_PROVISION_COMFYUI=1
-EVAVO_AUTO_PROVISION_CHECKPOINT=1
-```
-
-MCP provisioning does not accept arbitrary model/repository URLs from a tool call.
-
-## Shared model libraries
-
-```powershell
-$env:EVAVO_SHARED_MODEL_ROOTS = "D:\AI\Models;E:\SharedModels"
-```
-
-Alias:
-
-```text
-EVAVO_COMFYUI_MODEL_ROOTS
-```
-
-EVAVO writes `.evavo\extra-model-paths.yaml` and passes it to managed ComfyUI; it does not overwrite ComfyUI's own configuration.
-
-## Model inventory
-
-MCP:
-
-```text
-model_inventory
-```
-
-Categories include checkpoints, LoRAs, VAEs, ControlNet, diffusion/UNET models, text encoders, CLIP vision and upscalers.
+or explicit HTTPS `EVAVO_CHECKPOINT_URL`. Agent tools cannot invent arbitrary model URLs.
 
 ## Shared task history
 
@@ -260,68 +160,20 @@ python evavo.py tasks --limit 20
 python evavo.py stats
 ```
 
-Override location:
-
-```powershell
-$env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\image-generation-history.json"
-```
+CLI/MCP share atomic lock-protected task history including failed and cancelled reconciliation.
 
 ## Optional HTTP gateway
-
-```powershell
-.\START-GATEWAY.ps1
-python EVAVO-SERVICE-MANAGER.py health
-```
-
-Default:
 
 ```text
 http://127.0.0.1:8000
 ```
 
-Owned:
+Owned image route: `/generate/image`.
 
-```text
-POST /generate/image
-```
+Optional governed delegation: `/generate/video`, `/generate/audio`, `/generate/3d`.
 
-Optional delegated:
+Use `/services` to check provider readiness. Missing providers fail closed; `202` means accepted, not completed.
 
-```text
-POST /generate/video
-POST /generate/audio
-POST /generate/3d
-```
+## Source of truth
 
-Readiness:
-
-```text
-GET /services
-GET /capabilities
-```
-
-`202` means accepted, not completed. Missing providers fail with `PROVIDER_*` task errors.
-
-Gateway security:
-
-- loopback-only;
-- CORS off by default; wildcard/non-loopback origins rejected;
-- pre-parse request-size cap including chunked bodies;
-- per-request workflow paths disabled by default and owner-root confined when enabled;
-- recorded result paths must remain ordinary non-redirected files;
-- corrupt task state fails closed;
-- one live gateway owner per task-state file;
-- service-manager state and lifecycle operations are cross-process serialized;
-- process stops remain identity verified.
-
-See `GATEWAY-INTEGRATION-GUIDE.md` and `GATEWAY-AUX-PROVIDERS.md`.
-
-## Recovery
-
-```powershell
-python evavo.py verify --full --require-powershell
-python agent-doctor.py --repair --provision
-python evavo.py status
-```
-
-Then see `AGENT-RECOVERY.md` if a specific Claude/MCP/tunnel/gateway process needs recovery.
+See `README.md`, `CLAUDE.md`, `AGENT-INTEGRATION.md`, `OPERATIONS-GUIDE.md`, `CHATGPT-TUNNEL.md`, `GATEWAY-INTEGRATION-GUIDE.md`, `EVAVO-CAPABILITIES.json`.
