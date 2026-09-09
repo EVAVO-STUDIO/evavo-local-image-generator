@@ -33,10 +33,19 @@ RESULT_DIR = Path(os.getenv("EVAVO_GATEWAY_RESULT_DIR", str(STATE_DIR / "results
 COMFYUI_ENDPOINT = (os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
 GATEWAY_HOST = os.getenv("EVAVO_GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("EVAVO_GATEWAY_PORT", "8000"))
-MAX_PROMPT_CHARS = int(os.getenv("EVAVO_GATEWAY_MAX_PROMPT_CHARS", "100000"))
-IMAGE_TIMEOUT_SECONDS = float(os.getenv("EVAVO_GATEWAY_IMAGE_TIMEOUT", "600"))
+MAX_PROMPT_CHARS = max(1, min(int(os.getenv("EVAVO_GATEWAY_MAX_PROMPT_CHARS", "100000")), 1_000_000))
+MAX_REQUEST_BYTES = max(4096, min(int(os.getenv("EVAVO_GATEWAY_MAX_REQUEST_BYTES", str(1024 * 1024))), 16 * 1024 * 1024))
+MAX_PROJECT_CHARS = max(1, min(int(os.getenv("EVAVO_GATEWAY_MAX_PROJECT_CHARS", "128")), 1024))
+IMAGE_TIMEOUT_SECONDS = max(1.0, min(float(os.getenv("EVAVO_GATEWAY_IMAGE_TIMEOUT", "600")), 86400.0))
 TASK_ID_RE = re.compile(r"^(img|vid|aud|3d)_\d+$")
 LOOPBACK_ORIGIN_RE = re.compile(r"^https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$", re.IGNORECASE)
+
+
+def _env_true(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 class GenerationRequest(BaseModel):
@@ -73,6 +82,20 @@ class TaskStore:
             if isinstance(tasks, dict):
                 self._tasks = {str(key): value for key, value in tasks.items() if isinstance(value, dict)}
 
+    def max_task_suffixes(self) -> Dict[str, int]:
+        maxima: Dict[str, int] = {}
+        for task_id in self._tasks:
+            match = TASK_ID_RE.fullmatch(task_id)
+            if not match:
+                continue
+            try:
+                suffix = int(task_id.split("_", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            prefix = match.group(1)
+            maxima[prefix] = max(maxima.get(prefix, 0), suffix)
+        return maxima
+
     def _write(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=str(self.path.parent))
@@ -91,8 +114,11 @@ class TaskStore:
             raise
 
     async def put(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        task_id = str(task["task_id"])
         async with self._lock:
-            self._tasks[str(task["task_id"])] = dict(task)
+            if task_id in self._tasks:
+                raise RuntimeError(f"GATEWAY_TASK_ID_COLLISION:{task_id}")
+            self._tasks[task_id] = dict(task)
             await asyncio.to_thread(self._write)
             return dict(task)
 
@@ -135,7 +161,7 @@ class TaskStore:
 
 STORE = TaskStore(TASK_STATE_FILE)
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
-_LAST_EPOCH_BY_PREFIX: Dict[str, int] = {}
+_LAST_EPOCH_BY_PREFIX: Dict[str, int] = STORE.max_task_suffixes()
 
 
 def _iso_now() -> str:
@@ -158,6 +184,14 @@ def _public_task(task: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in task.items()
         if key not in {"request", "result_paths", "backend_task_id", "provider_receipt"}
     } | {"result_ready": bool(task.get("result_paths"))}
+
+
+def _bounded_wait_timeout(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = IMAGE_TIMEOUT_SECONDS
+    return max(1.0, min(parsed, 86400.0))
 
 
 async def _track_add(task: Dict[str, Any]) -> None:
@@ -193,7 +227,8 @@ def _providers():
 
 async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
     prompt = str(request["prompt"]).strip()
-    project_name = str(request.get("project_name", "gateway")).strip() or "gateway"
+    project_name = str(request.get("project_name", "gateway")).strip()[:MAX_PROJECT_CHARS] or "gateway"
+    workflow_path = request.get("workflow_path")
     try:
         await STORE.update(task_id, status="running", progress=5)
         await asyncio.to_thread(ensure_comfyui, COMFYUI_ENDPOINT, wait_seconds=90.0, allow_start=True)
@@ -209,7 +244,7 @@ async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
             cfg_scale=request.get("cfg_scale", 7.0),
             seed=request.get("seed"),
             checkpoint=request.get("checkpoint"),
-            workflow_path=request.get("workflow_path"),
+            workflow_path=str(workflow_path) if workflow_path else None,
         )
         backend_task_id = str(queued["task_id"])
         await STORE.update(
@@ -224,7 +259,7 @@ async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
             backend.wait_and_download,
             backend_task_id,
             target,
-            timeout=float(request.get("wait_timeout", IMAGE_TIMEOUT_SECONDS)),
+            timeout=_bounded_wait_timeout(request.get("wait_timeout", IMAGE_TIMEOUT_SECONDS)),
             interval=0.5,
         )
         if not paths:
@@ -238,7 +273,7 @@ async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
             output_dir=str(target),
             backend_mode="native-comfyui",
             checkpoint=queued.get("checkpoint"),
-            workflow_path=request.get("workflow_path"),
+            workflow_path=str(workflow_path) if workflow_path else None,
         )
     except Exception as exc:
         message = str(exc)
@@ -291,6 +326,20 @@ async def _queue(prefix: str, kind: str, request: GenerationRequest) -> TaskQueu
     prompt = payload["prompt"].strip()
     if not prompt:
         raise HTTPException(status_code=422, detail="prompt must not be whitespace only")
+    project_name = str(payload.get("project_name", "gateway")).strip()[:MAX_PROJECT_CHARS] or "gateway"
+    payload["project_name"] = project_name
+    if kind == "image" and payload.get("workflow_path") and not _env_true("EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS", False):
+        raise HTTPException(
+            status_code=403,
+            detail="per-request workflow_path is disabled; configure EVAVO_COMFYUI_WORKFLOW or explicitly enable EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS",
+        )
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"request metadata is not JSON serializable: {exc}") from exc
+    if len(encoded) > MAX_REQUEST_BYTES:
+        raise HTTPException(status_code=413, detail=f"request exceeds EVAVO gateway limit of {MAX_REQUEST_BYTES} bytes")
+
     task_id = _next_task_id(prefix)
     task = {
         "task_id": task_id,
@@ -298,12 +347,17 @@ async def _queue(prefix: str, kind: str, request: GenerationRequest) -> TaskQueu
         "status": "queued",
         "progress": 0,
         "prompt": prompt,
-        "project_name": str(payload.get("project_name", "gateway")),
+        "project_name": project_name,
         "created_at": _iso_now(),
         "updated_at": _iso_now(),
         "request": payload,
     }
-    await STORE.put(task)
+    try:
+        await STORE.put(task)
+    except RuntimeError as exc:
+        if str(exc).startswith("GATEWAY_TASK_ID_COLLISION:"):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
     await _track_add(task)
     _launch(_image_worker(task_id, payload) if kind == "image" else _provider_worker(task_id, kind, payload))
     return TaskQueuedResponse(task_id=task_id)
@@ -339,8 +393,8 @@ def _configured_cors_origins() -> list[str]:
 
 app = FastAPI(
     title="EVAVO Unified Generator",
-    version="2.1.0",
-    description="Stable local multi-modal generation gateway for ChatGPT, Claude, MCP and HTTP clients.",
+    version="2.2.0",
+    description="Stable local image gateway with governed auxiliary provider delegation for ChatGPT, Claude, MCP and HTTP clients.",
     lifespan=lifespan,
 )
 
