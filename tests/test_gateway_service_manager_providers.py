@@ -69,6 +69,8 @@ class ProviderServiceManagerTests(unittest.TestCase):
         manager.ROOT = gateway.resolve()
         manager.STATE_DIR = (gateway / ".evavo" / "gateway").resolve()
         manager.STATE_FILE = manager.STATE_DIR / "service-manager.json"
+        manager.STATE_IO_LOCK = manager.STATE_FILE.with_suffix(manager.STATE_FILE.suffix + ".lock")
+        manager.LIFECYCLE_LOCK = manager.STATE_FILE.with_suffix(manager.STATE_FILE.suffix + ".lifecycle.lock")
         manager.TOKEN_FILE = manager.STATE_DIR / "3d-worker.token"
         manager.LOG_DIR = manager.STATE_DIR / "logs"
         manager.GATEWAY_SCRIPT = manager.ROOT / "EVAVO-GATEWAY.py"
