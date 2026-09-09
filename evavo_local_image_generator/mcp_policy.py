@@ -2,7 +2,7 @@
 
 This module intentionally performs no repair and creates no directories. It is
 safe for the repository verifier, installers and agent diagnostics to call
-before they persist MCP configuration.
+before they persist or launch MCP configuration.
 """
 
 from __future__ import annotations
@@ -10,11 +10,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRUE_VALUES = {"1", "true", "yes", "on"}
+_WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 
 def _truthy(name: str) -> bool:
@@ -29,7 +31,7 @@ def _same_path(left: Path, right: Path) -> bool:
     return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
 
 
-def _existing_directory(value: str | Path, *, label: str) -> Path:
+def _existing_directory(value: str | Path, *, label: str, writable: bool = False) -> Path:
     lexical = _lexical_absolute(value)
     if lexical.is_symlink():
         raise ValueError(f"{label} must not be a symlink")
@@ -41,6 +43,8 @@ def _existing_directory(value: str | Path, *, label: str) -> Path:
         raise ValueError(f"{label} traverses a symlink or redirected parent path")
     if not resolved.is_dir():
         raise ValueError(f"{label} must be an existing directory")
+    if writable and not os.access(resolved, os.W_OK):
+        raise ValueError(f"{label} is not writable: {resolved}")
     return resolved
 
 
@@ -60,12 +64,20 @@ def _existing_file(value: str | Path, *, label: str) -> Path:
 
 
 def _split_roots(raw: str) -> list[str]:
-    if not raw.strip():
+    """Split owner root lists without breaking Windows drive-letter paths.
+
+    Windows uses semicolons for multiple roots. POSIX commonly uses ``:``. A
+    copied single Windows path such as ``D:\\Renders`` must remain one value
+    even when this validator is executed on a POSIX test/automation host.
+    """
+    text = raw.strip()
+    if not text:
         return []
-    # Windows policy commonly uses ';'. On POSIX, os.pathsep is ':'. Do not
-    # split a Windows drive-letter path on ':' when validating a copied config.
-    separator = ";" if ";" in raw else os.pathsep
-    return [item.strip() for item in raw.split(separator) if item.strip()]
+    if ";" in text:
+        return [item.strip() for item in text.split(";") if item.strip()]
+    if os.pathsep == ":" and _WINDOWS_DRIVE_PATH.match(text):
+        return [text]
+    return [item.strip() for item in text.split(os.pathsep) if item.strip()]
 
 
 def _creatable_output_root(value: str | Path, *, label: str) -> Path:
@@ -73,14 +85,11 @@ def _creatable_output_root(value: str | Path, *, label: str) -> Path:
 
     The default EVAVO output directory may legitimately not exist yet. In that
     case validate the nearest existing ancestor and require it to be writable.
-    Explicit *additional* MCP roots use `_existing_directory` instead.
+    Explicit *additional* MCP roots must already exist and be writable.
     """
     lexical = _lexical_absolute(value)
     if lexical.exists() or lexical.is_symlink():
-        resolved = _existing_directory(lexical, label=label)
-        if not os.access(resolved, os.W_OK):
-            raise ValueError(f"{label} is not writable: {resolved}")
-        return resolved
+        return _existing_directory(lexical, label=label, writable=True)
 
     ancestor = lexical.parent
     while ancestor != ancestor.parent and not ancestor.exists() and not ancestor.is_symlink():
@@ -118,7 +127,7 @@ def validate_environment() -> dict[str, Any]:
     additional: list[str] = []
     for index, raw in enumerate(_split_roots(additional_raw)):
         try:
-            root = _existing_directory(raw, label=f"EVAVO_MCP_OUTPUT_ROOTS[{index}]")
+            root = _existing_directory(raw, label=f"EVAVO_MCP_OUTPUT_ROOTS[{index}]", writable=True)
             additional.append(str(root))
         except ValueError as exc:
             errors.append(str(exc))
