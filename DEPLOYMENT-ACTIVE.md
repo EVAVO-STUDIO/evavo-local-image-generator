@@ -1,173 +1,158 @@
-# EVAVO Local Image Generator - Deployment Architecture
+# EVAVO Local Image Generator — Active Deployment Architecture
 
-This document describes repository-backed behavior. Live workstation state is determined by `python evavo.py status`, not by this document.
+This document describes the **current repository-backed production contract**. Live workstation state is always determined by the verifier/doctor/status commands, not by prose alone.
 
-## Native-first architecture
+## Production architecture
 
 ```text
-Agent / Operator / MCP host
-          |
-          v
-       evavo.py
-          |
-   +------+----------------+
-   |                       |
-   v                       v
-generate-batch.py      monitor-evavo.py
-   |
-   v
-evavo-wrapper.py
-   |
-   +-------------------------------+
-   |                               |
-   v                               v
-Native ComfyUI                  EVAVO fallback
-/system_stats                   /system
-/object_info                    /api/status
-/prompt                         /api/prompt
-/history/{prompt_id}                 |
-/view                                v
-   |                         mock-comfyui-server.py
-   |
-   +---------------+---------------+
-                   |
-                   v
-       downloaded images + task history
+Claude stdio MCP / ChatGPT Secure MCP Tunnel / CLI / Python
+                         |
+                         v
+                 EVAVO MCP / evavo.py
+                         |
+                         v
+                 native ComfyUI only
+                 /system_stats
+                 /object_info
+                 /prompt
+                 /history/<id>
+                 /view
+                         |
+                         v
+             downloaded image outputs
+                         |
+                         v
+              shared atomic task history
 ```
 
-Selection order:
+The deterministic EVAVO mock remains available for isolated operational tests, but it is **not a production renderer** and does not satisfy strict agent readiness or the optional HTTP gateway's healthy state.
 
-1. EVAVO compatibility endpoint when one is explicitly running.
-2. Native ComfyUI at the configured endpoint.
-3. Managed mock fallback only if no usable backend exists and `evavo.py start` is asked to start one.
+## Native lifecycle
 
-A native ComfyUI process is externally owned. EVAVO does not kill or replace it.
+EVAVO can:
+
+- reuse an already-running user-managed native ComfyUI;
+- discover source and Windows-portable installs;
+- provision the official source runtime when allowed and missing;
+- use owner-configured checkpoint sources/shared model roots;
+- start native ComfyUI in the background;
+- validate the active workflow/model contract;
+- restart only an identity-verified EVAVO-managed ComfyUI when EVAVO's effective shared-model config changes;
+- never kill a user-managed or identity-mismatched process.
+
+Preferred endpoint variable:
+
+```text
+COMFYUI_ENDPOINT
+```
+
+Legacy `EVAVO_COMFYUI_ENDPOINT` remains a fallback alias.
 
 ## Real rendering contract
 
-Native ComfyUI integration uses:
-
 ```text
 GET  /system_stats
-GET  /object_info/CheckpointLoaderSimple
+GET  /object_info[/<node>]
 POST /prompt
-GET  /history/{prompt_id}
+GET  /history/<prompt_id>
 GET  /view
 ```
 
-A queued native request returns ComfyUI's real `prompt_id`, used as the EVAVO `task_id`.
+A native request uses ComfyUI's real `prompt_id` as the task ID. With waiting enabled, EVAVO polls history and downloads actual output files atomically.
 
-With wait/collection enabled, EVAVO polls history, enumerates image outputs, downloads them via `/view`, and returns concrete local file paths.
+## Workflow contract
 
-## Workflow support
+The built-in workflow uses normal checkpoint txt2img nodes. Custom exported ComfyUI API workflows are supported and can be validated before queueing through `workflow_preflight`.
 
-Default graph uses built-in ComfyUI nodes suitable for conventional checkpoint pipelines:
-
-```text
-CheckpointLoaderSimple -> CLIPTextEncode -> KSampler -> VAEDecode -> SaveImage
-```
-
-For Flux, custom nodes, or specialist pipelines, configure an API-format workflow:
-
-```powershell
-$env:EVAVO_COMFYUI_WORKFLOW = "D:\EVAVO\workflows\production-api.json"
-```
-
-Supported placeholders:
+Uppercase and legacy lowercase placeholders are supported, including:
 
 ```text
-{{prompt}} {{negative_prompt}} {{checkpoint}}
-{{width}} {{height}} {{steps}} {{cfg_scale}}
-{{seed}} {{filename_prefix}}
+{{PROMPT}} / {{prompt}}
+{{NEGATIVE_PROMPT}} / {{negative_prompt}}
+{{WIDTH}} / {{width}}
+{{HEIGHT}} / {{height}}
+{{STEPS}} / {{steps}}
+{{CFG}} / {{CFG_SCALE}} / {{cfg}} / {{cfg_scale}}
+{{SEED}} / {{seed}}
+{{CHECKPOINT}} / {{checkpoint}}
+{{FILENAME_PREFIX}} / {{filename_prefix}}
 ```
 
-## Operational controller
+## Canonical Windows deployment
 
 ```powershell
-python evavo.py doctor
-python evavo.py bootstrap
-python evavo.py start
-python evavo.py status
-python evavo.py generate --prompts "test" --project smoke
-python evavo.py tasks
-python evavo.py stats
-python evavo.py test
-python evavo.py stop
+cd C:\Gitrepos\evavo-local-image-generator
+git pull --ff-only origin main
+.\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-For synchronous real output collection:
+Authoritative read-only verification:
 
 ```powershell
-python generate-batch.py --prompts "test" --project smoke --wait
+python evavo.py verify --full --require-powershell
 ```
 
-## MCP agents
-
-The stdio MCP server uses the current Python SDK v2 major line and is launched with:
+Strict real-generation repair/readiness:
 
 ```powershell
-python -m evavo_local_image_generator.mcp_server
+python agent-doctor.py --repair --provision
 ```
 
-Exposed tools:
+Real image smoke test:
+
+```powershell
+python evavo.py generate --prompts "EVAVO deployment smoke test" --project smoke --wait
+```
+
+## Claude
+
+Claude Desktop uses local stdio MCP. The updater configures it automatically, or use `INSTALL-CLAUDE-MCP.ps1`.
+
+## ChatGPT
+
+Cloud ChatGPT does not connect directly to workstation localhost. The supported architecture is:
 
 ```text
+ChatGPT
+  -> OpenAI Secure MCP Tunnel
+  -> private workstation MCP listener
+  -> EVAVO native image runtime
+```
+
+See `CHATGPT-TUNNEL.md`.
+
+## Current MCP tools
+
+```text
+provision_backend
+ensure_backend
 health_check
+discover_backends
 list_checkpoints
+model_inventory
+workflow_preflight
 generate_image
+generate_batch
 generation_status
 collect_generation
+read_output_image
+task_history
+task_statistics
+stop_managed_backend
 ```
 
-The MCP `generate_image` tool waits for native output by default and returns downloaded paths.
+## Optional HTTP gateway
 
-## Test architecture
+`EVAVO-GATEWAY.py` is a loopback-only compatibility API. Image generation uses native ComfyUI. Historical video/audio/3D endpoints intentionally return HTTP `501` rather than fake queue IDs. CORS is off by default unless explicit origins are configured.
 
-`python evavo.py test` launches isolated loopback simulators rather than using the operator's port 8188. Tests cover:
+See `GATEWAY-INTEGRATION-GUIDE.md`.
 
-- compatibility-backend health and queueing;
-- native ComfyUI detection;
-- checkpoint discovery;
-- standard API workflow submission;
-- custom workflow template substitution;
-- native prompt IDs and history parsing;
-- `/view` output download;
-- concurrent batch tracking;
-- offline nonzero exit behavior;
-- native backend preference;
-- managed fallback lifecycle.
+## State and outputs
 
-## State and output locations
+Primary current state lives below `.evavo/`, including native/mock manager state, generated extra-model-path config, gateway state, tunnel state/tools, and downloaded outputs. Shared task history uses `task_history.json` by default unless overridden.
 
-```text
-.evavo/operations-service.json   managed mock PID/state
-.evavo/mock-service.log          managed mock log
-.evavo/outputs/                  default downloaded images
-task_history.json                durable task history
-task_history.json.lock           inter-process lock
-```
+## Verification boundary
 
-Logical wider-repository storage remains under `bee://` URIs. These are resource identifiers, not Windows filesystem paths.
+A green deployment means the current verifier passes and the real active workflow is ready. A historical document, generated metadata file, or mock queue response is never treated as proof that real image rendering works.
 
-## Security boundary
-
-- Managed server is loopback-only.
-- Native ComfyUI is expected to remain local unless separately secured.
-- Request failures and malformed responses are explicit errors.
-- Output files use atomic temporary writes.
-- Native filenames are reduced to a basename locally to prevent traversal outside the configured download directory.
-- Output downloads are size-capped.
-- Task history is lock-protected and atomically replaced.
-- Startup never broadly terminates `python.exe`.
-
-## Verification
-
-On the actual workstation, the authoritative deployment check is:
-
-```powershell
-python evavo.py bootstrap
-python evavo.py status
-python generate-batch.py --prompts "EVAVO smoke test" --project smoke --wait
-```
-
-If the backend is the managed mock, the smoke command will queue but cannot render a file. For a real image file, native ComfyUI must be running and have a usable checkpoint or configured custom workflow.
+Use `DEPLOYMENT-CHECKLIST.md`, `OPERATIONS-GUIDE.md`, `AGENT-INTEGRATION.md`, `CHATGPT-TUNNEL.md`, and `QUICK-REFERENCE.md` for current operations.
