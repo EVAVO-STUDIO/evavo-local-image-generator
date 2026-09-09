@@ -55,6 +55,8 @@ $persistedEnvironment = [ordered]@{
 $nonSecretEnvironment = @(
     "EVAVO_COMFYUI_HOME",
     "EVAVO_COMFYUI_PYTHON",
+    "EVAVO_SHARED_MODEL_ROOTS",
+    "EVAVO_COMFYUI_MODEL_ROOTS",
     "EVAVO_CHECKPOINT_FILE",
     "EVAVO_CHECKPOINT_SHA256",
     "EVAVO_CHECKPOINT_NAME",
@@ -93,6 +95,9 @@ Write-Host "Installed EVAVO agent MCP autostart:" -ForegroundColor Green
 Write-Host "  $launcher"
 Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in." -ForegroundColor Green
 Write-Host "Safe local ComfyUI provisioning settings were embedded for reboot persistence." -ForegroundColor Green
+if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
+    Write-Host "Shared ComfyUI model roots were embedded for reboot persistence." -ForegroundColor Green
+}
 if ($env:EVAVO_CHECKPOINT_URL) {
     Write-Host "Note: EVAVO_CHECKPOINT_URL was not persisted because checkpoint URLs may contain credentials/tokens." -ForegroundColor Yellow
 }
