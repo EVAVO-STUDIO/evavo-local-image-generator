@@ -49,6 +49,40 @@ function Invoke-LocalJson([string]$Uri) {
 $repoDoctor = Invoke-JsonPython @((Join-Path $PSScriptRoot "evavo.py"), "doctor", "--json")
 $agentDoctor = Invoke-JsonPython @((Join-Path $PSScriptRoot "agent-doctor.py"), "--json", "--skip-tests", "--mcp-port", "$McpPort")
 $backendStatus = Invoke-JsonPython @((Join-Path $PSScriptRoot "evavo.py"), "status")
+$smokeHistory = Invoke-JsonPython @((Join-Path $PSScriptRoot "task-tracker.py"), "list", "--project", "setup-smoke", "--limit", "1", "--json")
+
+$smoke = [ordered]@{
+    recorded = $false
+    completed = $false
+    files_present = $false
+    task_id = $null
+    updated = $null
+    output_uris = @()
+    history_file = $null
+    error = $null
+}
+if ($smokeHistory.exit_code -eq 0 -and $smokeHistory.payload) {
+    $smoke.history_file = [string]$smokeHistory.payload.history_file
+    $tasks = @($smokeHistory.payload.tasks)
+    if ($tasks.Count -gt 0 -and $null -ne $tasks[0]) {
+        $task = $tasks[0]
+        $smoke.recorded = $true
+        $smoke.completed = [string]$task.status -eq "completed"
+        $smoke.task_id = [string]$task.task_id
+        $smoke.updated = [string]$task.updated
+        $outputs = @($task.output_uris)
+        if ($outputs.Count -eq 0 -and $task.output_uri) {
+            $outputs = @([string]$task.output_uri)
+        }
+        $smoke.output_uris = @($outputs | ForEach-Object { [string]$_ } | Where-Object { $_ })
+        if ($smoke.output_uris.Count -gt 0) {
+            $smoke.files_present = -not ($smoke.output_uris | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) } | Select-Object -First 1)
+        }
+    }
+}
+else {
+    $smoke.error = if ($smokeHistory.raw) { $smokeHistory.raw } else { "shared task history unavailable" }
+}
 
 $mcpListener = Get-NetTCPConnection -LocalPort $McpPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 $mcp = [ordered]@{
@@ -124,6 +158,7 @@ $payload = [pscustomobject][ordered]@{
     repository = [ordered]@{ ok = [bool]$repoOk; exit_code = $repoDoctor.exit_code; payload = $repoDoctor.payload; raw = if ($repoDoctor.payload) { $null } else { $repoDoctor.raw } }
     agent = [ordered]@{ ok = [bool]$agentOk; exit_code = $agentDoctor.exit_code; payload = $agentDoctor.payload; raw = if ($agentDoctor.payload) { $null } else { $agentDoctor.raw } }
     backend = [ordered]@{ ok = [bool]$backendOk; exit_code = $backendStatus.exit_code; payload = $backendStatus.payload; raw = if ($backendStatus.payload) { $null } else { $backendStatus.raw } }
+    real_generation_proof = $smoke
     private_mcp = $mcp
     chatgpt_tunnel = $tunnel
     optional_gateway = $gateway
@@ -137,6 +172,13 @@ else {
     Write-Host ("=" * 84)
     Write-Host ("Repository/operations: {0}" -f $(if ($repoOk) { "OK" } else { "NEEDS ATTENTION" }))
     Write-Host ("Native image readiness: {0}" -f $(if ($agentOk -and $backendOk) { "OK" } else { "NEEDS ATTENTION" }))
+    if ($smoke.recorded) {
+        $proofState = if ($smoke.completed -and $smoke.files_present) { "COMPLETED + FILES PRESENT" } elseif ($smoke.completed) { "COMPLETED (OUTPUTS NO LONGER PRESENT)" } else { "NOT COMPLETED" }
+        Write-Host ("Latest real generation proof: {0} ({1})" -f $proofState, $smoke.updated)
+    }
+    else {
+        Write-Host "Latest real generation proof: NONE RECORDED" -ForegroundColor Yellow
+    }
     Write-Host ("Private HTTP MCP: {0} ({1})" -f $(if ($mcp.ready) { "RUNNING" } else { "NOT READY" }), $mcp.identity)
     Write-Host ("ChatGPT tunnel: {0}" -f $tunnel.status)
     Write-Host ("Optional HTTP gateway: {0}" -f $(if (-not $gateway.running) { "NOT RUNNING" } elseif ($gateway.core_healthy) { "CORE HEALTHY" } else { "DEGRADED" }))
@@ -155,6 +197,7 @@ else {
     }
 }
 
-# Optional gateway/provider readiness is intentionally not part of the owned
-# native-image/MCP readiness exit code.
+# Latest real-generation proof and optional gateway/tunnel evidence are reported
+# separately; current owned native-image readiness remains the status exit-code
+# authority after reboot.
 exit $(if ($localReady) { 0 } else { 2 })
