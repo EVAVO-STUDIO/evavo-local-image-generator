@@ -3,8 +3,9 @@
 
 The canonical workstation updater installs dependencies only into ``.venv``.
 Project-level MCP clients may initially invoke this file with any Python 3.10+
-that can run the standard library; the bootstrap then replaces itself with the
-repository-local venv interpreter and the policy-validated MCP production entry.
+that can run the standard library; the bootstrap validates the same repository
+venv authority as setup, then replaces itself with that interpreter and the
+policy-validated MCP production entry.
 """
 
 from __future__ import annotations
@@ -13,33 +14,22 @@ import os
 import sys
 from pathlib import Path
 
+from evavo_venv import inspect_venv
+
 ROOT = Path(__file__).resolve().parent
 
 
-def _same_path(left: Path, right: Path) -> bool:
-    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
-
-
 def _venv_python() -> Path:
-    venv = ROOT / ".venv"
-    if venv.is_symlink():
-        raise RuntimeError(f"MCP_BOOTSTRAP_INVALID_VENV:.venv must not be a symlink: {venv}")
-    candidates = (
-        venv / "Scripts" / "python.exe",
-        venv / "bin" / "python",
-    )
-    for candidate in candidates:
-        if candidate.is_symlink():
-            raise RuntimeError(f"MCP_BOOTSTRAP_INVALID_VENV:venv Python must not be a symlink: {candidate}")
-        if not candidate.is_file():
-            continue
-        resolved = candidate.resolve(strict=True)
-        if not _same_path(candidate.absolute(), resolved):
-            raise RuntimeError(f"MCP_BOOTSTRAP_INVALID_VENV:venv Python traverses a redirected path: {candidate}")
-        return resolved
-    raise RuntimeError(
-        "MCP_BOOTSTRAP_VENV_MISSING:repository .venv Python was not found; run UPDATE-AND-VERIFY-EVAVO.ps1 first"
-    )
+    result = inspect_venv(ROOT / ".venv")
+    if not result.get("ok"):
+        status = str(result.get("status") or "invalid")
+        detail = str(result.get("message") or "repository .venv is not ready")
+        code = "MCP_BOOTSTRAP_VENV_MISSING" if status == "missing" else "MCP_BOOTSTRAP_INVALID_VENV"
+        raise RuntimeError(f"{code}:{detail}; run UPDATE-AND-VERIFY-EVAVO.ps1")
+    raw = result.get("python")
+    if not isinstance(raw, str) or not raw:
+        raise RuntimeError("MCP_BOOTSTRAP_INVALID_VENV:validated venv did not return a Python path")
+    return Path(raw)
 
 
 def main() -> None:
