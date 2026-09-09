@@ -22,12 +22,13 @@ if ($Uninstall) {
 $repo = (Resolve-Path $PSScriptRoot).Path
 $script = Join-Path $repo "START-AGENT-MCP.ps1"
 if (-not (Test-Path $script)) { throw "Missing START-AGENT-MCP.ps1" }
+
+# Persistent private MCP must use the repository-local isolated environment.
 $python = Join-Path $repo ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { throw "Python 3.10+ was not found." }
-    $python = $cmd.Source
+    throw "EVAVO .venv is not ready. Run UPDATE-AND-VERIFY-EVAVO.ps1 before installing HTTP MCP autostart."
 }
+$python = (Resolve-Path $python).Path
 
 if (-not $SkipValidation) {
     Write-Host "Validating EVAVO MCP before installing login autostart..." -ForegroundColor Cyan
