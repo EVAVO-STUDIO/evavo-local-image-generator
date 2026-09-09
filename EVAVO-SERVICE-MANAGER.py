@@ -10,6 +10,7 @@ proves EVAVO owns them.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -54,7 +55,7 @@ def env_true(name: str, default: bool = False) -> bool:
 
 
 def http_json(url: str, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
-    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Manager/3"})
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Manager/4"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -80,7 +81,10 @@ def endpoint_host_port(url: str, *, expected_default_port: int) -> tuple[str, in
         raise RuntimeError(f"Local provider endpoint must use loopback: {url}")
     if parsed.path not in {"", "/"}:
         raise RuntimeError(f"Local provider endpoint must not contain a path: {url}")
-    port = parsed.port or expected_default_port
+    try:
+        port = parsed.port or expected_default_port
+    except ValueError as exc:
+        raise RuntimeError(f"Local provider endpoint contains an invalid port: {url}") from exc
     if not 1 <= port <= 65535:
         raise RuntimeError("Local provider port must be between 1 and 65535")
     return host, port
@@ -93,6 +97,10 @@ def gateway_health() -> Dict[str, Any]:
     gateway_alive = isinstance(payload, dict) and payload.get("gateway") == "ok"
     healthy = payload == {"status": "healthy", "gateway": "ok", "comfyui": "ok"}
     return {"healthy": healthy, "gateway_alive": gateway_alive, "latency_ms": latency, "response": payload}
+
+
+def gateway_services() -> Optional[Dict[str, Any]]:
+    return http_json(f"{GATEWAY_URL}/services")
 
 
 def comfyui_health() -> Dict[str, Any]:
@@ -124,12 +132,7 @@ def three_d_health() -> Dict[str, Any]:
 
 
 def three_d_token_ready(token: str) -> bool:
-    """Prove a bearer token against a non-mutating first-party worker route.
-
-    The probe intentionally asks for a nonexistent job. A 404/422 proves the
-    request passed authorisation; a 403 proves the token was rejected. This is
-    only meaningful after ``three_d_health`` has established worker identity.
-    """
+    """Prove a bearer token against a non-mutating first-party worker route."""
     if len(token) < 32 or "\r" in token or "\n" in token:
         return False
     request = urllib.request.Request(
@@ -137,7 +140,7 @@ def three_d_token_ready(token: str) -> bool:
         headers={
             "Accept": "application/json",
             "Authorization": f"Bearer {token}",
-            "User-Agent": "EVAVO-Gateway-Manager/3",
+            "User-Agent": "EVAVO-Gateway-Manager/4",
         },
     )
     try:
@@ -161,14 +164,35 @@ def audio_provider_status() -> Dict[str, Any]:
     return {"configured": ready, "backend": "evavo-audio-studio", "argv0": argv[0] if ready else None}
 
 
+def provider_configuration_fingerprint() -> str:
+    """Hash effective provider settings without persisting bearer-token plaintext."""
+    token = os.getenv("EVAVO_3D_AGENT_EXECUTION_TOKEN", "")
+    values = {
+        "audio_argv": os.getenv("EVAVO_AUDIO_PROVIDER_ARGV", ""),
+        "audio_studio": os.getenv("EVAVO_AUDIO_STUDIO_DIR", ""),
+        "video_argv": os.getenv("EVAVO_VIDEO_PROVIDER_ARGV", ""),
+        "video_studio": os.getenv("EVAVO_VIDEO_STUDIO_DIR", ""),
+        "wan_model": os.getenv("EVAVO_WAN21_MODEL_DIR", ""),
+        "wan_manifest_sha256": os.getenv("EVAVO_WAN21_MODEL_MANIFEST_SHA256", ""),
+        "3d_endpoint": THREE_D_URL,
+        "3d_workspace": os.getenv("EVAVO_3D_AGENT_WORKSPACE_ROOT", ""),
+        "3d_token_sha256": hashlib.sha256(token.encode("utf-8")).hexdigest() if token else "",
+        "3d_manage": os.getenv("EVAVO_GATEWAY_MANAGE_3D", "1"),
+    }
+    encoded = json.dumps(values, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def full_health() -> Dict[str, Any]:
     comfy = comfyui_health()
     gateway = gateway_health()
+    providers = gateway_services() if gateway["gateway_alive"] else None
     return {
         "status": "healthy" if comfy["healthy"] and gateway["healthy"] else "degraded",
         "timestamp": now_iso(),
         "gateway": gateway,
         "comfyui": comfy,
+        "providers": providers,
         "audio_provider": audio_provider_status(),
         "3d_worker": three_d_health(),
     }
@@ -278,6 +302,7 @@ def spawn_gateway() -> subprocess.Popen[Any]:
     env["EVAVO_GATEWAY_HOST"] = GATEWAY_HOST
     env["EVAVO_GATEWAY_PORT"] = str(GATEWAY_PORT)
     env["COMFYUI_ENDPOINT"] = COMFYUI_URL
+    env["EVAVO_COMFYUI_ENDPOINT"] = COMFYUI_URL
     kwargs, handle = detached_kwargs(cwd=ROOT, log_name="gateway.log", env=env)
     try:
         return subprocess.Popen([sys.executable, str(GATEWAY_SCRIPT)], **kwargs)
@@ -292,6 +317,15 @@ def wait_for(predicate, timeout: float, label: str) -> None:
             return
         time.sleep(0.25)
     raise RuntimeError(f"{label} did not become ready within {timeout:g}s")
+
+
+def wait_for_port_close(host: str, port: int, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not port_open(host, port):
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"port {port} did not close after managed gateway termination")
 
 
 def _candidate_repos(env_name: str, names: tuple[str, ...]) -> list[Path]:
@@ -517,16 +551,46 @@ def ensure_comfyui_service() -> Dict[str, Any]:
     return result
 
 
+def _managed_gateway_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    value = state.get("gateway")
+    return value if isinstance(value, dict) else {}
+
+
 def ensure_gateway_service(state: Dict[str, Any]) -> Dict[str, Any]:
+    desired_fingerprint = provider_configuration_fingerprint()
     existing = gateway_health()
     if existing["gateway_alive"]:
-        return {"status": "already_running", "healthy": existing["healthy"]}
+        managed = _managed_gateway_state(state)
+        managed_pid = managed.get("pid")
+        identity_ok = (
+            managed.get("managed")
+            and isinstance(managed_pid, int)
+            and pid_matches(managed_pid, GATEWAY_SCRIPT)
+        )
+        applied = managed.get("provider_fingerprint") == desired_fingerprint
+        if identity_ok and not applied:
+            terminate_pid(managed_pid)
+            wait_for_port_close(GATEWAY_HOST, GATEWAY_PORT)
+            state.pop("gateway", None)
+            save_state(state)
+        else:
+            return {
+                "status": "already_running" if identity_ok else "already_running_external",
+                "healthy": existing["healthy"],
+                "provider_configuration_applied": bool(applied) if identity_ok else False,
+            }
+
     if port_open(GATEWAY_HOST, GATEWAY_PORT):
         raise RuntimeError(f"Port {GATEWAY_PORT} is occupied by another process; refusing to replace it")
     if not GATEWAY_SCRIPT.is_file():
         raise RuntimeError(f"Gateway script not found: {GATEWAY_SCRIPT}")
     process = spawn_gateway()
-    state["gateway"] = {"managed": True, "pid": process.pid, "started_at": now_iso()}
+    state["gateway"] = {
+        "managed": True,
+        "pid": process.pid,
+        "started_at": now_iso(),
+        "provider_fingerprint": desired_fingerprint,
+    }
     save_state(state)
     try:
         wait_for(lambda: gateway_health()["gateway_alive"], 20.0, "EVAVO Gateway")
@@ -534,7 +598,12 @@ def ensure_gateway_service(state: Dict[str, Any]) -> Dict[str, Any]:
         if process.poll() is None and pid_matches(process.pid, GATEWAY_SCRIPT):
             terminate_pid(process.pid)
         raise
-    return {"status": "started", "pid": process.pid, "healthy": gateway_health()["healthy"]}
+    return {
+        "status": "started",
+        "pid": process.pid,
+        "healthy": gateway_health()["healthy"],
+        "provider_configuration_applied": True,
+    }
 
 
 def start_services() -> Dict[str, Any]:
@@ -565,7 +634,7 @@ def start_services() -> Dict[str, Any]:
 def stop_services() -> Dict[str, Any]:
     state = load_state()
     stopped: Dict[str, Any] = {"gateway": False, "comfyui": False, "3d_worker": False}
-    gateway = state.get("gateway") if isinstance(state.get("gateway"), dict) else {}
+    gateway = _managed_gateway_state(state)
     pid = gateway.get("pid")
     if gateway.get("managed") and isinstance(pid, int) and pid_matches(pid, GATEWAY_SCRIPT):
         terminate_pid(pid)
@@ -601,8 +670,11 @@ def monitor(interval: float) -> int:
                     ensure_3d_worker_service(load_state())
                 except Exception as exc:
                     print(json.dumps({"provider": "3d", "status": "unavailable", "error": str(exc)}), file=sys.stderr, flush=True)
+            configure_audio_provider()
             if not health["gateway"]["gateway_alive"]:
-                configure_audio_provider()
+                ensure_gateway_service(load_state())
+            else:
+                # Provider configuration can change while the gateway remains healthy.
                 ensure_gateway_service(load_state())
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -614,7 +686,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("start", help="Start/ensure native ComfyUI, local providers and the loopback gateway")
     subparsers.add_parser("stop", help="Stop only identity-verified EVAVO-managed components")
-    subparsers.add_parser("health", help="Print health JSON")
+    subparsers.add_parser("health", help="Print core health plus auxiliary provider readiness JSON")
     subparsers.add_parser("status", help="Alias for health")
     monitor_parser = subparsers.add_parser("monitor", help="Monitor and restore managed local service health")
     monitor_parser.add_argument("--interval", type=float, default=5.0)
