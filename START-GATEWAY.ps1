@@ -50,6 +50,59 @@ if (-not $env:COMFYUI_ENDPOINT -and -not $env:EVAVO_COMFYUI_ENDPOINT) {
     $env:COMFYUI_ENDPOINT = "http://127.0.0.1:8188"
 }
 
+# Resolve the governed Wan publication through Video Studio when callers have
+# not explicitly selected a model. The resolver performs deterministic lookup
+# only; it never scans disks or downloads model bytes. Failure is non-fatal so
+# image/audio/3D gateway capabilities remain available while video stays honest.
+if (-not $env:EVAVO_VIDEO_PROVIDER_ARGV -and -not $env:EVAVO_WAN21_MODEL_DIR) {
+    $videoCandidates = @()
+    if ($env:EVAVO_VIDEO_STUDIO_DIR) {
+        $videoCandidates += $env:EVAVO_VIDEO_STUDIO_DIR
+    }
+    $repoParent = Split-Path -Parent $PSScriptRoot
+    $videoCandidates += (Join-Path $repoParent "evavo-video-studio")
+    $videoCandidates += (Join-Path $repoParent "video-studio")
+
+    foreach ($candidate in $videoCandidates) {
+        if (-not $candidate) { continue }
+        $videoRoot = [System.IO.Path]::GetFullPath($candidate)
+        $resolver = Join-Path $videoRoot "tools\resolve_wan21_model.py"
+        $worker = Join-Path $videoRoot "tools\wan21_t2v_worker.py"
+        if (-not (Test-Path -LiteralPath $resolver -PathType Leaf)) { continue }
+        if (-not (Test-Path -LiteralPath $worker -PathType Leaf)) { continue }
+
+        $videoPython = Join-Path $videoRoot ".venv\Scripts\python.exe"
+        if (-not (Test-Path -LiteralPath $videoPython -PathType Leaf)) {
+            $videoPython = $python
+        }
+
+        $previousErrorPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $resolverOutput = @(& $videoPython $resolver 2>$null)
+            $resolverExit = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorPreference
+        }
+        if ($resolverExit -ne 0 -or $resolverOutput.Count -eq 0) { continue }
+
+        try {
+            $resolved = ($resolverOutput | Select-Object -Last 1) | ConvertFrom-Json -ErrorAction Stop
+        }
+        catch {
+            continue
+        }
+        if ($resolved.ok -ne $true -or -not $resolved.modelDir -or -not $resolved.modelManifestSha256) { continue }
+
+        $env:EVAVO_WAN21_MODEL_DIR = [string]$resolved.modelDir
+        $env:EVAVO_WAN21_MODEL_MANIFEST_SHA256 = [string]$resolved.modelManifestSha256
+        $env:EVAVO_VIDEO_STUDIO_DIR = $videoRoot
+        Write-Host "Video Studio Wan model: $($resolved.modelDir)" -ForegroundColor DarkGreen
+        break
+    }
+}
+
 # Auto-discover the first-party Audio Studio provider in the normal sibling-repo
 # layout. An explicit EVAVO_AUDIO_PROVIDER_ARGV always wins. The gateway provider
 # contract is argv JSON rather than a shell command, preserving shell=False.
