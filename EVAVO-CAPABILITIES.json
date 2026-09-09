@@ -30,29 +30,13 @@
       "streamable_http": {
         "default_url": "http://127.0.0.1:8765/mcp",
         "loopback_only": true,
-        "purpose": [
-          "local MCP clients",
-          "integration testing",
-          "private target for OpenAI Secure MCP Tunnel"
-        ]
+        "purpose": ["local MCP clients", "integration testing", "private target for OpenAI Secure MCP Tunnel"]
       },
       "owned_generation_modalities": ["image"],
       "tools": [
-        "provision_backend",
-        "ensure_backend",
-        "health_check",
-        "discover_backends",
-        "list_checkpoints",
-        "model_inventory",
-        "workflow_preflight",
-        "generate_image",
-        "generate_batch",
-        "generation_status",
-        "collect_generation",
-        "read_output_image",
-        "task_history",
-        "task_statistics",
-        "stop_managed_backend"
+        "provision_backend", "ensure_backend", "health_check", "discover_backends", "list_checkpoints",
+        "model_inventory", "workflow_preflight", "generate_image", "generate_batch", "generation_status",
+        "collect_generation", "read_output_image", "task_history", "task_statistics", "stop_managed_backend"
       ]
     },
     "chatgpt": {
@@ -61,10 +45,7 @@
       "runbook": "CHATGPT-TUNNEL.md",
       "private_mcp_default": "http://127.0.0.1:8765/mcp"
     },
-    "claude": {
-      "transport": "stdio-mcp",
-      "installer": "INSTALL-CLAUDE-MCP.ps1"
-    },
+    "claude": {"transport": "stdio-mcp", "installer": "INSTALL-CLAUDE-MCP.ps1"},
     "http_gateway": {
       "optional": true,
       "default_url": "http://127.0.0.1:8000",
@@ -79,6 +60,8 @@
       "request_workflow_path_requires_root": true,
       "task_state_cross_process_lock": true,
       "task_id_allocation_interprocess_atomic": true,
+      "single_live_gateway_per_task_state": true,
+      "state_in_use_error": "GATEWAY_STATE_IN_USE",
       "corrupt_task_state_fail_closed": true,
       "image_endpoint": "/generate/image",
       "owned_generation_modalities": ["image"],
@@ -86,42 +69,15 @@
         "readiness_endpoint": "/services",
         "fail_closed": true,
         "routes": {
-          "/generate/video": {
-            "accepted_status": 202,
-            "ownership": "delegated",
-            "provider": "EVAVO Video Studio or explicitly configured reviewed provider"
-          },
-          "/generate/audio": {
-            "accepted_status": 202,
-            "ownership": "delegated",
-            "provider": "explicitly configured reviewed Audio Studio provider"
-          },
-          "/generate/3d": {
-            "accepted_status": 202,
-            "ownership": "delegated",
-            "provider": "token-gated EVAVO 3D Studio worker"
-          }
+          "/generate/video": {"accepted_status": 202, "ownership": "delegated", "provider": "EVAVO Video Studio or explicitly configured reviewed provider"},
+          "/generate/audio": {"accepted_status": 202, "ownership": "delegated", "provider": "explicitly configured reviewed Audio Studio provider"},
+          "/generate/3d": {"accepted_status": 202, "ownership": "delegated", "provider": "token-gated EVAVO 3D Studio worker"}
         }
       }
     }
   },
-  "native_comfyui_api": [
-    "GET /system_stats",
-    "GET /object_info[/<node>]",
-    "POST /prompt",
-    "GET /history/<prompt_id>",
-    "GET /view"
-  ],
-  "model_inventory_categories": [
-    "checkpoints",
-    "loras",
-    "vae",
-    "controlnet",
-    "diffusion_models",
-    "text_encoders",
-    "clip_vision",
-    "upscale_models"
-  ],
+  "native_comfyui_api": ["GET /system_stats", "GET /object_info[/<node>]", "POST /prompt", "GET /history/<prompt_id>", "GET /view"],
+  "model_inventory_categories": ["checkpoints", "loras", "vae", "controlnet", "diffusion_models", "text_encoders", "clip_vision", "upscale_models"],
   "automation": {
     "windows_setup": ".\\UPDATE-AND-VERIFY-EVAVO.ps1",
     "auto_discover_comfyui": true,
@@ -145,6 +101,7 @@
     "gateway_structured_config_errors": true,
     "gateway_task_state_corruption_fail_closed": true,
     "gateway_task_id_interprocess_atomic": true,
+    "gateway_task_state_single_live_owner": true,
     "service_manager_state_corruption_fail_closed": true,
     "service_manager_provider_secret_plaintext_in_state": false,
     "broad_python_process_kill": false,
@@ -162,28 +119,11 @@
     "plaintext_tunnel_key_in_repo_or_startup": false,
     "arbitrary_model_url_from_mcp_tool": false
   },
-  "not_owned_production_modalities": [
-    "video",
-    "audio",
-    "3d",
-    "particles",
-    "general-text",
-    "dedicated-pbr-textures"
-  ],
+  "not_owned_production_modalities": ["video", "audio", "3d", "particles", "general-text", "dedicated-pbr-textures"],
   "delegated_gateway_modalities": ["video", "audio", "3d"],
   "source_of_truth": [
-    "README.md",
-    "CLAUDE.md",
-    "AGENT-INTEGRATION.md",
-    "AGENT-RECOVERY.md",
-    "AUTOMATION-GUIDE.md",
-    "OPERATIONS-GUIDE.md",
-    "DEPLOYMENT-CHECKLIST.md",
-    "GATEWAY-INTEGRATION-GUIDE.md",
-    "GATEWAY-AUX-PROVIDERS.md",
-    "PROVIDER-INTEGRATION-GUIDE.md",
-    "CHATGPT-TUNNEL.md",
-    "QUICK-REFERENCE.md",
-    ".evavo/capabilities.json"
+    "README.md", "CLAUDE.md", "AGENT-INTEGRATION.md", "AGENT-RECOVERY.md", "AUTOMATION-GUIDE.md",
+    "OPERATIONS-GUIDE.md", "DEPLOYMENT-CHECKLIST.md", "GATEWAY-INTEGRATION-GUIDE.md", "GATEWAY-AUX-PROVIDERS.md",
+    "PROVIDER-INTEGRATION-GUIDE.md", "CHATGPT-TUNNEL.md", "QUICK-REFERENCE.md", ".evavo/capabilities.json"
   ]
 }
