@@ -78,6 +78,31 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertIn('origin == "*"', source)
         self.assertIn("LOOPBACK_ORIGIN_RE", source)
 
+    def test_gateway_request_boundary_matches_manifest(self) -> None:
+        gateway = self.manifest["interfaces"]["http_gateway"]
+        self.assertEqual(gateway["max_request_bytes_default"], 1024 * 1024)
+        self.assertEqual(gateway["max_request_bytes_hard_cap"], 16 * 1024 * 1024)
+        self.assertEqual(gateway["max_project_chars_default"], 128)
+        self.assertFalse(gateway["request_workflow_path_default_allowed"])
+        source = GATEWAY_PATH.read_text(encoding="utf-8")
+        self.assertIn("class RequestBodyLimitMiddleware", source)
+        self.assertIn("EVAVO_GATEWAY_MAX_REQUEST_BYTES", source)
+        self.assertIn("more_body", source)
+        self.assertIn("EVAVO_GATEWAY_MAX_PROJECT_CHARS", source)
+        self.assertIn("EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS", source)
+        self.assertIn("per-request workflow_path is disabled", source)
+
+    def test_gateway_task_state_safety_matches_manifest(self) -> None:
+        gateway = self.manifest["interfaces"]["http_gateway"]
+        self.assertTrue(gateway["task_state_cross_process_lock"])
+        self.assertTrue(gateway["task_id_allocation_interprocess_atomic"])
+        self.assertTrue(gateway["corrupt_task_state_fail_closed"])
+        source = GATEWAY_PATH.read_text(encoding="utf-8")
+        self.assertIn("_interprocess_lock", source)
+        self.assertIn("def _create_sync", source)
+        self.assertIn("GATEWAY_TASK_STATE_CORRUPT", source)
+        self.assertIn("await STORE.create(", source)
+
     def test_gateway_manifest_matches_governed_auxiliary_delegation(self) -> None:
         gateway_source = GATEWAY_PATH.read_text(encoding="utf-8")
         auxiliary = self.manifest["interfaces"]["http_gateway"]["auxiliary_delegation"]
@@ -90,7 +115,7 @@ class CapabilityManifestTests(unittest.TestCase):
                 self.assertEqual(metadata["accepted_status"], 202)
                 self.assertEqual(metadata["ownership"], "delegated")
                 self.assertIn(path, gateway_source)
-        self.assertIn('status_code=202', gateway_source)
+        self.assertIn("status_code=202", gateway_source)
         self.assertIn("_provider_worker", gateway_source)
 
     def test_delegated_modalities_are_not_owned_package_or_mcp_capabilities(self) -> None:
@@ -108,11 +133,19 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertFalse(security["provider_shell_execution"])
         self.assertTrue(security["provider_receipt_required"])
         self.assertTrue(security["provider_output_confinement"])
+        self.assertTrue(security["provider_receipt_digest_verification_when_supplied"])
+        self.assertIn("PROVIDER_OUTPUT_INVALID", source)
+        self.assertIn("sha256", source.lower())
 
     def test_security_contract_rejects_old_dangerous_defaults(self) -> None:
         security = self.manifest["security"]
         self.assertFalse(security["public_bind_by_default"])
         self.assertFalse(security["gateway_wildcard_cors_by_default"])
+        self.assertTrue(security["gateway_request_preparse_size_limit"])
+        self.assertTrue(security["gateway_chunked_request_limit"])
+        self.assertFalse(security["gateway_request_workflow_path_default_allowed"])
+        self.assertTrue(security["gateway_task_state_corruption_fail_closed"])
+        self.assertTrue(security["gateway_task_id_interprocess_atomic"])
         self.assertFalse(security["broad_python_process_kill"])
         self.assertTrue(security["managed_process_identity_verification"])
         self.assertTrue(security["chatgpt_tunnel_executable_sha256_verification"])
