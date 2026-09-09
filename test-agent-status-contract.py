@@ -34,11 +34,22 @@ class AgentStatusContractTests(unittest.TestCase):
         self.assertIn("-SkipControlPlane", SOURCE)
         self.assertIn("CHATGPT-TUNNEL-DOCTOR.ps1", SOURCE)
 
-    def test_chatgpt_tunnel_and_gateway_are_not_required_for_local_ready_state(self) -> None:
+    def test_chatgpt_tunnel_gateway_and_old_smoke_proof_are_not_live_readiness_authority(self) -> None:
         self.assertIn("$localReady = [bool]($repoOk -and $agentOk -and $backendOk)", SOURCE)
         self.assertIn("ChatGPT tunnel is optional for local/Claude use", SOURCE)
-        self.assertIn("Optional gateway/provider readiness is intentionally not part", SOURCE)
+        self.assertIn("current owned native-image readiness remains the status exit-code", SOURCE)
         self.assertNotIn("$localReady = [bool]($repoOk -and $agentOk -and $backendOk -and $gateway", SOURCE)
+        self.assertNotIn("$localReady = [bool]($repoOk -and $agentOk -and $backendOk -and $smoke", SOURCE)
+
+    def test_latest_real_generation_proof_is_reported_from_shared_history(self) -> None:
+        self.assertIn('"task-tracker.py"', SOURCE)
+        self.assertIn('"--project", "setup-smoke"', SOURCE)
+        self.assertIn('"--limit", "1"', SOURCE)
+        self.assertIn('real_generation_proof = $smoke', SOURCE)
+        self.assertIn("Latest real generation proof", SOURCE)
+        self.assertIn("files_present", SOURCE)
+        self.assertIn("Test-Path -LiteralPath", SOURCE)
+        self.assertNotIn("real-generation-smoke.py", SOURCE)
 
     def test_optional_gateway_services_are_reported_separately(self) -> None:
         self.assertIn('[int]$GatewayPort = 8000', SOURCE)
