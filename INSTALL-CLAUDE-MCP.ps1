@@ -7,12 +7,12 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+# Persistent Claude MCP must use the repository-local isolated environment.
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { throw "Python 3.10+ was not found." }
-    $python = $cmd.Source
+    throw "EVAVO .venv is not ready. Run UPDATE-AND-VERIFY-EVAVO.ps1 before installing the Claude MCP profile."
 }
+$python = (Resolve-Path $python).Path
 
 if (-not $SkipValidation) {
     Write-Host "Validating EVAVO MCP before installing Claude configuration..." -ForegroundColor Cyan
