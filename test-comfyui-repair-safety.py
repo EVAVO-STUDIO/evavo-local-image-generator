@@ -50,6 +50,19 @@ class ComfyUIRepairSafetyTests(unittest.TestCase):
         self.assertEqual(result["error_code"], "NO_REPAIR_EVIDENCE")
         self.assertFalse(result["repair_performed"])
 
+    def test_force_sync_requires_owner_environment_authorization_before_evidence_or_process_work(self) -> None:
+        with (
+            patch.dict(os.environ, {"EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR": "0"}, clear=False),
+            patch.object(comfyui_repair, "_latest_repair_evidence") as evidence,
+            patch.object(comfyui_repair.subprocess, "run") as run,
+        ):
+            result = comfyui_repair.repair_backend_dependencies(force_sync=True, timeout_seconds=10)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "FORCE_SYNC_NOT_AUTHORIZED")
+        self.assertFalse(result["repair_performed"])
+        evidence.assert_not_called()
+        run.assert_not_called()
+
     def test_custom_node_failure_does_not_mutate_core_requirements(self) -> None:
         failure = {"category": "custom_node_dependency", "missing_modules": ["custom_module"]}
         with patch.object(comfyui_repair, "_latest_repair_evidence", return_value=failure):
