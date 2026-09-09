@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end smoke test for the fixed EVAVO Gateway HTTP contract."""
+"""Live end-to-end smoke test for the EVAVO native-image HTTP gateway."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +17,7 @@ TASK_RE = re.compile(r"^img_\d+$")
 
 def request(url: str, *, method: str = "GET", payload: Dict[str, Any] | None = None, timeout: float = 10.0) -> Tuple[int, bytes, Dict[str, str], float]:
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
-    headers = {"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Smoke/1"}
+    headers = {"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Smoke/2"}
     if body is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
@@ -60,12 +60,14 @@ async def websocket_probe(base: str, task_id: str) -> Dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Smoke-test EVAVO Unified Gateway")
+    parser = argparse.ArgumentParser(description="Smoke-test EVAVO native-image HTTP gateway")
     parser.add_argument("--base", default="http://127.0.0.1:8000")
     parser.add_argument("--prompt", default="EVAVO gateway verification: a beautiful sunset over mountains")
-    parser.add_argument("--timeout", type=float, default=120.0)
-    parser.add_argument("--output", default="evavo-state/smoke-test-result.png")
+    parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument("--output", default=".evavo/gateway/smoke-test-result.png")
     args = parser.parse_args()
+    if args.timeout <= 0:
+        parser.error("--timeout must be greater than zero")
     base = args.base.rstrip("/")
     report: Dict[str, Any] = {"base": base, "started_at": time.time(), "checks": {}}
 
@@ -74,12 +76,27 @@ def main() -> int:
         expected = {"status": "healthy", "gateway": "ok", "comfyui": "ok"}
         report["checks"]["health"] = {"ok": status == 200 and health == expected, "status_code": status, "latency_ms": round(latency, 1), "response": health}
 
+        status, capabilities, latency = json_request(base + "/capabilities")
+        capabilities_ok = (
+            status == 200
+            and isinstance(capabilities.get("image"), dict)
+            and capabilities["image"].get("ready") is True
+            and all(isinstance(capabilities.get(kind), dict) and capabilities[kind].get("ready") is False for kind in ("video", "audio", "3d"))
+        )
+        report["checks"]["capabilities"] = {"ok": capabilities_ok, "status_code": status, "latency_ms": round(latency, 1), "response": capabilities}
+
+        unsupported_results: Dict[str, Any] = {}
+        for kind in ("video", "audio", "3d"):
+            status, payload, latency = json_request(base + f"/generate/{kind}", method="POST", payload={"prompt": "unsupported compatibility probe"})
+            unsupported_results[kind] = {"ok": status == 501, "status_code": status, "latency_ms": round(latency, 1), "response": payload}
+        report["checks"]["unsupported_modalities"] = {"ok": all(item["ok"] for item in unsupported_results.values()), "results": unsupported_results}
+
         status, openapi, latency = json_request(base + "/openapi.json")
-        required = {"/health", "/generate/image", "/tasks", "/tasks/{task_id}/status", "/results/{task_id}"}
+        required = {"/health", "/capabilities", "/generate/image", "/generate/video", "/generate/audio", "/generate/3d", "/tasks", "/tasks/{task_id}/status", "/results/{task_id}"}
         paths = set(openapi.get("paths", {}).keys()) if isinstance(openapi.get("paths"), dict) else set()
         report["checks"]["openapi"] = {"ok": status == 200 and required.issubset(paths), "latency_ms": round(latency, 1), "missing_paths": sorted(required - paths)}
 
-        status, queued, latency = json_request(base + "/generate/image", method="POST", payload={"prompt": args.prompt})
+        status, queued, latency = json_request(base + "/generate/image", method="POST", payload={"prompt": args.prompt, "project_name": "gateway_smoke"})
         task_id = str(queued.get("task_id", ""))
         queue_ok = status == 202 and TASK_RE.fullmatch(task_id) is not None and queued.get("status") == "queued" and queued.get("progress") == 0
         report["checks"]["queue"] = {"ok": queue_ok, "status_code": status, "latency_ms": round(latency, 1), "response": queued}
@@ -100,7 +117,7 @@ def main() -> int:
                 break
             time.sleep(0.5)
         report["checks"]["task_tracking"] = {
-            "ok": latest.get("status") == "completed" and latest.get("progress") == 100,
+            "ok": latest.get("status") == "completed" and latest.get("progress") == 100 and latest.get("result_ready") is True,
             "polls": polls,
             "average_poll_latency_ms": round(sum(poll_latencies) / max(1, len(poll_latencies)), 1),
             "final": latest,
@@ -108,17 +125,18 @@ def main() -> int:
         if latest.get("status") != "completed":
             raise RuntimeError(f"Generation did not complete successfully: {latest}")
 
-        status, data, headers, latency = request(base + f"/results/{task_id}", timeout=30.0)
+        status, data, headers, latency = request(base + f"/results/{task_id}", timeout=60.0)
         output = Path(args.output).expanduser().resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(data)
+        if status == 200 and data:
+            output.write_bytes(data)
         report["checks"]["result"] = {
             "ok": status == 200 and len(data) > 0,
             "status_code": status,
             "latency_ms": round(latency, 1),
             "bytes": len(data),
             "content_type": headers.get("content-type"),
-            "output": str(output),
+            "output": str(output) if status == 200 and data else None,
         }
     except Exception as exc:
         report["error"] = str(exc)
