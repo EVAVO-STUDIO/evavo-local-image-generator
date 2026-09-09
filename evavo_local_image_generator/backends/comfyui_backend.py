@@ -32,7 +32,7 @@ class ComfyUIBackend:
     """Small standard-library client for a local ComfyUI server."""
 
     def __init__(self, endpoint: Optional[str] = None):
-        self.endpoint = (endpoint or os.getenv("EVAVO_COMFYUI_ENDPOINT") or os.getenv("COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
+        self.endpoint = (endpoint or os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
 
     def _open(self, path: str, *, method: str = "GET", payload: Optional[Dict[str, Any]] = None, timeout: float = 10.0):
         body = None
