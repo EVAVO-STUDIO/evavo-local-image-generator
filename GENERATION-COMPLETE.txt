@@ -1,112 +1,54 @@
 ================================================================================
-EVAVO MULTI-MODAL GENERATION COMPLETE
+HISTORICAL GENERATION RECEIPT — SUPERSEDED
 ================================================================================
 
-Status: GENERATION SUCCESSFUL
-Date: September 8, 2026
+The original contents of this file described a September 8, 2026 placeholder /
+configuration-generation milestone as though it proved a complete multimodal
+production system. It did not establish today's verified runtime contract.
 
-Total Assets Created: 21 files
+DO NOT use this file as evidence that video, audio, 3D models, particles, text,
+or PBR textures were genuinely rendered by this repository.
 
-ASSET BREAKDOWN
-- Particle Systems:    4 configs
-- 3D Models:           6 definitions  
-- PBR Textures:        4 material sets
-- Sample Assets:       7 files (images and video)
+CURRENT VERIFIED CONTRACT
+-------------------------
+- native local IMAGE generation through ComfyUI
+- real /prompt task IDs
+- /history completion tracking
+- /view output collection
+- actual downloaded image files
+- CLI/Python/MCP v2 integration
+- Claude local stdio MCP
+- ChatGPT via OpenAI Secure MCP Tunnel
+- optional loopback HTTP image compatibility gateway
 
-================================================================================
-WHERE TO FIND YOUR GENERATED FILES
-================================================================================
+CURRENT REAL-RENDER PROOF
+-------------------------
+On the Windows workstation:
 
-PRIMARY LOCATION:
-C:\Gitrepos\evavo-local-image-generator\
-
-BACKUP/REFERENCE LOCATION:
-C:\Users\User\beestation\
-
-AVAILABLE DIRECTORIES:
-
-evavo-generations/
-  Sample images and video
-  Available in both locations
-
-evavo-particles/
-  Particle system configurations (4 JSON files)
-  fire_burst, water_splash, magic_sparkles, dust_storm
-
-evavo-models/
-  3D model definitions (6 JSON files)
-  simple_cube, character_model, environment_asset, mechanical_robot,
-  organic_creature, architectural_structure
-
-evavo-textures/
-  PBR texture definitions (4 JSON files)
-  metal_brushed, wood_oak, fabric_linen, stone_granite
-
-evavo-state/
-  Generation metrics and status files
-
-Ready directories for live generation:
-  evavo-images/    (for live generated images)
-  evavo-videos/    (for live generated videos)
-  evavo-audio/     (for live generated audio)
-  evavo-text/      (for live generated text)
-
-================================================================================
-NEXT STEPS: GENERATE LIVE CONTENT
-================================================================================
-
-To generate actual images, videos, audio, and text, start these services:
-
-TERMINAL 1 - ComfyUI (Image/Video):
-  cd C:\AI\ComfyUI
-  python main.py
-
-TERMINAL 2 - Ollama (Text):
-  ollama serve
-
-TERMINAL 3 - Run Generation:
   cd C:\Gitrepos\evavo-local-image-generator
-  python COMPLETE-MULTIMODAL-TEST.py --execute
+  git pull --ff-only origin main
+  .\UPDATE-AND-VERIFY-EVAVO.ps1
 
-Expected time: 45 minutes to 2 hours
+Then run:
 
-================================================================================
-SYSTEM SUMMARY
-================================================================================
+  python evavo.py generate --prompts "EVAVO real render smoke test" --project smoke --wait
 
-Generation Architecture: Multi-modal AI system (7 modalities)
-Test Suite: 71 tests prepared
-Services: ComfyUI + Ollama ready
-Output Structure: Fully organized
-Documentation: Complete
+A production proof requires a completed task and a real non-empty downloaded
+image file. The deterministic mock does not count as a renderer.
 
-Ready for:
-  - Autonomous batch generation
-  - API integration
-  - Production deployment
+CURRENT SOURCE-OF-TRUTH DOCUMENTS
+---------------------------------
+README.md
+CLAUDE.md
+AGENT-INTEGRATION.md
+AUTOMATION-GUIDE.md
+OPERATIONS-GUIDE.md
+DEPLOYMENT-CHECKLIST.md
+DEPLOYMENT-ACTIVE.md
+GATEWAY-INTEGRATION-GUIDE.md
+CHATGPT-TUNNEL.md
+QUICK-REFERENCE.md
 
-================================================================================
-FILES AT A GLANCE
-================================================================================
-
-All content is organized in your two locations:
-
-Primary:  C:\Gitrepos\evavo-local-image-generator\
-Backup:   C:\Users\User\beestation\
-
-Generated assets include:
-  - 4 particle system configurations
-  - 6 3D model definitions
-  - 4 PBR texture material sets
-  - 7 sample generated assets (images and video)
-  - Complete generation framework ready for live content
-
-================================================================================
-GENERATION COMPLETE
-
-Your EVAVO multi-modal AI platform is fully functional and ready for
-autonomous content generation across all modalities.
-
-Start services and run the test suite to generate live content.
-
+The old multimodal completion text has intentionally been replaced instead of
+left as a misleading current status artifact.
 ================================================================================
