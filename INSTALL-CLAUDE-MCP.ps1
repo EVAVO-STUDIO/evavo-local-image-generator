@@ -121,7 +121,7 @@ foreach ($name in $nonSecretEnvironment) {
 
 $server = [pscustomobject][ordered]@{
     "command" = $python
-    "args" = @("-m", "evavo_local_image_generator.mcp_server", "--transport", "stdio")
+    "args" = @("-m", "evavo_local_image_generator.mcp_entry", "--transport", "stdio")
     "env" = [pscustomobject]$environment
 }
 
@@ -142,6 +142,7 @@ Write-Host "Repo:   $PSScriptRoot" -ForegroundColor Green
 Write-Host "ComfyUI endpoint: $comfyEndpoint (persisted as canonical COMFYUI_ENDPOINT)" -ForegroundColor Green
 Write-Host "Generation output root: $generationOutputDir (validated before persistence)" -ForegroundColor Green
 Write-Host "Backend/checkpoint auto-provision: enabled (operator-controlled model sources only)" -ForegroundColor Green
+Write-Host "MCP launch: validated mcp_entry preflights filesystem authority before the server starts." -ForegroundColor Green
 Write-Host "MCP file policy: validated before write; output/workflow paths remain owner-confined." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
     Write-Host "Shared ComfyUI model roots: persisted into Claude MCP environment" -ForegroundColor Green
