@@ -28,6 +28,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "test-agent-doctor-config.py",
             "test-capability-manifest.py",
             "test-comfyui-cancel.py",
+            "test-comfyui-repair-cli.py",
             "test-comfyui-repair-safety.py",
             "test-comfyui-status.py",
             "test-comfyui-terminal-wait.py",
