@@ -9,6 +9,7 @@ from pathlib import Path
 import safe_main_git
 
 ROOT = Path(__file__).resolve().parent
+UPDATER = ROOT / "UPDATE-AND-VERIFY-EVAVO.ps1"
 
 GIT_COMPAT_FILES = (
     "AUTO-COMMIT-AND-PUSH.py",
@@ -64,6 +65,23 @@ class SafeMainGitTests(unittest.TestCase):
         ):
             with self.subTest(remote=remote):
                 self.assertIsNone(safe_main_git.EXPECTED_ORIGIN_RE.fullmatch(remote))
+
+    def test_canonical_updater_verifies_exact_origin_before_pull(self) -> None:
+        source = UPDATER.read_text(encoding="utf-8")
+        remote = source.index("git remote get-url origin")
+        identity = source.index("$expectedOrigin")
+        reject = source.index("Refusing to update from unexpected origin")
+        pull = source.index("git pull --ff-only origin main")
+        self.assertLess(remote, identity)
+        self.assertLess(identity, reject)
+        self.assertLess(reject, pull)
+        self.assertIn("EVAVO-STUDIO/evavo-local-image-generator", source)
+        self.assertIn("https://github\\.com", source)
+        self.assertIn("git@github\\.com", source)
+        self.assertIn("ssh://git@github\\.com", source)
+        self.assertNotIn("git pull --rebase", source)
+        self.assertNotIn("git reset --hard", source.lower())
+        self.assertNotIn("git push --force", source.lower())
 
     def test_helper_has_no_destructive_git_repair_commands(self) -> None:
         source = (ROOT / "safe_main_git.py").read_text(encoding="utf-8").lower()
