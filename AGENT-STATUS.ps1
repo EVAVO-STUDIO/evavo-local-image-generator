@@ -2,6 +2,7 @@
 
 param(
     [int]$McpPort = 8765,
+    [string]$McpPath = "/mcp",
     [int]$GatewayPort = 8000,
     [switch]$Json,
     [switch]$CheckTunnelControlPlane
@@ -15,6 +16,9 @@ foreach ($portValue in @($McpPort, $GatewayPort)) {
         throw "Ports must be between 1 and 65535."
     }
 }
+if (-not $McpPath.StartsWith("/") -or $McpPath.Contains("?") -or $McpPath.Contains("#") -or $McpPath.Length -gt 256) {
+    throw "MCP path must be an absolute path up to 256 characters and must not contain ? or #."
+}
 
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
@@ -22,6 +26,7 @@ if (-not (Test-Path $python)) {
     if (-not $command) { throw "Python 3.10+ was not found." }
     $python = $command.Source
 }
+$python = (Resolve-Path $python).Path
 
 function Invoke-JsonPython([string[]]$Arguments) {
     $raw = & $python @Arguments 2>&1
@@ -88,20 +93,49 @@ $mcpListener = Get-NetTCPConnection -LocalPort $McpPort -State Listen -ErrorActi
 $mcp = [ordered]@{
     ready = $false
     port = $McpPort
+    path = $McpPath
     pid = $null
     identity = "not_running"
+    executable = $null
 }
 if ($mcpListener) {
     $pidValue = [int]$mcpListener.OwningProcess
     $process = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
     $commandLine = if ($process) { [string]$process.CommandLine } else { "" }
+    $executable = if ($process) { [string]$process.ExecutablePath } else { "" }
     $mcp.pid = $pidValue
-    if ($commandLine -match "evavo_local_image_generator\.mcp_server" -and $commandLine -match "--transport\s+streamable-http") {
+    $mcp.executable = $executable
+
+    $escapedPath = [regex]::Escape($McpPath)
+    $argumentIdentity = (
+        $commandLine -match "evavo_local_image_generator\.mcp_entry" -and
+        $commandLine -match "--transport\s+streamable-http" -and
+        $commandLine -match "--host\s+127\.0\.0\.1" -and
+        $commandLine -match "--port\s+$McpPort(?:\s|$)" -and
+        $commandLine -match "--path\s+(?:`"$escapedPath`"|$escapedPath)(?:\s|$)"
+    )
+    $runtimeIdentity = $false
+    if ($executable) {
+        try {
+            $runtimeIdentity = [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                [System.IO.Path]::GetFullPath($executable),
+                [System.IO.Path]::GetFullPath($python)
+            )
+        }
+        catch {
+            $runtimeIdentity = $false
+        }
+    }
+
+    if ($argumentIdentity -and $runtimeIdentity) {
         $mcp.ready = $true
-        $mcp.identity = "evavo_streamable_http"
+        $mcp.identity = "policy_validated_mcp_entry"
+    }
+    elseif ($commandLine -match "evavo_local_image_generator\.mcp_server") {
+        $mcp.identity = "legacy_mcp_server_restart_required"
     }
     else {
-        $mcp.identity = "unexpected_listener"
+        $mcp.identity = "unexpected_or_unverified_listener"
     }
 }
 
@@ -197,7 +231,7 @@ else {
     }
 }
 
-# Latest real-generation proof and optional gateway/tunnel evidence are reported
-# separately; current owned native-image readiness remains the status exit-code
-# authority after reboot.
+# Latest real-generation proof, private MCP identity and optional gateway/tunnel
+# evidence are reported separately; current owned native-image readiness remains
+# the status exit-code authority after reboot.
 exit $(if ($localReady) { 0 } else { 2 })
