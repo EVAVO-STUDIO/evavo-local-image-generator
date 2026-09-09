@@ -1,53 +1,46 @@
 ================================================================================
-                  FINAL STEP: COMMIT AND PUSH TO MAIN
+                 SAFE LOCAL COMMIT / PUSH TO MAIN
 ================================================================================
 
-All automation files are created and ready!
-Now you need to commit and push to main.
+This file is retained for old bookmarks. The historical instructions that used
+blind `git add -A`, stale "production ready" commit text, manual lock deletion,
+archive extraction, or repository reinitialization are retired.
 
-IMPORTANT: Git commands must be run from WINDOWS (not Linux VM)
-    The Linux VM has file lock issues. Run from Windows PowerShell.
+Preferred local workflow from the repository root:
 
-================================================================================
-METHOD 1: Use PowerShell Script (EASIEST - Recommended)
-================================================================================
+  python safe_main_git.py --message "describe the actual completed change"
 
-1. Open PowerShell on your Windows machine
-2. Navigate to the repository:
-   cd C:\Gitrepos\evavo-local-image-generator
+Or use the PowerShell compatibility shim:
 
-3. Run the commit script:
-   .\COMMIT-UPGRADE.ps1
+  .\COMMIT-UPGRADE.ps1 -Message "describe the actual completed change"
 
-4. Wait for success message
-5. Done! Changes are committed and pushed to main
+Dry-run the safety checks without staging/committing:
 
-================================================================================
-METHOD 2: Manual Git Commands
-================================================================================
+  python safe_main_git.py --dry-run
 
-1. Open Command Prompt or PowerShell on Windows
-2. Navigate to the repository:
-   cd C:\Gitrepos\evavo-local-image-generator
+Create a verified commit but do not push:
 
-3. Add all files:
-   git add -A
+  python safe_main_git.py --no-push --message "describe the actual completed change"
 
-4. Commit with message:
-   git commit -m "feat: EVAVO fully automated system - production ready"
+The helper enforces:
 
-5. Push to main:
-   git push origin main
+  - active Git worktree must be this repository;
+  - current branch must be `main`;
+  - `origin/main` is fetched and divergence is checked;
+  - local main must not be behind or diverged;
+  - runtime/generated output paths are rejected from generic commits;
+  - full EVAVO verification runs before committing by default;
+  - no Git lock deletion;
+  - no `.git` deletion/reinitialization;
+  - no Git identity rewriting;
+  - no remote creation/replacement;
+  - no force push;
+  - normal push only to `origin main`;
+  - the pushed SHA is fetched and verified after success.
 
-================================================================================
-WHAT GETS COMMITTED
-================================================================================
+If the helper says local main is behind origin/main, update safely first:
 
-These new production-ready files:
-  - EVAVO-AUTOMATION.py           (Main automation script)
-  - AUTOMATION-GUIDE.md            (Complete documentation)
-  - CLAUDE-UPGRADE-COMPLETE.md     (Upgrade status)
-  - LINUX_GENERATION_RUNNER.py     (Linux VM runner)
-  - COMMIT-UPGRADE.ps1             (Helper script)
-  - UPGRADE-SUMMARY.txt            (Reference guide)
+  git pull --ff-only origin main
 
+If history has diverged, stop and reconcile it deliberately. Do not use a force
+push or delete/recreate `.git` as a recovery method.
