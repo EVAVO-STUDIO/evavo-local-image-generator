@@ -86,6 +86,20 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
         self.assertIn("127.0.0.1", source)
         self.assertNotIn("0.0.0.0", source)
 
+    def test_tunnel_launcher_derives_unspecified_port_from_saved_profile(self) -> None:
+        source = text("start")
+        self.assertIn("[int]$McpPort = 0", source)
+        self.assertIn("$state.mcp_server_url", source)
+        self.assertIn("$savedMcpUri.Port", source)
+        self.assertIn('$savedMcpUri.Host -notin @("127.0.0.1", "localhost", "::1")', source)
+
+    def test_tunnel_launcher_preserves_caller_supplied_key(self) -> None:
+        source = text("start")
+        self.assertIn("$loadedFromDpapi = $false", source)
+        self.assertIn("$loadedFromDpapi = [bool]$env:CONTROL_PLANE_API_KEY", source)
+        self.assertIn("if ($loadedFromDpapi)", source)
+        self.assertNotRegex(source, r"\$env:CONTROL_PLANE_API_KEY\s*=\s*\$null\s*\nexit")
+
     def test_login_autostart_requires_dpapi_and_never_embeds_plaintext_key(self) -> None:
         source = text("autostart")
         self.assertIn("START-CHATGPT-MCP-TUNNEL.ps1", source)
