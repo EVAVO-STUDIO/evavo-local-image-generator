@@ -2,22 +2,10 @@
 
 from __future__ import annotations
 
-import urllib.parse
 from typing import Any, Dict
 
 from .backends import ComfyUIBackend
 from .comfyui_status import prompt_status
-
-
-def _post_legacy_queue_delete(backend: ComfyUIBackend, prompt_id: str) -> None:
-    """Use legacy pending-queue deletion without requiring a JSON response body."""
-    with backend._open(
-        "/queue",
-        method="POST",
-        payload={"delete": [prompt_id]},
-        timeout=15.0,
-    ) as response:
-        response.read()
 
 
 def cancel_prompt(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
@@ -58,19 +46,13 @@ def cancel_prompt(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
             "state": before,
         }
 
-    encoded = urllib.parse.quote(prompt_id, safe="")
     try:
-        response = backend._request(
-            f"/api/jobs/{encoded}/cancel",
-            method="POST",
-            payload={},
-            timeout=15.0,
-        )
+        response = backend.cancel_job(prompt_id)
     except RuntimeError as exc:
         if not str(exc).startswith("COMFYUI_HTTP_ERROR:404:"):
             raise
         if before_status == "queued":
-            _post_legacy_queue_delete(backend, prompt_id)
+            backend.delete_pending(prompt_id)
             return {
                 "ok": True,
                 "task_id": prompt_id,
@@ -111,7 +93,6 @@ def cancel_prompt(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
             "state": after,
         }
 
-    # Pending cancellation is a dequeue and can be treated as final immediately.
     if before_status == "queued":
         return {
             "ok": True,
@@ -124,9 +105,6 @@ def cancel_prompt(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
             "state": before,
         }
 
-    # Running cancellation is dispatched atomically by modern ComfyUI but may
-    # take effect only at a node/step boundary. Re-read status without claiming
-    # terminal cancellation until ComfyUI reports it.
     after = prompt_status(backend, prompt_id)
     after_status = str(after.get("status") or "running")
     final_cancelled = after_status == "cancelled"
