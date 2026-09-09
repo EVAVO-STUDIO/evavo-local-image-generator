@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -15,7 +18,7 @@ try:
 except ImportError as exc:  # pragma: no cover
     raise RuntimeError('MCP SDK is required. Install with: python -m pip install "mcp[cli]>=2,<3"') from exc
 
-from evavo_operations import TaskTracker
+from evavo_operations import ROOT, TaskTracker
 from .backends import ComfyUIBackend
 from .comfyui_runtime import discover_comfyui, ensure_comfyui, stop_managed_comfyui
 
@@ -37,14 +40,64 @@ def _tracker() -> TaskTracker:
 def _output_dir(project_name: str, output_dir: Optional[str]) -> Path:
     if output_dir:
         return Path(output_dir).expanduser().resolve()
-    repo_root = Path(__file__).resolve().parents[1]
-    root = Path(os.getenv("EVAVO_GENERATION_OUTPUT_DIR", str(repo_root / ".evavo" / "outputs"))).expanduser().resolve()
+    root = Path(os.getenv("EVAVO_GENERATION_OUTPUT_DIR", str(ROOT / ".evavo" / "outputs"))).expanduser().resolve()
     safe_project = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in project_name)[:80] or "mcp"
     return root / safe_project
 
 
+def _truthy_environment(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _provision_backend_sync() -> Dict[str, Any]:
+    """Run the fixed EVAVO provisioner using operator-controlled environment only."""
+    provisioner = ROOT / "provision-comfyui.py"
+    if not provisioner.is_file():
+        raise RuntimeError(f"PROVISIONER_MISSING:{provisioner}")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(provisioner), "--json"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("COMFYUI_PROVISION_TIMEOUT:provisioner exceeded one hour") from exc
+    except OSError as exc:
+        raise RuntimeError(f"COMFYUI_PROVISION_PROCESS:{exc}") from exc
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        detail = (result.stderr or result.stdout).strip()[-2000:]
+        raise RuntimeError(f"COMFYUI_PROVISION_INVALID_JSON:{detail}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("COMFYUI_PROVISION_INVALID_RESPONSE:expected JSON object")
+    if result.returncode != 0 or not payload.get("ok"):
+        raise RuntimeError(f"COMFYUI_PROVISION_FAILED:{payload.get('message') or result.stderr or result.stdout}")
+    return payload
+
+
+async def _provision_backend() -> Dict[str, Any]:
+    return await asyncio.to_thread(_provision_backend_sync)
+
+
 async def _ensure(auto_start: bool = True, wait_seconds: float = 90.0) -> Dict[str, Any]:
-    return await asyncio.to_thread(ensure_comfyui, _endpoint(), wait_seconds=wait_seconds, allow_start=auto_start)
+    try:
+        return await asyncio.to_thread(ensure_comfyui, _endpoint(), wait_seconds=wait_seconds, allow_start=auto_start)
+    except RuntimeError as exc:
+        if not auto_start or not _truthy_environment("EVAVO_AUTO_PROVISION_COMFYUI", default=False):
+            raise
+        message = str(exc)
+        provisionable = any(code in message for code in ("COMFYUI_NOT_FOUND", "COMFYUI_OFFLINE", "COMFYUI_START_FAILED"))
+        if not provisionable:
+            raise
+        provisioned = await _provision_backend()
+        ensured = await asyncio.to_thread(ensure_comfyui, _endpoint(), wait_seconds=max(wait_seconds, 180.0), allow_start=True)
+        return {**ensured, "provisioned": True, "provision": provisioned}
 
 
 async def _track_queued(
@@ -70,7 +123,7 @@ async def _track_queued(
             output_dir=output_dir,
         )
         return None
-    except Exception as exc:  # tracking must never hide successful generation
+    except Exception as exc:
         return str(exc)
 
 
@@ -87,16 +140,18 @@ async def _track_update(
     error_message: Optional[str] = None,
 ) -> Optional[str]:
     try:
-        kwargs: Dict[str, Any] = {
-            "output_uris": output_uris,
-            "output_dir": output_dir,
-            "backend_mode": backend_mode,
-            "checkpoint": checkpoint,
-            "workflow_path": workflow_path,
-            "error_code": error_code,
-            "error_message": error_message,
-        }
-        await asyncio.to_thread(_tracker().update_task, task_id, status, **kwargs)
+        await asyncio.to_thread(
+            _tracker().update_task,
+            task_id,
+            status,
+            output_uris=output_uris,
+            output_dir=output_dir,
+            backend_mode=backend_mode,
+            checkpoint=checkpoint,
+            workflow_path=workflow_path,
+            error_code=error_code,
+            error_message=error_message,
+        )
         return None
     except KeyError:
         return "task was not present in local history"
@@ -227,14 +282,23 @@ async def _generate_image_impl(
 
 
 @mcp.tool()
+async def provision_backend() -> Dict[str, Any]:
+    """Provision official ComfyUI using only workstation-configured environment/model sources, then ensure it is running."""
+    provisioned = await _provision_backend()
+    ensured = await asyncio.to_thread(ensure_comfyui, _endpoint(), wait_seconds=180.0, allow_start=True)
+    checkpoints = await asyncio.to_thread(_backend().checkpoints)
+    return {"ok": bool(checkpoints), "status": "ready" if checkpoints else "model_required", "provision": provisioned, "backend": ensured, "checkpoints": checkpoints}
+
+
+@mcp.tool()
 async def ensure_backend(auto_start: bool = True, wait_seconds: float = 90.0) -> Dict[str, Any]:
-    """Ensure native ComfyUI is healthy. Automatically discover and start a local install when allowed."""
+    """Ensure native ComfyUI is healthy. It may be provisioned first when EVAVO_AUTO_PROVISION_COMFYUI=1."""
     return await _ensure(auto_start=auto_start, wait_seconds=wait_seconds)
 
 
 @mcp.tool()
 async def health_check(auto_start: bool = True) -> Dict[str, Any]:
-    """Return ComfyUI health/device/version details, starting the local backend automatically when needed."""
+    """Return ComfyUI health/device/version details, starting/provisioning the local backend when configured."""
     ensured = await _ensure(auto_start=auto_start)
     return ensured["health"]
 
@@ -248,7 +312,7 @@ async def discover_backends() -> List[Dict[str, Any]]:
 
 @mcp.tool()
 async def list_checkpoints(auto_start: bool = True) -> List[str]:
-    """List checkpoints exposed by ComfyUI, starting the backend automatically when needed."""
+    """List checkpoints exposed by ComfyUI, starting/provisioning the backend when configured."""
     await _ensure(auto_start=auto_start)
     return await asyncio.to_thread(_backend().checkpoints)
 
@@ -270,7 +334,7 @@ async def generate_image(
     output_dir: Optional[str] = None,
     auto_start: bool = True,
 ) -> Dict[str, Any]:
-    """Generate one image, optionally waiting for and downloading the real output. The task is persisted in EVAVO history."""
+    """Generate one image, wait/download by default, and persist the task in shared EVAVO history."""
     return await _generate_image_impl(
         prompt,
         project_name=project_name,
@@ -306,7 +370,7 @@ async def generate_batch(
     concurrency: int = 2,
     auto_start: bool = True,
 ) -> Dict[str, Any]:
-    """Generate multiple prompts with bounded concurrency. Every item is persisted to shared EVAVO task history."""
+    """Generate multiple prompts with bounded concurrency and shared persistent history."""
     if not isinstance(prompts, list) or not prompts:
         return {"ok": False, "status": "failed", "error_code": "INVALID_PROMPTS", "message": "prompts must be a non-empty list"}
     if len(prompts) > 100:
@@ -415,7 +479,6 @@ async def stop_managed_backend() -> Dict[str, Any]:
 
 
 def _transport_security(host: str, port: int) -> TransportSecuritySettings:
-    """Use exact localhost host/origin allowlists instead of wildcard ports."""
     if host == "::1":
         allowed_hosts = [f"[::1]:{port}"]
         allowed_origins = [f"http://[::1]:{port}"]
