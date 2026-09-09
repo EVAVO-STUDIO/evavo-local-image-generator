@@ -1,75 +1,76 @@
 #!/usr/bin/env python3
-"""
-Automated EVAVO Generation Launch
-Starts all services and runs the complete test suite
+"""Compatibility launcher for explicit EVAVO image generation.
+
+This file no longer launches hardcoded ComfyUI/Ollama processes or claims
+multimodal outputs. It delegates readiness and generation to the canonical
+controller/agent doctor.
 """
 
+from __future__ import annotations
+
+import argparse
 import subprocess
-import time
 import sys
-import os
-import json
-from datetime import datetime
 from pathlib import Path
+from typing import List
 
-print("\n" + "="*70)
-print("  EVAVO MULTI-MODAL GENERATION LAUNCHER")
-print("="*70 + "\n")
+ROOT = Path(__file__).resolve().parent
+CONTROLLER = ROOT / "evavo.py"
+DOCTOR = ROOT / "agent-doctor.py"
 
-# Paths
-COMFYUI_PATH = r"C:\AI\ComfyUI"
-OLLAMA_CMD = "ollama serve"
-TEST_SCRIPT = r"C:\Gitrepos\evavo-local-image-generator\COMPLETE-MULTIMODAL-TEST.py"
-OUTPUT_DIR = Path(r"C:\Gitrepos\evavo-local-image-generator")
 
-print(f"[{datetime.now().strftime('%H:%M:%S')}] Starting ComfyUI from: {COMFYUI_PATH}\n")
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Launch the canonical EVAVO native image pipeline")
+    parser.add_argument("--prompts", nargs="+")
+    parser.add_argument("--examples", action="store_true")
+    parser.add_argument("--project", default="launch-generation")
+    parser.add_argument("--concurrency", type=int, default=2)
+    parser.add_argument("--endpoint", default="http://127.0.0.1:8188")
+    parser.add_argument("--output-dir")
+    parser.add_argument("--workflow")
+    parser.add_argument("--no-wait", action="store_true")
+    parser.add_argument("--skip-ready-check", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
 
-try:
-    # Start ComfyUI in background
-    print("Starting ComfyUI server...")
-    comfyui_process = subprocess.Popen(
-        ["python", "main.py"],
-        cwd=COMFYUI_PATH,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    print(f"✓ ComfyUI process started (PID: {comfyui_process.pid})")
-    time.sleep(3)
-    
-    # Start Ollama in background
-    print("\nStarting Ollama server...")
-    ollama_process = subprocess.Popen(
-        OLLAMA_CMD,
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
-    print(f"✓ Ollama process started (PID: {ollama_process.pid})")
-    time.sleep(2)
-    
-    # Wait for services to be ready
-    print("\n[Waiting 10 seconds for services to initialize...]")
-    time.sleep(10)
-    
-    # Run test suite
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Launching test suite...\n")
-    print("="*70)
-    
-    result = subprocess.run([sys.executable, TEST_SCRIPT], cwd=OUTPUT_DIR)
-    
-    print("="*70)
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Generation complete!")
-    print("\nCheck output directories:")
-    print("  ✓ evavo-images/     (45 image variations)")
-    print("  ✓ evavo-videos/     (3 videos)")
-    print("  ✓ evavo-audio/      (6 audio files)")
-    print("  ✓ evavo-text/       (3 text outputs)")
-    print("  ✓ evavo-particles/  (4 particle configs)")
-    print("  ✓ evavo-models/     (6 3D models)")
-    print("  ✓ evavo-textures/   (4 PBR texture sets)")
-    print("  ✓ evavo-state/      (test results & metrics)")
-    
-except Exception as e:
-    print(f"\n✗ Error: {e}")
-    sys.exit(1)
+    if not args.prompts and not args.examples:
+        parser.error("provide --prompts or explicit --examples; this launcher no longer starts sample/multimodal generation automatically")
+    if args.concurrency < 1 or args.concurrency > 16:
+        parser.error("--concurrency must be between 1 and 16")
 
+    if not args.skip_ready_check:
+        ready = subprocess.run(
+            [sys.executable, str(DOCTOR), "--repair", "--provision", "--skip-tests"],
+            cwd=str(ROOT),
+        )
+        if ready.returncode != 0:
+            return ready.returncode
+
+    command: List[str] = [
+        sys.executable,
+        str(CONTROLLER),
+        "generate",
+        "--project",
+        args.project,
+        "--concurrency",
+        str(args.concurrency),
+        "--endpoint",
+        args.endpoint,
+    ]
+    if args.prompts:
+        command.extend(["--prompts", *args.prompts])
+    else:
+        command.append("--examples")
+    if not args.no_wait:
+        command.append("--wait")
+    if args.output_dir:
+        command.extend(["--output-dir", args.output_dir])
+    if args.workflow:
+        command.extend(["--workflow", args.workflow])
+    if args.json:
+        command.append("--json")
+    return subprocess.run(command, cwd=str(ROOT)).returncode
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
