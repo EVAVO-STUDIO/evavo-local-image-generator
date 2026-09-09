@@ -13,7 +13,7 @@ import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict
 
 from evavo_local_image_generator.quality_metrics import image_quality_diagnostics
 
@@ -84,6 +84,21 @@ def _format_metric(value: Any, digits: int = 3) -> str:
     return f"{number:.{digits}f}"
 
 
+def _lora_fields(result: Dict[str, Any]) -> Dict[str, Any]:
+    lora = result.get("lora")
+    if not isinstance(lora, dict):
+        return {
+            "lora_name": None,
+            "lora_model_strength": None,
+            "lora_clip_strength": None,
+        }
+    return {
+        "lora_name": lora.get("name"),
+        "lora_model_strength": lora.get("model_strength"),
+        "lora_clip_strength": lora.get("clip_strength"),
+    }
+
+
 def build_report(manifest_path: str | Path) -> Dict[str, Any]:
     manifest_file = Path(manifest_path).expanduser().resolve()
     manifest = _load_manifest(manifest_file)
@@ -99,6 +114,14 @@ def build_report(manifest_path: str | Path) -> Dict[str, Any]:
         if not isinstance(outputs, list):
             continue
         elapsed = _safe_float(result.get("elapsed_s"))
+        recipe = {
+            "requested_seed": result.get("seed"),
+            "submitted_seed": result.get("submitted_seed", result.get("seed")),
+            "checkpoint": result.get("checkpoint", manifest.get("checkpoint")),
+            "workflow_sha256": result.get("workflow_sha256"),
+            "workflow_node_count": result.get("workflow_node_count"),
+            **_lora_fields(result),
+        }
         for output_index, output in enumerate(outputs):
             if not isinstance(output, dict):
                 continue
@@ -135,6 +158,7 @@ def build_report(manifest_path: str | Path) -> Dict[str, Any]:
                     "render_passes": result.get("render_passes"),
                     "expected_output_width": result.get("expected_output_width"),
                     "expected_output_height": result.get("expected_output_height"),
+                    **recipe,
                     **metrics,
                 }
             )
@@ -164,7 +188,7 @@ def build_report(manifest_path: str | Path) -> Dict[str, Any]:
         }
 
     metrics_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_manifest": str(manifest_file),
         "diagnostic_warning": (
             "Technical metrics are descriptive diagnostics, not aesthetic quality scores. "
@@ -182,8 +206,16 @@ def build_report(manifest_path: str | Path) -> Dict[str, Any]:
         "prompt_id",
         "profile",
         "seed",
+        "requested_seed",
+        "submitted_seed",
         "output_index",
         "path",
+        "checkpoint",
+        "workflow_sha256",
+        "workflow_node_count",
+        "lora_name",
+        "lora_model_strength",
+        "lora_clip_strength",
         "elapsed_s",
         "seconds_per_megapixel",
         "render_passes",
@@ -216,6 +248,16 @@ def build_report(manifest_path: str | Path) -> Dict[str, Any]:
             href = html.escape(row["relative_path"], quote=True)
             dimensions = f"{row['width']}×{row['height']}"
             passes = row.get("render_passes") or "—"
+            workflow = str(row.get("workflow_sha256") or "")
+            workflow_short = html.escape(workflow[:12] if workflow else "—")
+            checkpoint = html.escape(str(row.get("checkpoint") or "—"))
+            lora_name = row.get("lora_name")
+            lora_text = "none"
+            if lora_name:
+                lora_text = (
+                    f"{html.escape(str(lora_name))} · model {_format_metric(row.get('lora_model_strength'), 2)}"
+                    f" · clip {_format_metric(row.get('lora_clip_strength'), 2)}"
+                )
             group_cards.append(
                 f"""
                 <article class="card">
@@ -224,6 +266,9 @@ def build_report(manifest_path: str | Path) -> Dict[str, Any]:
                   <dl>
                     <dt>Output</dt><dd>{dimensions} · {row['megapixels']:.2f} MP · {passes} pass(es)</dd>
                     <dt>Time</dt><dd>{_format_metric(row['elapsed_s'], 2)} s · {_format_metric(row['seconds_per_megapixel'], 2)} s/MP</dd>
+                    <dt>Recipe</dt><dd>seed {html.escape(str(row.get('submitted_seed') or '—'))} · workflow {workflow_short}</dd>
+                    <dt>Model</dt><dd>{checkpoint}</dd>
+                    <dt>LoRA</dt><dd>{lora_text}</dd>
                     <dt>Luma</dt><dd>{_format_metric(row['luminance_mean'])} mean · {_format_metric(row['luminance_std'])} contrast</dd>
                     <dt>Clipping</dt><dd>{_format_metric(row['near_black_fraction'] * 100, 2)}% black · {_format_metric(row['near_white_fraction'] * 100, 2)}% white</dd>
                     <dt>Colour</dt><dd>{_format_metric(row['saturation_proxy_mean'])} saturation proxy</dd>
@@ -266,7 +311,7 @@ section {{ margin-top: 36px; }}
 .card h3 {{ margin: 2px 0 10px; }}
 .card img {{ width: 100%; height: auto; display: block; border-radius: 8px; background: #09090b; }}
 dl {{ display: grid; grid-template-columns: 82px 1fr; gap: 6px 10px; font-size: 13px; }}
-dt {{ color: #a1a1aa; }} dd {{ margin: 0; }}
+dt {{ color: #a1a1aa; }} dd {{ margin: 0; overflow-wrap: anywhere; }}
 table {{ border-collapse: collapse; width: 100%; overflow-x: auto; display: block; }}
 th, td {{ padding: 9px 12px; border-bottom: 1px solid #27272a; text-align: right; white-space: nowrap; }}
 th:first-child, td:first-child {{ text-align: left; }}
@@ -275,7 +320,7 @@ code {{ color: #fca5a5; }}
 </head>
 <body><main>
 <h1>EVAVO Quality Benchmark Review</h1>
-<p class="lede">Same-prompt, same-seed comparison. Technical metrics are diagnostics only. Do not choose a production profile from entropy, edge energy, file size, or timing alone; inspect composition, prompt adherence, anatomy/geometry, materials, lighting and artifact rate at fit-to-screen and 100% zoom, then complete <code>human_review.csv</code>.</p>
+<p class="lede">Same-prompt, same-seed comparison. Technical metrics are diagnostics only. Do not choose a production profile from entropy, edge energy, file size, or timing alone; inspect composition, prompt adherence, anatomy/geometry, materials, lighting and artifact rate at fit-to-screen and 100% zoom, then complete <code>human_review.csv</code>. Recipe fields bind each score to the exact checkpoint name, submitted seed, workflow fingerprint and LoRA strengths used for that render.</p>
 <section><h2>Profile diagnostics</h2>
 <table><thead><tr><th>Profile</th><th>Outputs</th><th>Median s</th><th>Median s/MP</th><th>Mean MP</th><th>Mean contrast</th><th>Mean detail energy</th></tr></thead><tbody>{summary_rows}</tbody></table>
 </section>
