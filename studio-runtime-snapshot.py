@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,6 +36,15 @@ def _file_receipt(path: Path) -> dict[str, Any]:
     return {"path": str(resolved), "bytes": resolved.stat().st_size, "sha256": _sha256(resolved)}
 
 
+def _subprocess_kwargs() -> dict[str, Any]:
+    if os.name != "nt":
+        return {}
+    flags = 0
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        flags |= subprocess.CREATE_NO_WINDOW
+    return {"creationflags": flags} if flags else {}
+
+
 def _run(argv: list[str], *, cwd: Path | None = None, timeout: float = 60.0) -> dict[str, Any]:
     try:
         result = subprocess.run(
@@ -43,20 +53,8 @@ def _run(argv: list[str], *, cwd: Path | None = None, timeout: float = 60.0) -> 
             capture_output=True,
             text=True,
             timeout=timeout,
-            windowsHide=True,
+            **_subprocess_kwargs(),
         )
-    except TypeError:
-        # Python on non-Windows does not accept windowsHide.
-        try:
-            result = subprocess.run(
-                argv,
-                cwd=str(cwd) if cwd else None,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return {"ok": False, "argv": argv, "error": str(exc)}
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "argv": argv, "error": str(exc)}
     return {
@@ -66,6 +64,28 @@ def _run(argv: list[str], *, cwd: Path | None = None, timeout: float = 60.0) -> 
         "stdout": result.stdout.strip()[:20000],
         "stderr": result.stderr.strip()[:8000],
     }
+
+
+def _resolve_repo_python(root: Path, explicit: str = "") -> str:
+    requested = str(explicit or "").strip()
+    if requested:
+        candidate = Path(requested).expanduser()
+        if candidate.is_file():
+            return str(candidate.resolve())
+        resolved = shutil.which(requested)
+        if resolved:
+            return resolved
+        raise ValueError(f"requested Python executable was not found: {requested}")
+
+    for candidate in (
+        root / ".venv" / "Scripts" / "python.exe",
+        root / "venv" / "Scripts" / "python.exe",
+        root / ".venv" / "bin" / "python",
+        root / "venv" / "bin" / "python",
+    ):
+        if candidate.is_file() and not candidate.is_symlink():
+            return str(candidate.resolve())
+    return sys.executable
 
 
 def _json_from_command(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -269,6 +289,7 @@ def _three_d(root: Path, python: str, worker_endpoint: str | None) -> tuple[dict
 
     return {
         "files": files,
+        "python_executable": python,
         "python": python_receipt,
         "doctor": doctor,
         "doctor_command": doctor_command,
@@ -284,7 +305,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Capture EVAVO sibling-Studio runtime evidence")
     parser.add_argument("studio", choices=["atmosphere", "3d"])
     parser.add_argument("--root", required=True)
-    parser.add_argument("--python", default="python")
+    parser.add_argument("--python", default="", help="3D Python override; default resolves the repo .venv first")
     parser.add_argument("--worker-endpoint", default="")
     parser.add_argument("--output", required=True)
     parser.add_argument("--require-complete", action="store_true")
@@ -300,7 +321,12 @@ def main() -> int:
         detail, studio_failures = _atmosphere(root)
         failures.extend(studio_failures)
     else:
-        detail, studio_failures = _three_d(root, args.python, args.worker_endpoint.strip() or None)
+        try:
+            three_d_python = _resolve_repo_python(root, args.python)
+        except ValueError as exc:
+            three_d_python = args.python or sys.executable
+            failures.append(str(exc))
+        detail, studio_failures = _three_d(root, three_d_python, args.worker_endpoint.strip() or None)
         failures.extend(studio_failures)
 
     git = _git_snapshot(root) if root.is_dir() else {"available": False, "head": None, "dirty": None}
@@ -308,7 +334,7 @@ def main() -> int:
         failures.append(f"{args.studio} root is not an attestable Git checkout")
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "captured_at": datetime.now().astimezone().isoformat(),
         "studio": args.studio,
         "root": str(root),
