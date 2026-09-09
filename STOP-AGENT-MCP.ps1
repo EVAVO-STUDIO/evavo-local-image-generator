@@ -36,7 +36,7 @@ function Test-EvavoMcpListenerIdentity($Listener) {
     $executable = [string]$process.ExecutablePath
     $escapedPath = [regex]::Escape($Path)
     $requiredArgs = @(
-        "evavo_local_image_generator\.mcp_server",
+        "evavo_local_image_generator\.(?:mcp_entry|mcp_server)",
         "--transport\s+streamable-http",
         "--host\s+127\.0\.0\.1",
         "--port\s+$Port(?:\s|$)",
@@ -46,10 +46,14 @@ function Test-EvavoMcpListenerIdentity($Listener) {
         if ($commandLine -notmatch $pattern) { return $false }
     }
 
-    if ($executable -and [System.StringComparer]::OrdinalIgnoreCase.Equals([System.IO.Path]::GetFullPath($executable), [System.IO.Path]::GetFullPath($python))) {
+    $isValidatedEntry = $commandLine -match "evavo_local_image_generator\.mcp_entry"
+    if ($isValidatedEntry -and $executable -and [System.StringComparer]::OrdinalIgnoreCase.Equals([System.IO.Path]::GetFullPath($executable), [System.IO.Path]::GetFullPath($python))) {
         return $true
     }
 
+    # Legacy mcp_server migration/shutdown is allowed only when the parent is
+    # this exact repository launcher. Unknown manually-created Python listeners
+    # are not adopted merely because they import a similarly named module.
     $parentPid = [int]$process.ParentProcessId
     if ($parentPid -gt 0) {
         $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$parentPid" -ErrorAction SilentlyContinue
