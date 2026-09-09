@@ -62,10 +62,21 @@ function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
     return "set `"$Name=$safe`""
 }
 
+# COMFYUI_ENDPOINT is canonical. Migrate a legacy alias value into the canonical
+# variable rather than persisting both and allowing different entry points to
+# target different renderers after reboot.
+$comfyEndpoint = [Environment]::GetEnvironmentVariable("COMFYUI_ENDPOINT")
+if (-not $comfyEndpoint) {
+    $comfyEndpoint = [Environment]::GetEnvironmentVariable("EVAVO_COMFYUI_ENDPOINT")
+}
+if (-not $comfyEndpoint) {
+    $comfyEndpoint = "http://127.0.0.1:8188"
+}
+
 $persistedEnvironment = [ordered]@{
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
     "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
-    "EVAVO_COMFYUI_ENDPOINT" = "http://127.0.0.1:8188"
+    "COMFYUI_ENDPOINT" = $comfyEndpoint
     "EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path $repo ".evavo\outputs")
 }
 $nonSecretEnvironment = @(
@@ -113,6 +124,7 @@ Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 Write-Host "Installed EVAVO agent MCP autostart:" -ForegroundColor Green
 Write-Host "  $launcher"
 Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in without rerunning the full integration suite." -ForegroundColor Green
+Write-Host "ComfyUI endpoint: $comfyEndpoint (persisted as canonical COMFYUI_ENDPOINT)" -ForegroundColor Green
 Write-Host "Safe local ComfyUI/checkpoint provisioning settings were embedded for reboot persistence." -ForegroundColor Green
 Write-Host "MCP file policy roots were persisted when explicitly configured; arbitrary output/workflow paths remain denied." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
