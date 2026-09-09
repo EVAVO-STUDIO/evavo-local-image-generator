@@ -22,6 +22,32 @@ function Test-Truthy([string]$Value) {
     return $Value.Trim().ToLowerInvariant() -in @("1", "true", "yes", "on")
 }
 
+function Assert-PowerShellSyntax {
+    $scripts = @(
+        "INSTALL-CLAUDE-MCP.ps1",
+        "START-AGENT-MCP.ps1",
+        "INSTALL-AGENT-MCP-AUTOSTART.ps1",
+        "INSTALL-CHATGPT-MCP-TUNNEL.ps1",
+        "SAVE-CHATGPT-TUNNEL-KEY.ps1",
+        "START-CHATGPT-MCP-TUNNEL.ps1",
+        "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
+        "CHATGPT-TUNNEL-DOCTOR.ps1"
+    )
+    foreach ($name in $scripts) {
+        $path = Join-Path $PSScriptRoot $name
+        if (-not (Test-Path $path)) {
+            Fail "Required PowerShell script is missing: $name" 3
+        }
+        $tokens = $null
+        $errors = $null
+        [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+        if ($errors -and $errors.Count -gt 0) {
+            $detail = ($errors | ForEach-Object { "$($_.Extent.StartLineNumber):$($_.Extent.StartColumnNumber) $($_.Message)" }) -join "; "
+            Fail "PowerShell syntax validation failed for $name: $detail" 3
+        }
+    }
+}
+
 if ($McpPort -lt 1 -or $McpPort -gt 65535) {
     Fail "MCP port must be between 1 and 65535." 2
 }
@@ -50,6 +76,10 @@ git pull --ff-only origin main
 if ($LASTEXITCODE -ne 0) {
     Fail "git pull --ff-only origin main failed." 3
 }
+
+Write-Host "Parsing canonical PowerShell agent/tunnel scripts before configuration..." -ForegroundColor Cyan
+Assert-PowerShellSyntax
+Write-Host "PowerShell syntax validation passed." -ForegroundColor Green
 
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
@@ -175,10 +205,10 @@ if (-not $SkipChatGPTTunnel -and $tunnelId) {
     $hasProcessKey = [bool]$env:CONTROL_PLANE_API_KEY
 
     if ($hasDpapiKey -or $hasProcessKey) {
-        Write-Host "Validating OpenAI tunnel control-plane/profile configuration..." -ForegroundColor Cyan
+        Write-Host "Validating OpenAI tunnel local preflight/profile configuration..." -ForegroundColor Cyan
         & (Join-Path $PSScriptRoot "CHATGPT-TUNNEL-DOCTOR.ps1") -RequireRuntimeKey
         if ($LASTEXITCODE -ne 0) {
-            Fail "ChatGPT tunnel doctor found a blocking profile/control-plane problem." 3
+            Fail "ChatGPT tunnel doctor found a blocking profile/preflight problem." 3
         }
     }
 
@@ -223,11 +253,12 @@ if (-not $SkipChatGPTTunnel -and $tunnelId) {
 }
 elseif (-not $SkipChatGPTTunnel) {
     Write-Host "ChatGPT Secure MCP Tunnel is not configured because no OpenAI tunnel ID is available." -ForegroundColor Yellow
-    Write-Host "Once a tunnel ID exists, set EVAVO_OPENAI_TUNNEL_ID=tunnel_... and rerun this updater." -ForegroundColor Yellow
+    Write-Host "Once a tunnel ID exists, set EVAVO_OPENAI_TUNNEL_ID=tunnel_<32 lowercase hex characters> and rerun this updater." -ForegroundColor Yellow
 }
 
 Write-Host ""
 Write-Host "EVAVO workstation setup completed." -ForegroundColor Green
+Write-Host "  PowerShell syntax validation: passed" -ForegroundColor Green
 Write-Host "  Dependencies: installed/validated" -ForegroundColor Green
 Write-Host "  Provisioning/runtime safety tests: passed" -ForegroundColor Green
 Write-Host "  Backend repair/file-boundary tests: passed" -ForegroundColor Green
