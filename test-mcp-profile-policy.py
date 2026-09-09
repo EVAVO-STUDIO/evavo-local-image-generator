@@ -27,6 +27,9 @@ def assert_profile_contract(test: unittest.TestCase, source: str) -> None:
     test.assertNotIn('"EVAVO_COMFYUI_ENDPOINT" =', source)
     test.assertIn(POLICY_COMMAND, source)
     test.assertIn("MCP filesystem policy is invalid", source)
+    test.assertIn('$generationOutputDir = [string]$policyResult.policy.default_output_root', source)
+    test.assertIn('"EVAVO_GENERATION_OUTPUT_DIR" = $generationOutputDir', source)
+    test.assertNotIn('"EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path', source)
 
 
 class McpProfilePolicyTests(unittest.TestCase):
@@ -41,20 +44,24 @@ class McpProfilePolicyTests(unittest.TestCase):
     def test_claude_policy_validation_precedes_any_config_write_or_backup(self) -> None:
         source = (ROOT / "INSTALL-CLAUDE-MCP.ps1").read_text(encoding="utf-8")
         policy = source.index(POLICY_COMMAND)
+        policy_parse = source.index('$generationOutputDir = [string]$policyResult.policy.default_output_root')
         create_dir = source.index('New-Item -ItemType Directory -Force -Path $configDir')
         backup = source.index("Copy-Item $configPath $backup")
         write = source.index("Set-Content -Path $configPath")
-        self.assertLess(policy, create_dir)
+        self.assertLess(policy, policy_parse)
+        self.assertLess(policy_parse, create_dir)
         self.assertLess(policy, backup)
         self.assertLess(policy, write)
 
     def test_http_policy_validation_precedes_startup_directory_and_launcher_write(self) -> None:
         source = (ROOT / "INSTALL-AGENT-MCP-AUTOSTART.ps1").read_text(encoding="utf-8")
         policy = source.index(POLICY_COMMAND)
+        policy_parse = source.index('$generationOutputDir = [string]$policyResult.policy.default_output_root')
         create_dir = source.index('New-Item -ItemType Directory -Force -Path $startupDir')
         write = source.index("Set-Content -Path $launcher")
         start = source.index('Start-Process -FilePath "powershell.exe"')
-        self.assertLess(policy, create_dir)
+        self.assertLess(policy, policy_parse)
+        self.assertLess(policy_parse, create_dir)
         self.assertLess(policy, write)
         self.assertLess(policy, start)
 
