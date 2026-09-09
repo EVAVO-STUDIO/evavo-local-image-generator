@@ -31,7 +31,11 @@ if ($LASTEXITCODE -ne 0) {
     throw "Offline quality/LoRA regressions failed. Sweep was not started."
 }
 
-$resolvedOutputRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $OutputRoot))
+$resolvedOutputRoot = if ([System.IO.Path]::IsPathRooted($OutputRoot)) {
+    [System.IO.Path]::GetFullPath($OutputRoot)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $OutputRoot))
+}
 New-Item -ItemType Directory -Force -Path $resolvedOutputRoot | Out-Null
 $startedAt = Get-Date
 
