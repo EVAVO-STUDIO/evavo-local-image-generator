@@ -141,7 +141,7 @@ if ($backendDoctorCode -ne 0 -and -not $SkipComfyUIDependencyRepair) {
         Write-Host "No admissible automatic core dependency repair completed. Strict doctor remains authoritative." -ForegroundColor Yellow
     }
 }
-elif ($backendDoctorCode -ne 0 -and $SkipComfyUIDependencyRepair) {
+elseif ($backendDoctorCode -ne 0 -and $SkipComfyUIDependencyRepair) {
     $dependencyRecoveryStatus = "disabled"
 }
 
@@ -264,7 +264,7 @@ if (-not $SkipChatGPTTunnel -and $tunnelId) {
         Write-Host "Set CONTROL_PLANE_API_KEY temporarily or run SAVE-CHATGPT-TUNNEL-KEY.ps1 to enable the outbound tunnel." -ForegroundColor Yellow
     }
 }
-elif (-not $SkipChatGPTTunnel) {
+elseif (-not $SkipChatGPTTunnel) {
     Write-Host "ChatGPT Secure MCP Tunnel is not configured because no OpenAI tunnel ID is available." -ForegroundColor Yellow
     Write-Host "Once a tunnel ID exists, set EVAVO_OPENAI_TUNNEL_ID=tunnel_<32 lowercase hex characters> and rerun this updater." -ForegroundColor Yellow
 }
