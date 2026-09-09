@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from evavo_local_image_generator.backends import ComfyUIBackend
 from evavo_local_image_generator.comfyui_runtime import discover_comfyui, ensure_comfyui, native_health
@@ -82,12 +82,15 @@ def _checkpoint_source_configured() -> bool:
     return bool(os.getenv("EVAVO_CHECKPOINT_FILE") or os.getenv("EVAVO_CHECKPOINT_URL"))
 
 
+def _install_app_root(install: Any) -> Path:
+    root = Path(install.root)
+    return root / "ComfyUI" if getattr(install, "portable", False) else root
+
+
 def _filesystem_checkpoints(installs: List[Any]) -> List[str]:
     found: List[str] = []
     for install in installs:
-        root = Path(install.root)
-        app_root = root / "ComfyUI" if getattr(install, "portable", False) else root
-        directory = app_root / "models" / "checkpoints"
+        directory = _install_app_root(install) / "models" / "checkpoints"
         if not directory.is_dir():
             continue
         for path in directory.iterdir():
@@ -96,13 +99,18 @@ def _filesystem_checkpoints(installs: List[Any]) -> List[str]:
     return found
 
 
-def _provision_comfyui() -> tuple[bool, str]:
+def _provision_comfyui(*, target: Optional[Path] = None, checkpoint_only: bool = False) -> tuple[bool, str]:
     script = ROOT / "provision-comfyui.py"
     if not script.is_file():
         return False, f"missing {script.name}"
+    command = [sys.executable, str(script), "--json"]
+    if target is not None:
+        command.extend(["--target", str(target)])
+    if checkpoint_only:
+        command.append("--checkpoint-only")
     try:
         result = subprocess.run(
-            [sys.executable, str(script), "--json"],
+            command,
             cwd=str(ROOT),
             capture_output=True,
             text=True,
@@ -115,9 +123,9 @@ def _provision_comfyui() -> tuple[bool, str]:
     except json.JSONDecodeError:
         payload = None
     if result.returncode == 0 and isinstance(payload, dict) and payload.get("ok"):
-        target = payload.get("target", "unknown")
+        provisioned_target = payload.get("target", "unknown")
         models = payload.get("verification", {}).get("checkpoint_files", []) if isinstance(payload.get("verification"), dict) else []
-        return True, f"provisioned {target}; checkpoints={len(models)}"
+        return True, f"{payload.get('status', 'provisioned')} {provisioned_target}; checkpoints={len(models)}"
     detail = ""
     if isinstance(payload, dict):
         detail = str(payload.get("message", ""))
@@ -144,12 +152,17 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
     if repair and provision:
         missing_runtime = not installs
         configured_model_missing = bool(installs) and _checkpoint_source_configured() and not _filesystem_checkpoints(installs)
-        if missing_runtime or configured_model_missing:
+        if missing_runtime:
             provision_attempted = True
             provision_ok, provision_detail = _provision_comfyui()
             add("comfyui_provision", provision_ok, provision_detail, severity="error", repaired=provision_ok)
             if provision_ok:
                 installs = discover_comfyui()
+        elif configured_model_missing:
+            provision_attempted = True
+            target = Path(installs[0].root)
+            provision_ok, provision_detail = _provision_comfyui(target=target, checkpoint_only=True)
+            add("checkpoint_provision", provision_ok, provision_detail, severity="error", repaired=provision_ok)
 
     add(
         "comfyui_install",
