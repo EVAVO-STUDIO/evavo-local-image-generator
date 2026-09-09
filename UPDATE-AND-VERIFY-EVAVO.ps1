@@ -177,6 +177,15 @@ if ($LASTEXITCODE -ne 0) {
     Fail "Agent doctor found a blocking generation-contract problem after agent configuration." 3
 }
 
+# A healthy port + compatible workflow is still not execution proof. Submit one
+# bounded real prompt through the active owner workflow and require a downloaded,
+# signature-validated image before setup can report success.
+Write-Host "Running real native generation smoke proof..." -ForegroundColor Cyan
+& $python (Join-Path $PSScriptRoot "real-generation-smoke.py") --json
+if ($LASTEXITCODE -ne 0) {
+    Fail "Real native generation smoke proof failed. Setup will not report success until the active workflow actually renders a validated image." 3
+}
+
 Write-Host "Running final backend status..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "evavo.py") status
 if ($LASTEXITCODE -ne 0) {
@@ -280,6 +289,7 @@ Write-Host "  All registered safety/integration suites: passed" -ForegroundColor
 Write-Host "  Native generation contract preparation: passed" -ForegroundColor Green
 Write-Host "  Evidence-gated dependency recovery: $dependencyRecoveryStatus" -ForegroundColor $(if ($dependencyRecoveryStatus -eq "repaired") { "Green" } elseif ($dependencyRecoveryStatus -eq "not_needed") { "DarkGray" } else { "Yellow" })
 Write-Host "  Strict native generation bootstrap: passed" -ForegroundColor Green
+Write-Host "  Real native generation smoke proof: passed" -ForegroundColor Green
 if (-not $SkipAgentConfiguration) {
     Write-Host "  Claude stdio MCP: installed/updated" -ForegroundColor Green
     Write-Host "  Private HTTP MCP autostart: installed and started/reloaded" -ForegroundColor Green
