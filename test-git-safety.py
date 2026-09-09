@@ -56,13 +56,14 @@ class SafeMainGitTests(unittest.TestCase):
         )
         for remote in accepted:
             with self.subTest(remote=remote):
-                self.assertIsNotNone(safe_main_git.EXPECTED_ORIGIN_RE.search(remote))
+                self.assertIsNotNone(safe_main_git.EXPECTED_ORIGIN_RE.fullmatch(remote))
         for remote in (
             "https://github.com/someone/evavo-local-image-generator.git",
             "https://github.com/EVAVO-STUDIO/another-repo.git",
+            "https://evilgithub.com/EVAVO-STUDIO/evavo-local-image-generator.git",
         ):
             with self.subTest(remote=remote):
-                self.assertIsNone(safe_main_git.EXPECTED_ORIGIN_RE.search(remote))
+                self.assertIsNone(safe_main_git.EXPECTED_ORIGIN_RE.fullmatch(remote))
 
     def test_helper_has_no_destructive_git_repair_commands(self) -> None:
         source = (ROOT / "safe_main_git.py").read_text(encoding="utf-8").lower()
@@ -82,9 +83,11 @@ class SafeMainGitTests(unittest.TestCase):
         self.assertIn('branch != "main"', source)
         self.assertIn('remote", "get-url", "origin"', source)
         self.assertIn("EXPECTED_ORIGIN_RE", source)
+        self.assertIn("fullmatch(remote)", source)
         self.assertIn('rev-list", "--left-right", "--count", "HEAD...origin/main"', source)
         self.assertIn('push", "origin", "main:main"', source)
         self.assertIn('rev-parse", "origin/main"', source)
+        self.assertIn("working tree changed during verification", source)
 
     def test_historical_git_entry_points_delegate_or_validate_read_only(self) -> None:
         expected = {
