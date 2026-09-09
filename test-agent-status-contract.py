@@ -21,6 +21,7 @@ class AgentStatusContractTests(unittest.TestCase):
         self.assertNotIn("stop-process", lower)
         self.assertNotIn("taskkill", lower)
         self.assertNotIn("start-process", lower)
+        self.assertNotIn("-Method Post", SOURCE)
 
     def test_private_mcp_identity_is_checked(self) -> None:
         self.assertIn("Get-NetTCPConnection", SOURCE)
@@ -33,9 +34,20 @@ class AgentStatusContractTests(unittest.TestCase):
         self.assertIn("-SkipControlPlane", SOURCE)
         self.assertIn("CHATGPT-TUNNEL-DOCTOR.ps1", SOURCE)
 
-    def test_chatgpt_tunnel_is_not_required_for_local_ready_state(self) -> None:
+    def test_chatgpt_tunnel_and_gateway_are_not_required_for_local_ready_state(self) -> None:
         self.assertIn("$localReady = [bool]($repoOk -and $agentOk -and $backendOk)", SOURCE)
         self.assertIn("ChatGPT tunnel is optional for local/Claude use", SOURCE)
+        self.assertIn("Optional gateway/provider readiness is intentionally not part", SOURCE)
+        self.assertNotIn("$localReady = [bool]($repoOk -and $agentOk -and $backendOk -and $gateway", SOURCE)
+
+    def test_optional_gateway_services_are_reported_separately(self) -> None:
+        self.assertIn('[int]$GatewayPort = 8000', SOURCE)
+        self.assertIn('$gatewayBase = "http://127.0.0.1:$GatewayPort"', SOURCE)
+        self.assertIn('Invoke-LocalJson "$gatewayBase/health"', SOURCE)
+        self.assertIn('Invoke-LocalJson "$gatewayBase/services"', SOURCE)
+        self.assertIn("optional_gateway = $gateway", SOURCE)
+        for kind in ("image", "video", "audio", "3d"):
+            self.assertIn(f'"{kind}"', SOURCE)
 
 
 if __name__ == "__main__":
