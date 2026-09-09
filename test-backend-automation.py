@@ -114,6 +114,87 @@ class BackendAutomationTests(unittest.TestCase):
             self.assertEqual(inputs["checkpoint"], "test.safetensors")
             self.assertEqual(inputs["prefix"], "EVAVO/aliases")
 
+    def test_workflow_preflight_accepts_valid_literal_choices_and_connections(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        info = {
+            "UNETLoader": {"input": {"required": {"unet_name": [["available-unet.safetensors"], {}]}}},
+            "KSampler": {"input": {"required": {"model": ["MODEL", {}]}}},
+        }
+        workflow = {
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "available-unet.safetensors"}},
+            "2": {"class_type": "KSampler", "inputs": {"model": ["1", 0]}},
+        }
+        with patch.object(backend, "object_info", return_value=info):
+            result = backend.preflight_workflow(workflow)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["node_classes"], ["KSampler", "UNETLoader"])
+        self.assertEqual(result["invalid_choices"], [])
+
+    def test_workflow_preflight_rejects_missing_node_class(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        workflow = {"7": {"class_type": "MissingCustomNode", "inputs": {}}}
+        with patch.object(backend, "object_info", return_value={}):
+            with self.assertRaises(RuntimeError) as context:
+                backend.preflight_workflow(workflow)
+        message = str(context.exception)
+        self.assertIn("COMFYUI_WORKFLOW_PREFLIGHT_FAILED", message)
+        self.assertIn("MissingCustomNode", message)
+        self.assertIn('"missing_nodes"', message)
+
+    def test_workflow_preflight_rejects_missing_required_input(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        info = {"CLIPLoader": {"input": {"required": {"clip_name": [["clip.safetensors"], {}]}}}}
+        workflow = {"3": {"class_type": "CLIPLoader", "inputs": {}}}
+        with patch.object(backend, "object_info", return_value=info):
+            with self.assertRaises(RuntimeError) as context:
+                backend.preflight_workflow(workflow)
+        message = str(context.exception)
+        self.assertIn('"missing_inputs"', message)
+        self.assertIn("clip_name", message)
+
+    def test_workflow_preflight_rejects_unavailable_literal_model_choice(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        info = {"UNETLoader": {"input": {"required": {"unet_name": [["available.safetensors"], {}]}}}}
+        workflow = {"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "missing.safetensors"}}}
+        with patch.object(backend, "object_info", return_value=info):
+            with self.assertRaises(RuntimeError) as context:
+                backend.preflight_workflow(workflow)
+        message = str(context.exception)
+        self.assertIn('"invalid_choices"', message)
+        self.assertIn("missing.safetensors", message)
+        self.assertIn("available.safetensors", message)
+
+    def test_custom_queue_runs_preflight_before_prompt_submission(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with tempfile.TemporaryDirectory() as directory:
+            workflow = Path(directory) / "custom.json"
+            workflow.write_text(json.dumps({"1": {"class_type": "CustomNode", "inputs": {}}}), encoding="utf-8")
+            with (
+                patch.object(backend, "checkpoints", return_value=[]),
+                patch.object(backend, "preflight_workflow", side_effect=RuntimeError("preflight blocked")) as preflight,
+                patch.object(backend, "_request") as request,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "preflight blocked"):
+                    backend.queue_image("test", workflow_path=str(workflow))
+            preflight.assert_called_once()
+            request.assert_not_called()
+
+    def test_custom_queue_can_explicitly_disable_preflight(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with tempfile.TemporaryDirectory() as directory:
+            workflow = Path(directory) / "custom.json"
+            workflow.write_text(json.dumps({"1": {"class_type": "CustomNode", "inputs": {}}}), encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"EVAVO_PREFLIGHT_CUSTOM_WORKFLOW": "0"}, clear=False),
+                patch.object(backend, "checkpoints", return_value=[]),
+                patch.object(backend, "preflight_workflow") as preflight,
+                patch.object(backend, "_request", return_value={"prompt_id": "prompt-123", "node_errors": {}}) as request,
+            ):
+                queued = backend.queue_image("test", workflow_path=str(workflow))
+            preflight.assert_not_called()
+            request.assert_called_once()
+            self.assertEqual(queued["task_id"], "prompt-123")
+
     def test_output_image_rejects_unrecorded_file_outside_output_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
