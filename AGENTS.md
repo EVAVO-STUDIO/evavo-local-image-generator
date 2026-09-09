@@ -32,13 +32,20 @@ If the category is `custom_node_dependency`, do **not** mutate core ComfyUI requ
 - no arbitrary package name;
 - no arbitrary Python path;
 - no arbitrary ComfyUI path through MCP;
-- normal mutation requires structured `missing_dependency` evidence;
-- uses the discovered checkout's own `requirements.txt` and selected ComfyUI interpreter;
+- normal mutation requires current structured `missing_dependency` evidence;
+- targets the exact diagnosed ComfyUI workdir/interpreter when that evidence is available, otherwise the canonical discovery winner;
+- uses that checkout's own `requirements.txt` and selected ComfyUI interpreter;
 - never invokes a shell;
 - never starts, stops or broadly kills Python/ComfyUI processes;
-- returns a structured receipt.
+- returns a structured receipt proving the selected runtime.
 
-`force_sync=true` is an explicit operator/agent override, not the normal recovery path.
+`force_sync=true` is **not** ordinary agent authority. It is accepted only when the workstation owner has explicitly set:
+
+```text
+EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR=1
+```
+
+The canonical updater never sets that flag. Its automatic recovery uses only evidence-gated normal repair through `recover-comfyui.py`, then reruns strict doctor to prove recovery.
 
 ## Process safety
 
@@ -58,6 +65,19 @@ A `.lock` filename by itself is not proof of a live owner. Follow the repository
 A healthy HTTP port is not enough. Completion requires a real ComfyUI prompt that reaches a terminal successful history/job state and produces an image whose bytes pass EVAVO output validation.
 
 Do not describe queued work as completed. Do not describe a spawned process as a healthy renderer without the runtime receipt.
+
+Generation state is normalized as:
+
+```text
+queued
+running
+completed
+failed
+cancelled
+unknown
+```
+
+Use `cancel_generation` for one job. Never substitute broad `/interrupt` for targeted cancellation of a legacy running job.
 
 ## Workstation execution fallback
 
@@ -83,7 +103,7 @@ Preserve unrelated local progress and moving-main history.
 - verify the remote commit;
 - never `reset --hard`, `clean -fd`, blind-stash, destructive rebase or force-push to bypass divergence or dirty state.
 
-## Current shared MCP recovery tools
+## Current shared MCP recovery/control tools
 
 ```text
 ensure_backend
@@ -91,6 +111,8 @@ diagnose_backend
 last_startup_failure
 repair_backend_dependencies
 health_check
+generation_status
+cancel_generation
 discover_backends
 ```
 
