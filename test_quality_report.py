@@ -29,8 +29,6 @@ def _load_report_module():
 
 class QualityReportTests(unittest.TestCase):
     def _fixture_image(self, root: Path, name: str = "fixture.png") -> Path:
-        # Deterministic horizontal/vertical gradient with enough structure to
-        # exercise entropy, clipping, saturation and detail diagnostics.
         x = np.linspace(0, 255, 64, dtype=np.uint8)
         y = np.linspace(255, 0, 64, dtype=np.uint8)
         red = np.tile(x, (64, 1))
@@ -62,15 +60,26 @@ class QualityReportTests(unittest.TestCase):
             root = Path(value)
             image = self._fixture_image(root)
             manifest = root / "manifest.json"
+            workflow_sha = "a" * 64
             manifest.write_text(
                 json.dumps(
                     {
-                        "schema_version": 2,
+                        "schema_version": 3,
+                        "checkpoint": "sd_xl_base_1.0.safetensors",
                         "results": [
                             {
                                 "prompt_id": "product",
                                 "profile": "hero",
                                 "seed": 1337,
+                                "submitted_seed": 1337,
+                                "checkpoint": "sd_xl_base_1.0.safetensors",
+                                "workflow_sha256": workflow_sha,
+                                "workflow_node_count": 10,
+                                "lora": {
+                                    "name": "detail-style.safetensors",
+                                    "model_strength": 0.7,
+                                    "clip_strength": 0.6,
+                                },
                                 "status": "completed",
                                 "elapsed_s": 8.0,
                                 "render_passes": 2,
@@ -101,15 +110,26 @@ class QualityReportTests(unittest.TestCase):
             row = metrics_payload["rows"][0]
             self.assertEqual(row["profile"], "hero")
             self.assertEqual(row["render_passes"], 2)
+            self.assertEqual(row["submitted_seed"], 1337)
+            self.assertEqual(row["workflow_sha256"], workflow_sha)
+            self.assertEqual(row["workflow_node_count"], 10)
+            self.assertEqual(row["checkpoint"], "sd_xl_base_1.0.safetensors")
+            self.assertEqual(row["lora_name"], "detail-style.safetensors")
+            self.assertEqual(row["lora_model_strength"], 0.7)
+            self.assertEqual(row["lora_clip_strength"], 0.6)
             self.assertAlmostEqual(row["seconds_per_megapixel"], 8.0 / 0.004096, places=3)
 
             review_text = review.read_text(encoding="utf-8-sig")
             self.assertIn("production_usability", review_text)
             self.assertIn("artifact_freedom", review_text)
+            self.assertIn("workflow_sha256", review_text)
+            self.assertIn("lora_model_strength", review_text)
             html_text = report.read_text(encoding="utf-8")
             self.assertIn("Same-prompt, same-seed comparison", html_text)
             self.assertIn("hero", html_text)
             self.assertIn("Technical metrics are diagnostics only", html_text)
+            self.assertIn("detail-style.safetensors", html_text)
+            self.assertIn(workflow_sha[:12], html_text)
 
 
 if __name__ == "__main__":
