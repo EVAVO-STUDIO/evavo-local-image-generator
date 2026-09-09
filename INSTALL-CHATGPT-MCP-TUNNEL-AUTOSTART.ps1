@@ -1,6 +1,7 @@
 # Install/remove current-user Windows login autostart for the EVAVO ChatGPT tunnel.
-# The generated Startup command never contains CONTROL_PLANE_API_KEY. The key is
-# loaded at runtime from the process environment or the current-user DPAPI store.
+# The generated Startup command never contains CONTROL_PLANE_API_KEY. Login
+# persistence requires the current-user DPAPI key blob; an ephemeral process
+# environment key is intentionally not treated as reboot-persistent.
 
 param(
     [switch]$Uninstall,
@@ -14,10 +15,14 @@ Set-Location $PSScriptRoot
 if (-not $env:APPDATA) {
     throw "APPDATA is unavailable; current-user Windows Startup cannot be configured."
 }
+if (-not $env:LOCALAPPDATA) {
+    throw "LOCALAPPDATA is unavailable; Windows DPAPI tunnel-key storage cannot be verified."
+}
 
 $statePath = Join-Path $PSScriptRoot ".evavo\chatgpt-tunnel.json"
 $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
 $launcher = Join-Path $startupDir "EVAVO-ChatGPT-MCP-Tunnel.cmd"
+$keyPath = Join-Path $env:LOCALAPPDATA "EVAVO\Secure\chatgpt-tunnel-runtime-key.dpapi"
 
 if ($Uninstall) {
     Remove-Item -Path $launcher -Force -ErrorAction SilentlyContinue
@@ -54,13 +59,24 @@ if (-not (Test-Path $binary)) {
     throw "OpenAI tunnel-client is not installed. Run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
 }
 
-$keyAvailable = [bool]$env:CONTROL_PLANE_API_KEY
-$keyPath = $null
-if ($env:LOCALAPPDATA) {
-    $keyPath = Join-Path $env:LOCALAPPDATA "EVAVO\Secure\chatgpt-tunnel-runtime-key.dpapi"
+if (-not (Test-Path $keyPath)) {
+    throw "Tunnel login autostart requires the DPAPI key blob. Run SAVE-CHATGPT-TUNNEL-KEY.ps1 or temporarily set CONTROL_PLANE_API_KEY and run SAVE-CHATGPT-TUNNEL-KEY.ps1 -FromEnvironment."
 }
-if (-not $keyAvailable -and (-not $keyPath -or -not (Test-Path $keyPath))) {
-    throw "Tunnel autostart requires a runtime key. Set CONTROL_PLANE_API_KEY temporarily and run SAVE-CHATGPT-TUNNEL-KEY.ps1 -FromEnvironment, or run SAVE-CHATGPT-TUNNEL-KEY.ps1 interactively."
+# Verify decryptability in this exact Windows user context without printing the key.
+try {
+    $secure = Get-Content $keyPath -Raw | ConvertTo-SecureString
+    $credential = New-Object System.Management.Automation.PSCredential("evavo-tunnel", $secure)
+    $roundTrip = $credential.GetNetworkCredential().Password
+    if (-not $roundTrip) {
+        throw "decrypted key was empty"
+    }
+}
+catch {
+    throw "The DPAPI tunnel key cannot be decrypted by this Windows user. Re-run SAVE-CHATGPT-TUNNEL-KEY.ps1."
+}
+finally {
+    $roundTrip = $null
+    $credential = $null
 }
 
 function Get-ProfileTunnelProcess([string]$Name) {
@@ -97,6 +113,7 @@ Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 Write-Host "Installed EVAVO ChatGPT tunnel login autostart:" -ForegroundColor Green
 Write-Host "  $launcher" -ForegroundColor Green
 Write-Host "Profile: $Profile" -ForegroundColor Green
+Write-Host "Runtime key: Windows DPAPI current-user store" -ForegroundColor Green
 Write-Host "No plaintext OpenAI API key is stored in the Startup command." -ForegroundColor Green
 
 if (-not $existing) {
