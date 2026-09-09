@@ -1,4 +1,4 @@
-"""Offline regression tests for EVAVO production image quality profiles."""
+"""Offline regressions for EVAVO production quality profiles and gateway audio fallback."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from evavo_local_image_generator.quality_profiles import (
     recommended_sdxl_dimensions,
     resolve_quality_settings,
 )
+from test_kokoro_gateway_provider import KokoroGatewayProviderContractTests  # noqa: F401
 
 
 class StubQualityBackend(QualityComfyUIBackend):
