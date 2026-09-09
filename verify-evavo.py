@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Cross-platform structural and test verifier for EVAVO local image generation.
+"""Authoritative read-only verifier for EVAVO local image generation.
 
-This verifier is intentionally read-only. It checks the critical repository
-contract, compiles Python sources in memory, optionally asks PowerShell to parse
-supported Windows scripts, validates retained compatibility entry points, and
-can run every modern root/package test suite.
+The verifier checks critical repository contracts, compiles Python sources in
+memory, parses supported PowerShell scripts when available, validates retained
+compatibility entry points, and runs every modern test suite across the root,
+``tests/`` and package test surfaces.
 """
 
 from __future__ import annotations
@@ -23,9 +23,12 @@ ROOT = Path(__file__).resolve().parent
 
 CRITICAL_FILES: Sequence[str] = (
     ".mcp.json",
+    ".evavo/capabilities.json",
+    "EVAVO-CAPABILITIES.json",
     "evavo.py",
     "verify-evavo.py",
     "safe_main_git.py",
+    "safe_git_main.py",
     "evavo_operations.py",
     "evavo-wrapper.py",
     "generate-batch.py",
@@ -39,44 +42,23 @@ CRITICAL_FILES: Sequence[str] = (
     "EVAVO-GATEWAY.py",
     "EVAVO-SERVICE-MANAGER.py",
     "gateway-smoke-test.py",
-    "run_autonomous.py",
-    "EVAVO-AUTOMATION.py",
-    "EXECUTE-GENERATION.py",
-    "LAUNCH-GENERATION.py",
-    "RUN-GENERATION.py",
-    "RUN-FULL-GENERATION.py",
-    "LINUX_GENERATION_RUNNER.py",
-    "start_and_generate.py",
-    "demo_autonomous.py",
-    "setup-production.py",
-    "create-complete-production.py",
-    "COMPLETE-MULTIMODAL-TEST.py",
-    "TEST-ALL-AI-SYSTEMS.py",
-    "test-gateway.py",
-    "test-git-safety.py",
-    "test-bootstrap-production.py",
-    "test-legacy-compatibility.py",
-    "test_autonomous.py",
-    "test-operations.py",
-    "test-provisioning.py",
-    "test-backend-automation.py",
-    "test-batch-workflow-preflight.py",
-    "test-agent-integration.py",
-    "test-agent-doctor-workflows.py",
-    "test-chatgpt-tunnel.py",
-    "evavo_local_image_generator/tests/test_backends.py",
-    "evavo_local_image_generator/tests/test_generators.py",
-    "evavo_local_image_generator/tests/health_check.py",
-    "evavo_local_image_generator/tests/validate_setup.py",
+    "evavo_local_image_generator/provider_runner.py",
+    "evavo_local_image_generator/backends/comfyui_backend.py",
+    "evavo_local_image_generator/comfyui_runtime.py",
+    "evavo_local_image_generator/mcp_server.py",
     "UPDATE-AND-VERIFY-EVAVO.ps1",
     "INSTALL-CLAUDE-MCP.ps1",
     "START-AGENT-MCP.ps1",
+    "STOP-AGENT-MCP.ps1",
     "INSTALL-AGENT-MCP-AUTOSTART.ps1",
+    "SETUP-CHATGPT-EVAVO.ps1",
     "INSTALL-CHATGPT-MCP-TUNNEL.ps1",
     "SAVE-CHATGPT-TUNNEL-KEY.ps1",
     "START-CHATGPT-MCP-TUNNEL.ps1",
+    "STOP-CHATGPT-MCP-TUNNEL.ps1",
     "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
     "CHATGPT-TUNNEL-DOCTOR.ps1",
+    "AGENT-STATUS.ps1",
     "START-GATEWAY.ps1",
     "SETUP-MCP-INTEGRATION.ps1",
     "VERIFY-INSTALLATION.ps1",
@@ -101,29 +83,34 @@ CRITICAL_FILES: Sequence[str] = (
     "README.md",
     "CLAUDE.md",
     "AGENT-INTEGRATION.md",
+    "AGENT-RECOVERY.md",
     "AUTOMATION-GUIDE.md",
     "AUTONOMOUS-AUTOMATION.md",
     "AUTONOMOUS_SETUP.md",
     "DEPLOYMENT-CHECKLIST.md",
     "GATEWAY-INTEGRATION-GUIDE.md",
+    "GATEWAY-AUX-PROVIDERS.md",
+    "PROVIDER-INTEGRATION-GUIDE.md",
     "OPERATIONS-GUIDE.md",
     "CHATGPT-TUNNEL.md",
     "QUICK-REFERENCE.md",
-    "evavo_local_image_generator/backends/comfyui_backend.py",
-    "evavo_local_image_generator/comfyui_runtime.py",
-    "evavo_local_image_generator/mcp_server.py",
+    "PROJECT_SUMMARY.md",
 )
 
 POWERSHELL_SCRIPTS: Sequence[str] = (
     "UPDATE-AND-VERIFY-EVAVO.ps1",
     "INSTALL-CLAUDE-MCP.ps1",
     "START-AGENT-MCP.ps1",
+    "STOP-AGENT-MCP.ps1",
     "INSTALL-AGENT-MCP-AUTOSTART.ps1",
+    "SETUP-CHATGPT-EVAVO.ps1",
     "INSTALL-CHATGPT-MCP-TUNNEL.ps1",
     "SAVE-CHATGPT-TUNNEL-KEY.ps1",
     "START-CHATGPT-MCP-TUNNEL.ps1",
+    "STOP-CHATGPT-MCP-TUNNEL.ps1",
     "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
     "CHATGPT-TUNNEL-DOCTOR.ps1",
+    "AGENT-STATUS.ps1",
     "START-GATEWAY.ps1",
     "SETUP-MCP-INTEGRATION.ps1",
     "VERIFY-INSTALLATION.ps1",
@@ -175,8 +162,6 @@ LEGACY_DELEGATION_MARKERS: Mapping[str, Sequence[str]] = {
     "DO-THIS-TO-COMMIT.txt": ("safe_main_git.py", "git pull --ff-only origin main"),
 }
 
-# These are checked only on active, non-comment lines. Explanatory comments may
-# legitimately describe what was retired without causing a false failure.
 RETIRED_ACTIVE_PATTERNS: Sequence[str] = (
     "taskkill /f /im python.exe",
     "taskkill /im python.exe",
@@ -207,12 +192,20 @@ def _result(name: str, ok: bool, detail: str, *, severity: str = "error", skippe
 
 
 def discover_tests() -> List[str]:
-    """Discover modern tests by repository naming/location contract."""
+    """Discover every maintained Python test surface deterministically."""
     paths = [path for path in ROOT.glob("test-*.py") if path.is_file()]
     paths.extend(path for path in ROOT.glob("test_*.py") if path.is_file())
+
+    repository_tests = ROOT / "tests"
+    if repository_tests.is_dir():
+        paths.extend(path for path in repository_tests.glob("test_*.py") if path.is_file())
+        paths.extend(path for path in repository_tests.glob("test-*.py") if path.is_file())
+
     package_tests = ROOT / "evavo_local_image_generator" / "tests"
     if package_tests.is_dir():
         paths.extend(path for path in package_tests.glob("test_*.py") if path.is_file())
+        paths.extend(path for path in package_tests.glob("test-*.py") if path.is_file())
+
     return sorted({path.relative_to(ROOT).as_posix() for path in paths})
 
 
@@ -221,8 +214,11 @@ def _critical_python_files() -> List[Path]:
     package = ROOT / "evavo_local_image_generator"
     if package.is_dir():
         paths.extend(path for path in package.rglob("*.py") if "__pycache__" not in path.parts)
+    tests_dir = ROOT / "tests"
+    if tests_dir.is_dir():
+        paths.extend(path for path in tests_dir.rglob("*.py") if "__pycache__" not in path.parts)
     unique: List[Path] = []
-    seen = set()
+    seen: set[str] = set()
     for path in paths:
         resolved = path.resolve()
         key = os.path.normcase(str(resolved))
@@ -238,7 +234,6 @@ def verify_files() -> Dict[str, Any]:
 
 
 def verify_python_compile() -> Dict[str, Any]:
-    """Parse/compile Python sources in memory without creating __pycache__."""
     failures: List[str] = []
     checked = 0
     for path in _critical_python_files():
@@ -253,7 +248,7 @@ def verify_python_compile() -> Dict[str, Any]:
             failures.append(f"{path.relative_to(ROOT)}: {exc}")
     detail = f"compiled {checked} Python files in memory"
     if failures:
-        detail += "; failures: " + " | ".join(failures[:20])
+        detail += "; failures: " + " | ".join(failures[:30])
     return _result("python_compile", not failures, detail)
 
 
@@ -262,16 +257,13 @@ def _active_lines(source: str) -> List[str]:
     for raw in source.splitlines():
         stripped = raw.strip()
         lower = stripped.lower()
-        if not stripped:
-            continue
-        if stripped.startswith("#") or lower.startswith("rem ") or stripped.startswith("::"):
+        if not stripped or stripped.startswith("#") or lower.startswith("rem ") or stripped.startswith("::"):
             continue
         active.append(lower)
     return active
 
 
 def verify_legacy_entrypoints() -> Dict[str, Any]:
-    """Require canonical delegation and reject executable retired side effects."""
     failures: List[str] = []
     checked = 0
     for name, markers in LEGACY_DELEGATION_MARKERS.items():
@@ -295,7 +287,7 @@ def verify_legacy_entrypoints() -> Dict[str, Any]:
                 failures.append(f"{name}: contains retired active behavior {pattern!r}")
     detail = f"checked {checked} supported compatibility entry points"
     if failures:
-        detail += "; failures: " + " | ".join(failures[:30])
+        detail += "; failures: " + " | ".join(failures[:40])
     return _result("legacy_entrypoint_safety", not failures, detail)
 
 
@@ -311,7 +303,7 @@ def verify_powershell_syntax(require: bool) -> Dict[str, Any]:
         return _result(
             "powershell_syntax",
             not require,
-            "PowerShell not available in this environment; the canonical Windows updater requires this check before configuration writes",
+            "PowerShell not available; canonical Windows setup requires this parse gate before configuration writes",
             severity=severity,
             skipped=not require,
         )
@@ -348,7 +340,7 @@ def verify_powershell_syntax(require: bool) -> Dict[str, Any]:
 
     detail = f"parsed {checked} PowerShell scripts with {executable}"
     if failures:
-        detail += "; failures: " + " | ".join(failures[:20])
+        detail += "; failures: " + " | ".join(failures[:30])
     return _result("powershell_syntax", not failures, detail)
 
 
@@ -406,7 +398,7 @@ def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify EVAVO repository/runtime contracts without mutating workstation configuration")
-    parser.add_argument("--full", action="store_true", help="Run every discovered modern root/package test suite after structural checks")
+    parser.add_argument("--full", action="store_true", help="Run every discovered root/repository/package safety and integration suite")
     parser.add_argument("--require-powershell", action="store_true", help="Fail when PowerShell is unavailable instead of reporting a skipped warning")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     args = parser.parse_args()
