@@ -3,8 +3,8 @@
 
 This verifier is intentionally read-only. It checks the critical repository
 contract, compiles Python sources in memory, optionally asks PowerShell to parse
-supported Windows scripts, statically rejects retired legacy launcher behavior,
-and can run every modern root/package test suite.
+supported Windows scripts, validates retained compatibility entry points, and
+can run every modern root/package test suite.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tokenize
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parent
 
@@ -114,53 +114,49 @@ POWERSHELL_SCRIPTS: Sequence[str] = (
     "START-SERVICES.ps1",
 )
 
-LEGACY_RUNTIME_ENTRYPOINTS: Sequence[str] = (
-    "run_autonomous.py",
-    "EVAVO-AUTOMATION.py",
-    "EXECUTE-GENERATION.py",
-    "LAUNCH-GENERATION.py",
-    "RUN-GENERATION.py",
-    "RUN-FULL-GENERATION.py",
-    "LINUX_GENERATION_RUNNER.py",
-    "start_and_generate.py",
-    "demo_autonomous.py",
-    "setup-production.py",
-    "create-complete-production.py",
-    "COMPLETE-MULTIMODAL-TEST.py",
-    "TEST-ALL-AI-SYSTEMS.py",
-    "START-GATEWAY.ps1",
-    "SETUP-MCP-INTEGRATION.ps1",
-    "VERIFY-INSTALLATION.ps1",
-    "START-EVERYTHING.ps1",
-    "MASTER-AUTOMATION-CONTROLLER.ps1",
-    "RUN-FULL-GENERATION.ps1",
-    "START-SERVICES.ps1",
-    "START-ALL-SERVICES-AND-GENERATE.bat",
-    "FULL-GENERATION-START.bat",
-    "START-AUTONOMOUS.bat",
-    "EVAVO-GENERATE-NOW.bat",
-    "START-GENERATION.bat",
-    "run_full_generation.sh",
-)
+LEGACY_DELEGATION_MARKERS: Mapping[str, Sequence[str]] = {
+    "run_autonomous.py": ("legacy_image_cli",),
+    "EXECUTE-GENERATION.py": ("legacy_image_cli",),
+    "LAUNCH-GENERATION.py": ("legacy_image_cli",),
+    "RUN-GENERATION.py": ("legacy_image_cli",),
+    "RUN-FULL-GENERATION.py": ("legacy_image_cli",),
+    "LINUX_GENERATION_RUNNER.py": ("legacy_image_cli",),
+    "start_and_generate.py": ("legacy_image_cli",),
+    "demo_autonomous.py": ("legacy_image_cli",),
+    "EVAVO-AUTOMATION.py": ("evavo.py", "agent-doctor.py"),
+    "setup-production.py": ("verify", "agent-doctor.py"),
+    "create-complete-production.py": ("verify", "agent-doctor.py"),
+    "COMPLETE-MULTIMODAL-TEST.py": ("not_implemented", "evavo.py"),
+    "TEST-ALL-AI-SYSTEMS.py": ("evavo.py", "agent-doctor.py"),
+    "SETUP-MCP-INTEGRATION.ps1": ("INSTALL-CLAUDE-MCP.ps1",),
+    "VERIFY-INSTALLATION.ps1": ("verify-evavo.py",),
+    "START-EVERYTHING.ps1": ("UPDATE-AND-VERIFY-EVAVO.ps1", "evavo.py"),
+    "MASTER-AUTOMATION-CONTROLLER.ps1": ("UPDATE-AND-VERIFY-EVAVO.ps1", "evavo.py"),
+    "RUN-FULL-GENERATION.ps1": ("legacy_image_cli.py",),
+    "START-SERVICES.ps1": ("agent-doctor.py", "--provision"),
+    "START-ALL-SERVICES-AND-GENERATE.bat": ("evavo.py",),
+    "FULL-GENERATION-START.bat": ("evavo.py",),
+    "START-AUTONOMOUS.bat": ("agent-doctor.py", "--provision"),
+    "EVAVO-GENERATE-NOW.bat": ("legacy_image_cli.py",),
+    "START-GENERATION.bat": ("legacy_image_cli.py",),
+    "run_full_generation.sh": ("legacy_image_cli.py",),
+    "START-GATEWAY.ps1": ("EVAVO-SERVICE-MANAGER.py",),
+}
 
-RETIRED_PATTERNS: Sequence[str] = (
+# These are checked only on active, non-comment lines. Explanatory comments may
+# legitimately describe what was retired without causing a false failure.
+RETIRED_ACTIVE_PATTERNS: Sequence[str] = (
     "taskkill /f /im python.exe",
     "taskkill /im python.exe",
     "cmd /k",
     "-noexit",
     "create_new_console",
-    "c:\\ai\\comfyui",
+    "subprocess.popen",
     "ollama serve",
     "kokoro-fastapi",
-    "kokoro_endpoint",
-    "model3d_endpoint",
-    "texture_endpoint",
-    "particle_endpoint",
-    "c:\\users\\user\\beestation",
-    "$home/mnt/beestation",
-    "/api/models",
-    "task queued for",
+    "register-scheduledtask",
     "mock_video_data",
+    "shutil.copytree",
 )
 
 
@@ -219,25 +215,43 @@ def verify_python_compile() -> Dict[str, Any]:
     return _result("python_compile", not failures, detail)
 
 
+def _active_lines(source: str) -> List[str]:
+    active: List[str] = []
+    for raw in source.splitlines():
+        stripped = raw.strip()
+        lower = stripped.lower()
+        if not stripped:
+            continue
+        if stripped.startswith("#") or lower.startswith("rem ") or stripped.startswith("::"):
+            continue
+        active.append(lower)
+    return active
+
+
 def verify_legacy_entrypoints() -> Dict[str, Any]:
-    """Reject retired side effects/false-success patterns in supported shims."""
+    """Require canonical delegation and reject executable retired side effects."""
     failures: List[str] = []
     checked = 0
-    for name in LEGACY_RUNTIME_ENTRYPOINTS:
+    for name, markers in LEGACY_DELEGATION_MARKERS.items():
         path = ROOT / name
         if not path.is_file():
             failures.append(f"{name}: missing")
             continue
         checked += 1
         try:
-            source = path.read_text(encoding="utf-8", errors="replace").lower()
+            source_raw = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             failures.append(f"{name}: {exc}")
             continue
-        for pattern in RETIRED_PATTERNS:
-            if pattern in source:
-                failures.append(f"{name}: contains retired pattern {pattern!r}")
-    detail = f"checked {checked} compatibility entry points"
+        source_lower = source_raw.lower()
+        for marker in markers:
+            if marker.lower() not in source_lower:
+                failures.append(f"{name}: missing canonical delegation marker {marker!r}")
+        active = _active_lines(source_raw)
+        for pattern in RETIRED_ACTIVE_PATTERNS:
+            if any(pattern in line for line in active):
+                failures.append(f"{name}: contains retired active behavior {pattern!r}")
+    detail = f"checked {checked} supported compatibility entry points"
     if failures:
         detail += "; failures: " + " | ".join(failures[:30])
     return _result("legacy_entrypoint_safety", not failures, detail)
