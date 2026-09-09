@@ -33,6 +33,7 @@ SERVER = ROOT / "mock-comfyui-server.py"
 REQUIRED_FILES = [
     "evavo.py",
     "verify-evavo.py",
+    "safe_main_git.py",
     "evavo_operations.py",
     "evavo-wrapper.py",
     "mock-comfyui-server.py",
@@ -47,7 +48,14 @@ REQUIRED_FILES = [
     "test-batch-workflow-preflight.py",
     "test-agent-doctor-workflows.py",
     "test-chatgpt-tunnel.py",
+    "test-gateway.py",
+    "test-git-safety.py",
+    "test-legacy-compatibility.py",
+    "legacy_image_cli.py",
     "provision-comfyui.py",
+    "EVAVO-GATEWAY.py",
+    "EVAVO-SERVICE-MANAGER.py",
+    "gateway-smoke-test.py",
     "UPDATE-AND-VERIFY-EVAVO.ps1",
     "INSTALL-CLAUDE-MCP.ps1",
     "START-AGENT-MCP.ps1",
@@ -57,7 +65,15 @@ REQUIRED_FILES = [
     "START-CHATGPT-MCP-TUNNEL.ps1",
     "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
     "CHATGPT-TUNNEL-DOCTOR.ps1",
+    "START-GATEWAY.ps1",
+    "COMMIT-UPGRADE.ps1",
+    "COMMIT_AND_PUSH.ps1",
+    "PUSH-UPGRADE-TO-MAIN.ps1",
+    "COMPLETE_EVAVO_GIT_COMMIT.ps1",
+    "create_github_repo.ps1",
     "CHATGPT-TUNNEL.md",
+    "README.md",
+    "CLAUDE.md",
     "evavo_local_image_generator/backends/comfyui_backend.py",
     "evavo_local_image_generator/comfyui_runtime.py",
     "evavo_local_image_generator/mcp_server.py",
@@ -363,7 +379,7 @@ def bootstrap(endpoint: str, skip_pull: bool = False, skip_verify: bool = False)
             verify_command.append("--require-powershell")
         steps.append(verify_command)
     steps.extend([
-        [sys.executable, controller, "start", "--endpoint", endpoint],
+        [sys.executable, controller, "start", "--endpoint", endpoint, "--no-mock"],
         [sys.executable, controller, "status", "--endpoint", endpoint],
     ])
     for command in steps:
@@ -372,7 +388,7 @@ def bootstrap(endpoint: str, skip_pull: bool = False, skip_verify: bool = False)
         if result.returncode != 0:
             print(f"ERROR: bootstrap stopped because exit code was {result.returncode}.", file=sys.stderr)
             return result.returncode
-    print("\nEVAVO bootstrap completed successfully.")
+    print("\nEVAVO bootstrap completed successfully with a native renderer.")
     return 0
 
 
@@ -399,7 +415,7 @@ def main() -> int:
     verify_parser.add_argument("--require-powershell", action="store_true", help="Fail if PowerShell is unavailable")
     verify_parser.add_argument("--json", action="store_true")
 
-    bootstrap_parser = subparsers.add_parser("bootstrap", help="Sync main, fully verify, start and verify backend health")
+    bootstrap_parser = subparsers.add_parser("bootstrap", help="Sync main, fully verify, require native ComfyUI, and verify backend health")
     bootstrap_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     bootstrap_parser.add_argument("--skip-pull", action="store_true")
     bootstrap_parser.add_argument("--skip-verify", action="store_true", help="Skip full verifier only when it already passed in the caller")
