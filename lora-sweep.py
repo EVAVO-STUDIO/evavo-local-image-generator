@@ -95,7 +95,7 @@ def main() -> int:
     run_dir = Path(args.output).expanduser().resolve() / f"{stamp}-{safe_name}"
     run_dir.mkdir(parents=True, exist_ok=False)
     manifest: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "benchmark_type": "lora_strength_sweep",
         "started_at": datetime.now().astimezone().isoformat(),
         "endpoint": backend.endpoint,
@@ -132,6 +132,10 @@ def main() -> int:
                     lora_clip_strength=args.clip_strength if args.clip_strength is not None else strength,
                 )
             queued = backend.queue_image(args.prompt, **kwargs)
+            submitted_seed = queued.get("seed")
+            if submitted_seed is not None and int(submitted_seed) != int(args.seed):
+                raise RuntimeError(f"LORA_SWEEP_SEED_MISMATCH:requested {args.seed}, submitted {submitted_seed}")
+
             target = run_dir / "images" / label
             files = backend.wait_and_download(queued["task_id"], target, timeout=args.timeout)
             elapsed = time.perf_counter() - started
@@ -155,8 +159,12 @@ def main() -> int:
                     "prompt_id": "lora_sweep",
                     "profile": label,
                     "seed": args.seed,
+                    "submitted_seed": submitted_seed,
                     "status": "completed",
                     "elapsed_s": round(elapsed, 3),
+                    "checkpoint": queued.get("checkpoint"),
+                    "workflow_sha256": queued.get("workflow_sha256"),
+                    "workflow_node_count": queued.get("workflow_node_count"),
                     "render_passes": queued.get("render_passes"),
                     "expected_output_width": queued.get("output_width"),
                     "expected_output_height": queued.get("output_height"),
