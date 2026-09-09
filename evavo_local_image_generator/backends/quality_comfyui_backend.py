@@ -121,18 +121,23 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         lora_name: Optional[str],
         lora_model_strength: Any,
         lora_clip_strength: Any,
+        *,
+        use_environment: bool = True,
     ) -> Optional[Dict[str, Any]]:
-        raw_name = lora_name if lora_name is not None else os.getenv("EVAVO_IMAGE_LORA")
+        env_name = os.getenv("EVAVO_IMAGE_LORA") if use_environment else None
+        raw_name = lora_name if lora_name is not None else env_name
         if raw_name is None or not str(raw_name).strip():
             return None
         name = str(raw_name).strip()
+        env_model_strength = os.getenv("EVAVO_IMAGE_LORA_MODEL_STRENGTH") if use_environment else None
+        env_clip_strength = os.getenv("EVAVO_IMAGE_LORA_CLIP_STRENGTH") if use_environment else None
         model_strength = self._lora_strength(
-            lora_model_strength if lora_model_strength is not None else os.getenv("EVAVO_IMAGE_LORA_MODEL_STRENGTH"),
+            lora_model_strength if lora_model_strength is not None else env_model_strength,
             name="lora_model_strength",
             default=0.7,
         )
         clip_strength = self._lora_strength(
-            lora_clip_strength if lora_clip_strength is not None else os.getenv("EVAVO_IMAGE_LORA_CLIP_STRENGTH"),
+            lora_clip_strength if lora_clip_strength is not None else env_clip_strength,
             name="lora_clip_strength",
             default=model_strength,
         )
@@ -325,6 +330,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         lora_name: Optional[str] = None,
         lora_model_strength: Any = None,
         lora_clip_strength: Any = None,
+        use_environment: bool = True,
     ) -> Dict[str, Any]:
         settings = resolve_quality_settings(
             quality_profile=quality_profile,
@@ -342,11 +348,17 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             second_pass_scheduler=second_pass_scheduler,
             second_pass_denoise=second_pass_denoise,
             latent_upscale_method=latent_upscale_method,
+            use_environment=use_environment,
         )
         settings = self.resolve_sampling(settings)
-        lora = self._resolve_lora(lora_name, lora_model_strength, lora_clip_strength)
+        lora = self._resolve_lora(
+            lora_name,
+            lora_model_strength,
+            lora_clip_strength,
+            use_environment=use_environment,
+        )
 
-        template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
+        template_path = workflow_path or (os.getenv("EVAVO_COMFYUI_WORKFLOW") if use_environment else None)
         if template_path and settings.second_pass_enabled:
             raise RuntimeError(
                 "COMFYUI_HERO_CUSTOM_WORKFLOW_UNSUPPORTED:two-pass quality expansion requires the canonical built-in graph; "
@@ -356,6 +368,15 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             raise RuntimeError(
                 "COMFYUI_LORA_CUSTOM_WORKFLOW_UNSUPPORTED:automatic LoRA insertion requires the canonical built-in graph; "
                 "encode the LoRA loader directly in the custom workflow instead"
+            )
+
+        # The base adapter still supports its legacy environment workflow hook.
+        # In frozen mode there must be no ambient custom-workflow substitution,
+        # so require callers to pass an explicit path if one is intended.
+        if not use_environment and workflow_path is None and os.getenv("EVAVO_COMFYUI_WORKFLOW"):
+            raise RuntimeError(
+                "COMFYUI_FROZEN_RECIPE_AMBIENT_WORKFLOW:frozen generation refuses EVAVO_COMFYUI_WORKFLOW; "
+                "pass workflow_path explicitly or clear the variable"
             )
 
         workflow = super().build_txt2img_workflow(
@@ -386,7 +407,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
                 second_pass_denoise,
                 latent_upscale_method,
             )
-        )
+        ) or not use_environment
         if template_path and not explicit_sampling:
             return workflow
 
@@ -424,6 +445,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         lora_name: Optional[str] = None,
         lora_model_strength: Any = None,
         lora_clip_strength: Any = None,
+        use_environment: bool = True,
     ) -> Dict[str, Any]:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
@@ -449,11 +471,17 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             second_pass_scheduler=second_pass_scheduler,
             second_pass_denoise=second_pass_denoise,
             latent_upscale_method=latent_upscale_method,
+            use_environment=use_environment,
         )
         settings = self.resolve_sampling(settings)
-        lora = self._resolve_lora(lora_name, lora_model_strength, lora_clip_strength)
+        lora = self._resolve_lora(
+            lora_name,
+            lora_model_strength,
+            lora_clip_strength,
+            use_environment=use_environment,
+        )
 
-        template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
+        template_path = workflow_path or (os.getenv("EVAVO_COMFYUI_WORKFLOW") if use_environment else None)
         workflow = self.build_txt2img_workflow(
             prompt.strip(),
             negative_prompt=negative_prompt,
@@ -479,6 +507,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             lora_name=lora_name,
             lora_model_strength=lora_model_strength,
             lora_clip_strength=lora_clip_strength,
+            use_environment=use_environment,
         )
         if (
             template_path
@@ -509,7 +538,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
                 second_pass_denoise,
                 latent_upscale_method,
             )
-        )
+        ) or not use_environment
         quality_applied = not template_path or explicit_sampling
         return {
             "status": "queued",
@@ -528,4 +557,5 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             "output_width": settings.output_width if quality_applied else None,
             "output_height": settings.output_height if quality_applied else None,
             "lora": lora,
+            "use_environment": bool(use_environment),
         }
