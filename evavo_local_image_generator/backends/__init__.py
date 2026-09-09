@@ -1,16 +1,13 @@
-"""
-Backend service integrations for EVAVO multi-modal generation.
+"""Backend adapters for EVAVO Local Image Generator.
 
-Supported backends:
-- ComfyUI: Local image generation (port 8188)
-- Ollama: Local LLM inference (port 11434)
-- Kokoro: Text-to-speech service (port 8000)
-- FFmpeg: Video encoding and processing
-- Blender: 3D model generation and rendering
+Production generation in this repository is backed by :class:`ComfyUIBackend`.
+`OllamaBackend` and `KokoroBackend` remain importable only for source
+compatibility with older callers; they are not dependencies of the verified
+image runtime and are not exposed by the MCP server.
 """
 
 from .comfyui_backend import ComfyUIBackend
 from .ollama_backend import OllamaBackend
 from .kokoro_backend import KokoroBackend
 
-__all__ = ['ComfyUIBackend', 'OllamaBackend', 'KokoroBackend']
+__all__ = ["ComfyUIBackend", "OllamaBackend", "KokoroBackend"]
