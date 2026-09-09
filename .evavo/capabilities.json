@@ -2,7 +2,7 @@
   "contractVersion": "evavo_repository_capabilities_v1",
   "repository": "EVAVO-STUDIO/evavo-local-image-generator",
   "authority": "local-image-generation-control-plane",
-  "summary": "EVAVO's Windows-first native-ComfyUI image-generation control plane and agent transport layer. It owns backend discovery/provisioning/health, bounded startup diagnostics, model inventory, workflow preflight, real prompt submission, normalized jobs/history/queue status, targeted per-generation cancellation, output collection/inspection, bounded batches, shared task history, MCP delivery and secure ChatGPT tunnelling. MCP file access is owner-confined and generated images require ordinary-file identity plus valid image signatures. Its optional hardened loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. The deterministic mock is test infrastructure only.",
+  "summary": "EVAVO's Windows-first native-ComfyUI image-generation control plane and agent transport layer. It owns backend discovery/provisioning/health, bounded startup diagnostics, evidence-gated dependency repair, model inventory, workflow preflight, real prompt submission, normalized jobs/history/queue status, targeted per-generation cancellation, output collection/inspection, bounded batches, shared task history, MCP delivery and secure ChatGPT tunnelling. Claude and ChatGPT use the same MCP implementation through different transports. MCP file access is owner-confined and generated images require ordinary-file identity plus valid image signatures. Its optional hardened loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. The deterministic mock is test infrastructure only.",
   "capabilities": [
     {
       "id": "local-image.backend.discover-health",
@@ -13,6 +13,16 @@
       "entrypoints": ["health_check", "discover_backends", "ensure_backend", "diagnose_backend", "last_startup_failure", "python evavo.py verify --full"],
       "tags": ["image", "comfyui", "backend", "health", "diagnostics", "windows"],
       "requires": ["Local/loopback ComfyUI endpoint for live readiness"]
+    },
+    {
+      "id": "local-image.backend.repair-dependencies",
+      "title": "Repair proven core ComfyUI dependency drift safely",
+      "description": "Use structured missing-dependency startup evidence to synchronize the discovered ComfyUI checkout's own requirements.txt into its selected interpreter. MCP callers cannot choose arbitrary packages, Python executables or ComfyUI paths; custom-node dependency failures are refused by the core repair path; shell execution and broad process cleanup are not used; every repair returns a structured receipt.",
+      "interfaces": ["cli", "mcp", "automation", "library"],
+      "effects": ["read", "compute", "write", "execute", "network"],
+      "entrypoints": ["repair_backend_dependencies", "python repair-comfyui-dependencies.py", "evavo_local_image_generator.comfyui_repair.repair_backend_dependencies"],
+      "tags": ["image", "comfyui", "dependency", "repair", "pip", "evidence", "claude", "chatgpt"],
+      "requires": ["Discoverable ComfyUI checkout", "Structured missing_dependency evidence for normal mutation", "Network only when pip must obtain missing requirements"]
     },
     {
       "id": "local-image.backend.provision",
@@ -87,11 +97,11 @@
     {
       "id": "local-image.mcp.serve",
       "title": "Expose local image-generation MCP services",
-      "description": "Serve MCP v2 over stdio and private loopback Streamable HTTP, configure Claude Desktop and optionally start the private HTTP MCP at Windows login. Persistent profiles carry only non-secret owner path policy.",
+      "description": "Serve one shared MCP v2 implementation over stdio and private loopback Streamable HTTP. Claude Desktop uses stdio; ChatGPT reaches the same private server through the authorised secure tunnel. Persistent profiles carry only non-secret owner path policy.",
       "interfaces": ["mcp", "cli", "automation"],
       "effects": ["read", "compute", "execute", "write", "network"],
       "entrypoints": ["INSTALL-CLAUDE-MCP.ps1", "http://127.0.0.1:8765/mcp", "UPDATE-AND-VERIFY-EVAVO.ps1"],
-      "tags": ["image", "mcp", "claude", "localhost", "agent", "file-policy"],
+      "tags": ["image", "mcp", "claude", "chatgpt", "localhost", "agent", "file-policy"],
       "requires": ["Trusted local host", "Configured MCP client/runtime"]
     },
     {
@@ -138,7 +148,7 @@
   "brain": {
     "consult": true,
     "sanityCheck": true,
-    "topics": ["local image generation", "ComfyUI readiness", "startup diagnostics", "model inventory", "workflow preflight", "owner-confined MCP file policy", "generation status", "targeted cancellation", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "hardened private gateway", "governed gateway provider delegation"]
+    "topics": ["local image generation", "ComfyUI readiness", "startup diagnostics", "evidence-gated dependency repair", "Claude/ChatGPT MCP parity", "model inventory", "workflow preflight", "owner-confined MCP file policy", "generation status", "targeted cancellation", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "hardened private gateway", "governed gateway provider delegation"]
   },
   "reviewedAt": "2026-09-09T20:06:00+10:00"
 }
