@@ -55,6 +55,15 @@ class McpProfilePolicyTests(unittest.TestCase):
         start = (ROOT / "START-AGENT-MCP.ps1").read_text(encoding="utf-8")
         self.assertIn(VALIDATED_ENTRY, start)
 
+    def test_persistent_agent_surfaces_require_repo_local_venv_without_system_python_fallback(self) -> None:
+        for name in ("INSTALL-CLAUDE-MCP.ps1", "INSTALL-AGENT-MCP-AUTOSTART.ps1", "START-AGENT-MCP.ps1"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+            with self.subTest(name=name):
+                self.assertIn('.venv\\Scripts\\python.exe', source)
+                self.assertIn("EVAVO .venv is not ready", source)
+                self.assertNotIn("Get-Command python", source)
+                self.assertNotIn("$python = $cmd.Source", source)
+
     def test_claude_policy_validation_precedes_any_config_write_or_backup(self) -> None:
         source = (ROOT / "INSTALL-CLAUDE-MCP.ps1").read_text(encoding="utf-8")
         policy = source.index(POLICY_COMMAND)
