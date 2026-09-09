@@ -5,6 +5,7 @@ param(
     [switch]$SkipDependencies,
     [switch]$SkipAgentConfiguration,
     [switch]$SkipComfyUIProvision,
+    [switch]$SkipComfyUIDependencyRepair,
     [switch]$SkipChatGPTTunnel,
     [int]$McpPort = 8765
 )
@@ -98,11 +99,44 @@ if (-not $SkipComfyUIProvision) {
     $backendDoctorArgs += "--provision"
 }
 & $python @backendDoctorArgs
-if ($LASTEXITCODE -ne 0) {
-    if ($SkipComfyUIProvision) {
-        Fail "Native ComfyUI generation readiness failed while provisioning was disabled. Start/configure the real renderer or rerun without -SkipComfyUIProvision." 3
+$backendDoctorCode = $LASTEXITCODE
+$dependencyRecoveryStatus = "not_needed"
+
+# Strict doctor can expose a structured native ComfyUI missing_dependency
+# failure. Make exactly one evidence-gated recovery attempt using the same
+# constrained bridge exposed to MCP, then prove recovery by rerunning doctor.
+# This command cannot force-sync, invent package names/URLs, or repair custom
+# node dependencies as core ComfyUI.
+if ($backendDoctorCode -ne 0 -and -not $SkipComfyUIDependencyRepair) {
+    Write-Host "Strict doctor failed; checking for evidence-gated ComfyUI dependency recovery..." -ForegroundColor Yellow
+    & $python (Join-Path $PSScriptRoot "recover-comfyui.py") --json
+    $recoveryCode = $LASTEXITCODE
+    if ($recoveryCode -eq 0) {
+        $dependencyRecoveryStatus = "repaired"
+        Write-Host "Dependency recovery returned success; rerunning strict agent doctor to prove the real generation contract..." -ForegroundColor Cyan
+        & $python @backendDoctorArgs
+        $backendDoctorCode = $LASTEXITCODE
     }
-    Fail "Native ComfyUI provisioning/repair or active generation-contract validation failed. Configure any required owner-controlled model/workflow source and rerun." 3
+    else {
+        $dependencyRecoveryStatus = "not_admitted_or_failed"
+        Write-Host "No admissible automatic core dependency repair completed. Strict doctor result remains authoritative." -ForegroundColor Yellow
+    }
+}
+elseif ($backendDoctorCode -ne 0 -and $SkipComfyUIDependencyRepair) {
+    $dependencyRecoveryStatus = "disabled"
+}
+
+if ($backendDoctorCode -ne 0) {
+    if ($SkipComfyUIProvision -and $SkipComfyUIDependencyRepair) {
+        Fail "Native ComfyUI readiness failed while both provisioning and dependency repair were disabled. Start/configure the real renderer and dependencies manually, then rerun." 3
+    }
+    if ($SkipComfyUIProvision) {
+        Fail "Native ComfyUI generation readiness failed while provisioning was disabled. Evidence-gated dependency recovery did not fully restore the contract." 3
+    }
+    if ($SkipComfyUIDependencyRepair) {
+        Fail "Native ComfyUI generation readiness failed while evidence-gated dependency repair was disabled. Provisioning/model repair alone did not restore the contract." 3
+    }
+    Fail "Native ComfyUI provisioning/dependency repair or active generation-contract validation failed. Review structured startup evidence and any owner-controlled model/workflow requirements." 3
 }
 
 Write-Host "Bootstrapping the verified native generation backend..." -ForegroundColor Cyan
@@ -126,9 +160,10 @@ if (-not $SkipAgentConfiguration) {
     }
 }
 
-# Recheck after configuration changes. Provisioning has already happened above;
-# this final pass is deliberately repair/status only so setup has one provisioning
-# decision point and cannot silently alter model/runtime sources late in the run.
+# Recheck after configuration changes. Provisioning/dependency recovery has
+# already happened above; this final pass is deliberately proof/status only so
+# setup has one mutation decision point and cannot silently alter model/runtime
+# sources late in the run.
 Write-Host "Running final agent doctor..." -ForegroundColor Cyan
 $finalDoctorArgs = @(
     (Join-Path $PSScriptRoot "agent-doctor.py"),
@@ -243,10 +278,11 @@ Write-Host "  Authoritative full verifier: passed" -ForegroundColor Green
 Write-Host "  Python sources + PowerShell scripts: parsed successfully" -ForegroundColor Green
 Write-Host "  All registered safety/integration suites: passed" -ForegroundColor Green
 Write-Host "  Native generation contract preparation: passed" -ForegroundColor Green
+Write-Host "  Evidence-gated dependency recovery: $dependencyRecoveryStatus" -ForegroundColor $(if ($dependencyRecoveryStatus -eq "repaired") { "Green" } elseif ($dependencyRecoveryStatus -eq "not_needed") { "DarkGray" } else { "Yellow" })
 Write-Host "  Strict native generation bootstrap: passed" -ForegroundColor Green
 if (-not $SkipAgentConfiguration) {
     Write-Host "  Claude stdio MCP: installed/updated" -ForegroundColor Green
-    Write-Host "  Private HTTP MCP autostart: installed and started" -ForegroundColor Green
+    Write-Host "  Private HTTP MCP autostart: installed and started/reloaded" -ForegroundColor Green
 }
 if (-not $SkipComfyUIProvision) {
     Write-Host "  ComfyUI provisioning: enabled only when native runtime/model repair was needed" -ForegroundColor Green
