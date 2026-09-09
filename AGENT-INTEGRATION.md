@@ -1,367 +1,141 @@
 # EVAVO Agent Integration
 
-EVAVO exposes one native ComfyUI generation pipeline to Claude, ChatGPT through OpenAI Secure MCP Tunnel, local MCP clients, Codex/IDE agents, direct Python automation, and the `evavo.py` CLI.
+EVAVO exposes one owned production generation capability from this repository: **local image generation through native ComfyUI**. Claude, ChatGPT, local MCP clients, IDE agents, direct Python automation and `evavo.py` share the same renderer/lifecycle/task-history contract.
 
-## Canonical Windows setup
+The deterministic EVAVO mock is test infrastructure and cannot satisfy production readiness.
 
-From a current checkout, the preferred setup is:
+The optional loopback HTTP gateway can also **delegate** video, audio and 3D jobs to separately governed sibling EVAVO Studio providers. Those delegated routes are not MCP/package-owned capabilities of this image-generator repository.
+
+## Canonical Windows convergence
+
+From the repository root:
 
 ```powershell
 .\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-The updater now:
-
-1. safely fast-forwards `main` without overwriting local changes;
-2. parses every canonical PowerShell agent/tunnel script with PowerShell's AST parser before configuration writes;
-3. installs/upgrades repository dependencies including `mcp[cli]>=2,<3`;
-4. runs offline provisioning/runtime safety tests;
-5. runs backend automation and MCP file-boundary tests;
-6. runs ChatGPT tunnel security-contract tests;
-7. runs negotiated MCP stdio + Streamable HTTP integration tests;
-8. bootstraps/selects the generation backend;
-9. installs/updates Claude Desktop stdio MCP configuration while preserving other servers;
-10. installs the current-user private HTTP MCP login autostart;
-11. runs `agent-doctor.py --repair --provision` as a strict real-generation readiness gate;
-12. provisions official ComfyUI when no installation exists, unless disabled;
-13. provisions an explicitly configured checkpoint source when the built-in workflow needs one;
-14. validates shared model roots and the available ComfyUI model inventory;
-15. verifies final backend status;
-16. when a valid OpenAI tunnel ID already exists, configures the official OpenAI `tunnel-client` profile and starts the outbound ChatGPT bridge when a runtime key is available;
-17. optionally installs persistent tunnel login startup when the runtime key has been stored with Windows DPAPI.
-
-Troubleshooting switches:
+For a stale clean checkout:
 
 ```powershell
-.\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipAgentConfiguration
-.\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipComfyUIProvision
-.\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipChatGPTTunnel
+cd C:\Gitrepos\evavo-local-image-generator
+git pull --ff-only origin main
+.\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-## Automation contract
+The updater fast-forwards `main`, parses canonical PowerShell scripts before configuration writes, installs dependencies, runs the authoritative verifier, configures Claude/private HTTP MCP, repairs or provisions native ComfyUI when allowed, validates the active workflow/model contract, and conditionally configures the ChatGPT Secure MCP Tunnel when its OpenAI tunnel identity exists.
 
-An agent does **not** need to know how ComfyUI was installed or manually start it first.
+Authoritative verification:
 
-On a normal generation call EVAVO can:
+```powershell
+python evavo.py verify --full --require-powershell
+```
 
-1. check the configured endpoint for a real native ComfyUI;
+The verifier automatically discovers the maintained root, `tests/`, and package test surfaces. Do not maintain a second hand-written test list.
+
+## Agent lifecycle contract
+
+An agent should not need to understand how ComfyUI was installed. A normal image request can:
+
+1. validate the request/file policy before backend work;
 2. reject the deterministic EVAVO mock as a renderer;
-3. discover a local source or Windows portable ComfyUI install;
-4. safely provision the fixed official ComfyUI source runtime when enabled and no install exists;
-5. reuse portable installs without modifying their embedded Python runtime;
-6. stop only an identity-verified EVAVO-owned mock if it occupies port 8188;
-7. start native ComfyUI in the background when installed but offline;
-8. inject EVAVO-managed shared model roots without rewriting ComfyUI's own configuration;
-9. restart only an identity-verified EVAVO-managed ComfyUI when that effective shared-model config changes;
-10. wait for `/system_stats` readiness;
-11. inspect available model-loader inventories;
-12. auto-provision an owner-configured checkpoint when the built-in workflow needs one;
-13. queue `/prompt` with the built-in or a custom API workflow;
-14. poll `/history/<prompt_id>`;
-15. download `/view` outputs atomically;
-16. persist queue/completion/failure state plus backend/checkpoint/workflow/output metadata in shared task history;
-17. return concrete local file paths;
-18. optionally return an authorized generated image as native MCP image content through `read_output_image`.
+3. reuse a healthy native ComfyUI already running;
+4. discover source or Windows-portable installations;
+5. provision the fixed official ComfyUI source runtime when owner policy allows it;
+6. load owner-configured shared model roots;
+7. start native ComfyUI when installed but offline;
+8. inventory live loader/model choices;
+9. preflight a custom API workflow when configured;
+10. submit `/prompt` and retain the real ComfyUI prompt ID;
+11. poll `/history/<prompt_id>`;
+12. collect `/view` image outputs atomically;
+13. persist queue/completion/failure evidence in shared task history;
+14. return local file paths and, when requested, native MCP image content.
 
-## ComfyUI discovery
+An invalid path, timeout or file-policy request is rejected **before ComfyUI is started or a prompt is queued**. Invalid preflight-only requests do not create synthetic generation tasks.
 
-Automatic discovery covers common Windows locations, sibling Git repositories, source virtual environments and portable installs, including:
+## MCP tools
 
-```text
-C:\ComfyUI
-C:\Gitrepos\ComfyUI
-C:\GitRepos\ComfyUI
-C:\AI\ComfyUI
-C:\ComfyUI_windows_portable
-%USERPROFILE%\ComfyUI
-%USERPROFILE%\Documents\ComfyUI
-%USERPROFILE%\Downloads\ComfyUI_windows_portable
-%USERPROFILE%\Desktop\ComfyUI
-```
-
-Non-standard installation:
-
-```powershell
-$env:EVAVO_COMFYUI_HOME = "D:\AI\ComfyUI"
-```
-
-Exact source interpreter:
-
-```powershell
-$env:EVAVO_COMFYUI_PYTHON = "D:\AI\ComfyUI\.venv\Scripts\python.exe"
-```
-
-Additional discovery roots can be supplied through `EVAVO_COMFYUI_SEARCH_PATHS` using the platform path separator.
-
-## Runtime provisioning
-
-Provision the official ComfyUI source runtime explicitly:
-
-```powershell
-python provision-comfyui.py
-```
-
-The provisioner:
-
-- reuses an existing standard source/portable install when found;
-- clones `https://github.com/Comfy-Org/ComfyUI.git` only when no install exists;
-- never overwrites a non-ComfyUI target;
-- never updates a dirty source checkout;
-- creates an isolated `.venv` for source installs;
-- reuses a healthy existing source runtime after a Torch/CUDA probe and `main.py --help` smoke check rather than reinstalling dependencies;
-- repairs/reinstalls source dependencies only when that runtime probe fails;
-- detects NVIDIA and follows ComfyUI's documented stable CUDA PyTorch installation path;
-- installs ComfyUI's own `requirements.txt` when required;
-- records provisioning state in `.evavo/comfyui-provision.json`;
-- does not silently select or license a diffusion model.
-
-Agents can call the parameterless MCP tool:
+Current MCP tool surface:
 
 ```text
 provision_backend
-```
-
-That tool intentionally accepts **no repository URL or arbitrary model URL argument**. It uses only the fixed EVAVO provisioner and model sources configured by the workstation owner.
-
-Local agent profiles set:
-
-```text
-EVAVO_AUTO_PROVISION_COMFYUI=1
-EVAVO_AUTO_PROVISION_CHECKPOINT=1
-```
-
-Checkpoint auto-repair still does nothing unless `EVAVO_CHECKPOINT_FILE` or `EVAVO_CHECKPOINT_URL` was explicitly configured by the workstation owner.
-
-## Checkpoint provisioning
-
-A real checkpoint is a blocking requirement for the built-in checkpoint-based txt2img workflow. EVAVO does not guess or silently choose a model source.
-
-Preferred local-file setup:
-
-```powershell
-$env:EVAVO_CHECKPOINT_FILE = "D:\AI\Models\your-model.safetensors"
-$env:EVAVO_CHECKPOINT_SHA256 = "<optional expected sha256>"
-$env:EVAVO_CHECKPOINT_NAME = "your-model.safetensors"
-.\UPDATE-AND-VERIFY-EVAVO.ps1
-```
-
-Explicit HTTPS source when appropriate:
-
-```powershell
-$env:EVAVO_CHECKPOINT_URL = "https://example.com/your-model.safetensors"
-$env:EVAVO_CHECKPOINT_SHA256 = "<strongly recommended expected sha256>"
-.\UPDATE-AND-VERIFY-EVAVO.ps1
-```
-
-Safety behavior:
-
-- HTTPS is required unless `--allow-http-checkpoint` is explicitly passed to the standalone provisioner;
-- filenames are reduced to simple safe names and traversal is rejected;
-- downloads stream through `.part` files and only become final after verification;
-- URL downloads are capped at 32 GiB;
-- SHA-256 can be required and is verified before final placement;
-- an existing different destination is never overwritten;
-- source and Windows-portable `models/checkpoints` layouts are supported;
-- Claude/HTTP installers intentionally do **not** persist `EVAVO_CHECKPOINT_URL` because signed URLs may contain secrets/tokens;
-- custom API workflows do not trigger checkpoint provisioning merely because `CheckpointLoaderSimple` is empty.
-
-Checkpoint-only repair:
-
-```powershell
-python provision-comfyui.py --target "D:\AI\ComfyUI" --checkpoint-only
-```
-
-## Shared model libraries
-
-To reuse an existing model library instead of copying large files:
-
-```powershell
-$env:EVAVO_SHARED_MODEL_ROOTS = "D:\AI\Models;E:\SharedModels"
-```
-
-`EVAVO_COMFYUI_MODEL_ROOTS` is accepted as an alias. Multiple roots use the operating-system path separator (`;` on Windows).
-
-EVAVO maps only supported model directories that actually exist, including common locations for checkpoints, LoRAs/LyCORIS, VAE, text encoders/CLIP, diffusion models/UNET, CLIP vision, ControlNet/t2i adapters, embeddings, upscalers, custom nodes, and other ComfyUI categories.
-
-EVAVO writes its own generated file:
-
-```text
-.evavo\extra-model-paths.yaml
-```
-
-Managed ComfyUI is launched with:
-
-```text
---extra-model-paths-config <repo>\.evavo\extra-model-paths.yaml
-```
-
-EVAVO does **not** edit or replace ComfyUI's own `extra_model_paths.yaml`.
-
-The effective generated YAML is SHA-256 fingerprinted in managed runtime state. If that configuration changes while an EVAVO-managed ComfyUI is running, EVAVO verifies the recorded process identity and restarts only that managed process. A user-managed ComfyUI is never killed; EVAVO instead reports that it cannot prove whether the requested extra model roots were loaded.
-
-## Model inventory
-
-Agents can inspect what ComfyUI actually exposes through loader nodes before choosing a workflow:
-
-```text
+ensure_backend
+health_check
+discover_backends
+list_checkpoints
 model_inventory
+workflow_preflight
+generate_image
+generate_batch
+generation_status
+collect_generation
+read_output_image
+task_history
+task_statistics
+stop_managed_backend
 ```
 
-Current categories include:
+There are intentionally no `generate_video`, `generate_audio` or `generate_3d` MCP tools in this repository.
+
+`generate_image` and `generate_batch` default to `auto_start=true` and `wait=true` for one-call agent workflows. Batch execution is concurrency bounded.
+
+## MCP filesystem authority
+
+MCP generation is **not arbitrary filesystem write/read authority**.
+
+Default generated-output root:
 
 ```text
-checkpoints
-loras
-vae
-controlnet
-diffusion_models
-text_encoders
-clip_vision
-upscale_models
+<repo>\.evavo\outputs\
 ```
 
-Each category is queried independently. Missing optional loader nodes are reported per category without breaking checkpoint generation. `agent-doctor.py` also summarizes these inventories.
-
-## Claude Desktop: local stdio MCP
-
-Install/update only the Claude integration:
-
-```powershell
-.\INSTALL-CLAUDE-MCP.ps1
-```
-
-Claude Desktop spawns EVAVO locally over stdio MCP. The installer resolves the actual Python/repository paths, validates integration by default, backs up the existing Claude config, preserves other MCP servers, enables constrained ComfyUI/checkpoint repair, and persists local non-secret model/workflow/shared-root settings.
-
-Restart Claude Desktop after changing its MCP configuration.
-
-## Private Streamable HTTP MCP
-
-EVAVO also exposes a private loopback Streamable HTTP listener for local clients, integration testing, and as the **private target of the ChatGPT tunnel**.
-
-Manual foreground start:
-
-```powershell
-.\START-AGENT-MCP.ps1
-```
-
-Install current-user Windows login autostart and start it now:
-
-```powershell
-.\INSTALL-AGENT-MCP-AUTOSTART.ps1
-```
-
-Default private endpoint:
+Configured by:
 
 ```text
-http://127.0.0.1:8765/mcp
+EVAVO_GENERATION_OUTPUT_DIR
 ```
 
-The listener is loopback-only, uses exact host/origin allowlists for its configured port, and enables DNS-rebinding protection. Do not expose this listener or ComfyUI directly to the public internet.
-
-## ChatGPT: OpenAI Secure MCP Tunnel
-
-ChatGPT cloud cannot directly reach workstation `127.0.0.1`. The supported EVAVO production bridge is the official OpenAI Secure MCP Tunnel, which makes an outbound connection from the workstation while the EVAVO MCP server stays private on localhost.
-
-One-time OpenAI-side prerequisite: create/associate a tunnel for the intended workspace and obtain its ID. EVAVO expects the exact ID shape:
-
-```text
-tunnel_<32 lowercase hexadecimal characters>
-```
-
-Configure the workstation:
+A caller-provided `output_dir` must remain under that root unless the workstation owner explicitly adds existing approved roots:
 
 ```powershell
-$env:EVAVO_OPENAI_TUNNEL_ID = "tunnel_<32 lowercase hex characters>"
-$env:CONTROL_PLANE_API_KEY = "<runtime tunnel key for this shell>"
-.\INSTALL-CHATGPT-MCP-TUNNEL.ps1 -PersistRuntimeKey
-.\INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1
+$env:EVAVO_MCP_OUTPUT_ROOTS = "D:\EVAVO\Generated;E:\ApprovedProjectRenders"
 ```
 
-Or simply rerun the canonical updater once the tunnel ID/runtime key are available. The updater will finish the tunnel profile and start it automatically.
+`EVAVO_MCP_OUTPUT_ROOTS` is owner configuration, not an MCP tool argument.
 
-Important security behavior:
+Output files returned through `read_output_image` must:
 
-- `tunnel-client` is downloaded only from the official `openai/tunnel-client` latest GitHub release;
-- the published release-asset SHA-256 digest is verified before extraction;
-- EVAVO uses OpenAI's HTTP DCR sample profile and points it at the private `127.0.0.1` MCP endpoint;
-- the runtime key is never committed, written to `.evavo/chatgpt-tunnel.json`, or embedded into Windows Startup;
-- persistent login startup requires the key to be stored using Windows current-user DPAPI under `%LOCALAPPDATA%\EVAVO\Secure`;
-- an ephemeral process-environment key can start the tunnel for the current session but is not treated as reboot-persistent;
-- `CHATGPT-TUNNEL-DOCTOR.ps1` distinguishes profile/local preflight/process state and does **not** claim that a successful local doctor alone proves ChatGPT workspace visibility.
+- be ordinary files, not symlinks;
+- not traverse redirected/symlinked parent paths;
+- be PNG/JPEG/GIF/WebP;
+- contain a matching image file signature, not merely a trusted extension;
+- be non-empty and within the MCP payload cap;
+- be inside the default EVAVO output root or exactly recorded in EVAVO generation history.
 
-Commands:
+This prevents a generated path from being replaced with a link to an unrelated local file and then read back through MCP.
+
+## Custom workflow authority
+
+The preferred production custom-workflow configuration is owner-side:
 
 ```powershell
-.\SAVE-CHATGPT-TUNNEL-KEY.ps1 -FromEnvironment
-.\START-CHATGPT-MCP-TUNNEL.ps1
-.\CHATGPT-TUNNEL-DOCTOR.ps1 -RequireRuntimeKey -RequireRunning
-.\INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1
+$env:EVAVO_COMFYUI_WORKFLOW = "D:\EVAVO\workflows\production-api.json"
 ```
 
-See `CHATGPT-TUNNEL.md` for the dedicated tunnel runbook.
+The owner-configured default is validated as an ordinary file before use.
 
-## Agent tools
-
-The MCP server exposes:
-
-- `provision_backend` — constrained official-runtime/model provisioning using workstation configuration only;
-- `ensure_backend` — verify, auto-provision when enabled, and auto-start native ComfyUI;
-- `health_check` — backend version/device health;
-- `discover_backends` — local ComfyUI installations EVAVO can launch;
-- `list_checkpoints` — installed checkpoints;
-- `model_inventory` — common ComfyUI loader-node model inventories;
-- `generate_image` — one image, queue or wait/download, persisted to shared history;
-- `generate_batch` — bounded-concurrency multi-prompt generation, also persisted;
-- `generation_status` — inspect a prompt ID and reconcile history;
-- `collect_generation` — wait/download an existing prompt and reconcile history;
-- `read_output_image` — return an authorized generated file as native MCP image content;
-- `task_history` — recent shared CLI + MCP generation history;
-- `task_statistics` — shared task counts by status;
-- `stop_managed_backend` — stop only identity-verified native ComfyUI started by EVAVO.
-
-`generate_image` and `generate_batch` default to `auto_start=true` and `wait=true` for one-call agent workflows.
-
-`read_output_image` is deliberately file-restricted: the file must be a supported image, non-empty, below the MCP payload cap, and either inside EVAVO's default output tree or present in EVAVO's recorded generation history.
-
-## Shared task history
-
-MCP and CLI generation use the same lock-protected, atomic history file:
-
-```text
-task_history.json
-```
-
-Records preserve task ID, prompt/project, status, backend mode, checkpoint, workflow path, output directory, output URIs, errors, and timestamps while remaining compatible with older minimal records.
-
-Override history location:
+Tool-supplied `workflow_path` is **disabled by default**. To allow agents to choose among a reviewed workflow library, configure both:
 
 ```powershell
-$env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\image-generation-history.json"
+$env:EVAVO_MCP_ALLOW_WORKFLOW_PATHS = "1"
+$env:EVAVO_MCP_WORKFLOW_ROOT = "D:\EVAVO\workflows\approved"
 ```
 
-## Generated files
+Then a tool-supplied workflow must be an ordinary file under that root. Symlinked files and redirected parent paths are rejected.
 
-Agent downloads default to:
+Do not give a model a broad root such as `C:\`, a user profile, the whole repository tree or another sensitive filesystem root.
 
-```text
-<repo>\.evavo\outputs\<project>\
-```
-
-Override globally:
-
-```powershell
-$env:EVAVO_GENERATION_OUTPUT_DIR = "D:\EVAVO\generated"
-```
-
-## Custom ComfyUI API workflow
-
-For Flux, SDXL variants, custom nodes, ControlNet or other pipelines, export API-format JSON from ComfyUI and set:
-
-```powershell
-$env:EVAVO_COMFYUI_WORKFLOW = "C:\workflows\production-api.json"
-```
-
-EVAVO accepts both the current uppercase placeholders and the older lowercase forms for backward compatibility:
+Current and legacy workflow placeholders are both supported:
 
 ```text
 {{PROMPT}} / {{prompt}}
@@ -375,50 +149,179 @@ EVAVO accepts both the current uppercase placeholders and the older lowercase fo
 {{FILENAME_PREFIX}} / {{filename_prefix}}
 ```
 
-A generation call can also pass `workflow_path` explicitly.
+`workflow_preflight` validates live node classes, required inputs and literal loader/model choices without queueing a prompt or writing task history.
 
-## Agent doctor
+## Persistent agent profiles
 
-Read-only diagnosis:
+The Claude Desktop installer and private HTTP MCP login-autostart installer preserve approved **non-secret** file-policy configuration:
 
-```powershell
-python agent-doctor.py
+```text
+EVAVO_MCP_OUTPUT_ROOTS
+EVAVO_MCP_ALLOW_WORKFLOW_PATHS
+EVAVO_MCP_WORKFLOW_ROOT
 ```
 
-Strict repair/readiness gate with provisioning:
+They also preserve other safe local model/runtime settings. `EVAVO_CHECKPOINT_URL` is deliberately not copied into generated profiles/startup commands because signed model URLs can contain credentials.
+
+Claude setup:
+
+```powershell
+.\INSTALL-CLAUDE-MCP.ps1
+```
+
+Restart Claude Desktop after configuration changes.
+
+Private HTTP MCP setup:
+
+```powershell
+.\INSTALL-AGENT-MCP-AUTOSTART.ps1
+```
+
+Default private endpoint:
+
+```text
+http://127.0.0.1:8765/mcp
+```
+
+The listener is loopback-only and uses exact host/origin allowlists plus MCP DNS-rebinding protection.
+
+## ChatGPT
+
+Cloud ChatGPT does not directly reach workstation `127.0.0.1`. EVAVO uses the official **OpenAI Secure MCP Tunnel** as the outbound bridge while the MCP server remains private.
+
+See:
+
+```text
+CHATGPT-TUNNEL.md
+```
+
+Typical workstation setup after an OpenAI tunnel has been created/associated:
+
+```powershell
+$env:EVAVO_OPENAI_TUNNEL_ID = "tunnel_<32 lowercase hex characters>"
+$env:CONTROL_PLANE_API_KEY = "<runtime tunnel key>"
+.\INSTALL-CHATGPT-MCP-TUNNEL.ps1 -PersistRuntimeKey
+.\INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1
+```
+
+Tunnel-client downloads are release-SHA verified. The installed executable is SHA-verified before runs. Optional persistent runtime-key storage uses current-user Windows DPAPI; the plaintext key is not stored in Git, `.evavo`, Claude configuration or Windows Startup.
+
+## ComfyUI provisioning and discovery
+
+EVAVO discovers common source/portable locations plus explicit owner configuration:
+
+```text
+EVAVO_COMFYUI_HOME
+EVAVO_COMFYUI_PYTHON
+EVAVO_COMFYUI_SEARCH_PATHS
+```
+
+Explicit provisioning:
+
+```powershell
+python provision-comfyui.py
+```
+
+The provisioner reuses existing reviewed installs, uses an isolated source `.venv`, does not modify a Windows-portable embedded Python runtime, and does not silently select/license a model.
+
+Agent profiles can enable constrained repair:
+
+```text
+EVAVO_AUTO_PROVISION_COMFYUI=1
+EVAVO_AUTO_PROVISION_CHECKPOINT=1
+```
+
+Checkpoint repair only uses owner-configured sources such as `EVAVO_CHECKPOINT_FILE` or `EVAVO_CHECKPOINT_URL`. MCP tools cannot supply arbitrary model/repository URLs.
+
+## Shared model libraries
+
+Reuse existing models without copying them:
+
+```powershell
+$env:EVAVO_SHARED_MODEL_ROOTS = "D:\AI\Models;E:\SharedModels"
+```
+
+Alias:
+
+```text
+EVAVO_COMFYUI_MODEL_ROOTS
+```
+
+EVAVO generates its own `.evavo\extra-model-paths.yaml` and passes it to managed ComfyUI with `--extra-model-paths-config`. It does not overwrite ComfyUI's own configuration. Effective model-path configuration is fingerprinted; only an identity-verified EVAVO-managed ComfyUI may be restarted when that configuration changes.
+
+`model_inventory` reports common loader categories independently:
+
+```text
+checkpoints
+loras
+vae
+controlnet
+diffusion_models
+text_encoders
+clip_vision
+upscale_models
+```
+
+## Shared task history
+
+CLI and MCP use the same atomic lock-protected task history. Records can include task ID, prompt/project, status, backend mode, checkpoint, workflow path, output directory, all output URIs, errors and timestamps.
+
+Typical commands:
+
+```powershell
+python evavo.py tasks --limit 20
+python evavo.py stats
+```
+
+An alternate history path can be set with `EVAVO_TASK_HISTORY`.
+
+## Optional HTTP gateway
+
+The optional gateway is separate from MCP and remains loopback-only at:
+
+```text
+http://127.0.0.1:8000
+```
+
+Owned route:
+
+```text
+POST /generate/image -> native ComfyUI
+```
+
+Optional delegated routes:
+
+```text
+POST /generate/video
+POST /generate/audio
+POST /generate/3d
+```
+
+Use `GET /services` to inspect delegated provider readiness. A missing provider fails the asynchronous task with a structured `PROVIDER_*` error; `202` means accepted, not completed.
+
+Gateway protections include CORS-off-by-default, pre-parse request size limits (including chunked bodies), owner-root-confined optional request workflows, ordinary-file result identity checks, fail-closed corrupt state and one live gateway owner per task-state file.
+
+See `GATEWAY-INTEGRATION-GUIDE.md` and `GATEWAY-AUX-PROVIDERS.md`.
+
+## Diagnosis and recovery
+
+Read-only status:
+
+```powershell
+.\AGENT-STATUS.ps1
+.\AGENT-STATUS.ps1 -Json
+```
+
+Strict image-runtime repair:
 
 ```powershell
 python agent-doctor.py --repair --provision
 ```
 
-Native ComfyUI and at least one usable checkpoint are required for the built-in workflow. The deterministic mock cannot satisfy the strict real-renderer gate. The doctor also validates configured shared roots and reports common loader-node model inventory.
+Recovery runbook:
 
-## Validation
-
-The full workstation updater runs:
-
-```powershell
-python test-provisioning.py
-python test-backend-automation.py
-python test-chatgpt-tunnel.py
-python test-agent-integration.py
-python evavo.py test
+```text
+AGENT-RECOVERY.md
 ```
 
-It also parses the canonical PowerShell installer/launcher scripts with PowerShell's AST parser before making agent/tunnel configuration changes.
-
-The suites cover provisioning idempotency and checkpoint safety, shared-model YAML/config hashes, PID identity checks, backend checkpoint repair, MCP output-file authorization, ChatGPT tunnel SHA/key/state contracts, MCP stdio/Streamable HTTP negotiation, model inventory, mock rejection, image/batch generation, shared history/statistics, image-content delivery, native workflow submission/output collection, offline behavior, and controller lifecycle.
-
-## Safety/lifecycle rules
-
-- Native and private MCP HTTP listeners bind to loopback by default.
-- The ChatGPT bridge uses an outbound OpenAI Secure MCP Tunnel rather than opening an inbound public MCP/ComfyUI port.
-- EVAVO never uses broad `taskkill /IM python.exe` cleanup.
-- Managed native/mock shutdown verifies the recorded process command before termination; stale/reused PIDs are not trusted.
-- An already-running user-managed ComfyUI is reused and is not stopped by EVAVO.
-- Existing standard source/portable installs are reused before creating a new sibling checkout.
-- Portable embedded Python is not modified by the provisioner.
-- EVAVO-managed ComfyUI restarts only when needed to apply changed EVAVO shared-model configuration.
-- Output downloads use temporary files followed by atomic replacement.
-- Tunnel runtime keys are not stored in Git/repository state/Startup plaintext.
-- Legacy launchers are compatibility shims and no longer spawn persistent `cmd /k`, `-NoExit`, Ollama/Kokoro, or surprise multimodal jobs.
+No recovery path should broadly kill `python.exe`, overwrite `.git`, force-push, expose local generation ports publicly, or regenerate current source from historical templates.
