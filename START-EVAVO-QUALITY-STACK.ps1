@@ -5,9 +5,12 @@ param(
     [string]$ThreeDRoot = "C:\GitRepos\evavo-3d-studio",
     [switch]$UseNextComfy,
     [switch]$Start3DWorker,
+    [switch]$StartGateway,
     [string]$ThreeDWorkspaceRoot = "C:\EVAVO-3D-WORK",
     [ValidateRange(1024, 65535)]
     [int]$ThreeDWorkerPort = 4314,
+    [ValidateRange(1024, 65535)]
+    [int]$GatewayPort = 8000,
     [ValidateSet("dev", "start")]
     [string]$AtmosphereMode = "dev",
     [string]$OutputRoot = "C:\AI\evavo-generation-results"
@@ -27,6 +30,7 @@ $ComfyEndpoint = "http://127.0.0.1:$ComfyPort"
 $KokoroEndpoint = "http://127.0.0.1:8880"
 $AtmosphereEndpoint = "http://127.0.0.1:3000"
 $ThreeDWorkerEndpoint = "http://127.0.0.1:$ThreeDWorkerPort"
+$GatewayEndpoint = "http://127.0.0.1:$GatewayPort"
 $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $LogRoot = Join-Path $OutputRoot "service-logs\$Stamp"
 New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
@@ -117,6 +121,30 @@ function Start-LoggedProcess {
     $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
     Write-Host "[START] $Name PID $($process.Id)"
     return $process
+}
+
+function Test-GatewayQualityContract {
+    param([string]$Endpoint)
+    try {
+        $payload = Invoke-RestMethod -Uri "$Endpoint/capabilities" -Method Get -TimeoutSec 5 -ErrorAction Stop
+        $profiles = @($payload.image.quality_profiles)
+        $receipt = @($payload.image.reproducible_receipt)
+        return (
+            $payload.image.ready -eq $true -and
+            $payload.image.per_request_quality -eq $true -and
+            $payload.image.hero_two_pass -eq $true -and
+            $payload.image.lora -eq $true -and
+            $profiles -contains "quality" -and
+            $profiles -contains "hero" -and
+            $receipt -contains "seed" -and
+            $receipt -contains "workflow_sha256" -and
+            $receipt -contains "quality_profile" -and
+            $receipt -contains "output_width" -and
+            $receipt -contains "output_height"
+        )
+    } catch {
+        return $false
+    }
 }
 
 Write-Host "EVAVO QUALITY STACK" -ForegroundColor Cyan
@@ -262,8 +290,53 @@ if (Test-Endpoint $AtmosphereEndpoint) {
     Write-Host "[OK] Atmosphere Studio healthy at $AtmosphereEndpoint" -ForegroundColor Green
 }
 
+# Optional unified HTTP compatibility gateway. Bind it to the same selected
+# ComfyUI runtime so 8188/8189 comparisons remain meaningful end to end.
+if ($StartGateway) {
+    if (Test-GatewayQualityContract $GatewayEndpoint) {
+        Write-Host "[OK] EVAVO gateway already exposes the quality contract at $GatewayEndpoint" -ForegroundColor Green
+    } else {
+        if (Test-Endpoint "$GatewayEndpoint/health") {
+            throw "An EVAVO gateway is already running at $GatewayEndpoint but does not expose the current quality contract. Restart that gateway so it loads the current main branch before retrying -StartGateway."
+        }
+        $gatewayStarter = Join-Path $PSScriptRoot "START-GATEWAY.ps1"
+        if (-not (Test-Path -LiteralPath $gatewayStarter -PathType Leaf)) {
+            throw "Gateway starter not found: $gatewayStarter"
+        }
+        $env:COMFYUI_ENDPOINT = $ComfyEndpoint
+        $env:EVAVO_COMFYUI_ENDPOINT = $ComfyEndpoint
+        $env:EVAVO_GATEWAY_HOST = "127.0.0.1"
+        $env:EVAVO_GATEWAY_PORT = "$GatewayPort"
+        Start-LoggedProcess "evavo-gateway-bootstrap" "powershell.exe" @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $gatewayStarter,
+            "-SkipInstall", "-SkipValidation"
+        ) $PSScriptRoot | Out-Null
+
+        $gatewayPredicate = {
+            param($payload)
+            $profiles = @($payload.image.quality_profiles)
+            $receipt = @($payload.image.reproducible_receipt)
+            return (
+                $payload.image.ready -eq $true -and
+                $payload.image.per_request_quality -eq $true -and
+                $payload.image.hero_two_pass -eq $true -and
+                $payload.image.lora -eq $true -and
+                $profiles -contains "quality" -and
+                $profiles -contains "hero" -and
+                $receipt -contains "seed" -and
+                $receipt -contains "workflow_sha256" -and
+                $receipt -contains "quality_profile" -and
+                $receipt -contains "output_width" -and
+                $receipt -contains "output_height"
+            )
+        }
+        Wait-JsonEndpoint "$GatewayEndpoint/capabilities" $gatewayPredicate 120 | Out-Null
+        Write-Host "[OK] EVAVO gateway quality contract healthy at $GatewayEndpoint" -ForegroundColor Green
+    }
+}
+
 $summary = [ordered]@{
-    schemaVersion = 2
+    schemaVersion = 3
     startedAt = (Get-Date).ToString("o")
     useNextComfy = [bool]$UseNextComfy
     comfyRoot = $ComfyRoot
@@ -277,6 +350,8 @@ $summary = [ordered]@{
     threeDWorkerRequested = [bool]$Start3DWorker
     threeDWorkerEndpoint = if ($Start3DWorker) { $ThreeDWorkerEndpoint } else { $null }
     threeDWorkspaceRoot = if ($Start3DWorker) { $ThreeDWorkspaceRoot } else { $null }
+    gatewayRequested = [bool]$StartGateway
+    gatewayEndpoint = if ($StartGateway) { $GatewayEndpoint } else { $null }
     logRoot = $LogRoot
 }
 $summary | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $LogRoot "stack.json") -Encoding UTF8
@@ -292,3 +367,7 @@ if ($Start3DWorker) {
     $qualityArgs += @("-Require3DExecution", "-ThreeDWorkerEndpoint", $ThreeDWorkerEndpoint)
 }
 Write-Host ("  " + ($qualityArgs -join " "))
+if ($StartGateway) {
+    Write-Host "Gateway end-to-end smoke:"
+    Write-Host "  python .\gateway-smoke-test.py --base $GatewayEndpoint --profile quality --seed 1337"
+}
