@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "EVAVO-CAPABILITIES.json"
 REPOSITORY_CAPABILITIES_PATH = ROOT / ".evavo" / "capabilities.json"
 MCP_PATH = ROOT / "evavo_local_image_generator" / "mcp_server.py"
+BACKEND_PATH = ROOT / "evavo_local_image_generator" / "backends" / "comfyui_backend.py"
 STATUS_PATH = ROOT / "evavo_local_image_generator" / "comfyui_status.py"
 CANCEL_PATH = ROOT / "evavo_local_image_generator" / "comfyui_cancel.py"
 GATEWAY_PATH = ROOT / "EVAVO-GATEWAY.py"
@@ -84,7 +85,7 @@ class CapabilityManifestTests(unittest.TestCase):
             self.assertIn('"EVAVO_MCP_WORKFLOW_ROOT"', text)
             self.assertNotIn('"EVAVO_CHECKPOINT_URL",', text)
 
-    def test_mcp_generation_status_uses_jobs_history_and_queue_truthfully(self) -> None:
+    def test_mcp_generation_status_uses_public_jobs_history_and_queue_contract(self) -> None:
         status_contract = self.manifest["interfaces"]["mcp"]["generation_status"]
         self.assertEqual(set(status_contract["normalized_states"]), {"queued", "running", "completed", "failed", "cancelled", "unknown"})
         self.assertTrue(status_contract["failed_history_updates_shared_task_history"])
@@ -92,12 +93,17 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertIn("GET /api/jobs/<job_id>", self.manifest["native_comfyui_api"])
         self.assertIn("GET /queue", self.manifest["native_comfyui_api"])
         mcp_source = MCP_PATH.read_text(encoding="utf-8")
+        backend_source = BACKEND_PATH.read_text(encoding="utf-8")
         status_source = STATUS_PATH.read_text(encoding="utf-8")
         self.assertIn("from .comfyui_status import prompt_status", mcp_source)
         self.assertIn("prompt_status", mcp_source)
         self.assertIn('error_code="COMFYUI_EXECUTION_FAILED"', mcp_source)
-        self.assertIn("/api/jobs/", status_source)
-        self.assertIn('backend._request("/queue"', status_source)
+        self.assertIn("def job_detail(", backend_source)
+        self.assertIn("def queue_state(", backend_source)
+        self.assertIn("/api/jobs/", backend_source)
+        self.assertIn("backend.job_detail(", status_source)
+        self.assertIn("backend.queue_state()", status_source)
+        self.assertNotIn("backend._request", status_source)
         self.assertIn('"cancelled": "cancelled"', status_source)
         self.assertIn('status = "unknown"', status_source)
 
@@ -110,11 +116,16 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertFalse(contract["legacy_running_broad_interrupt_allowed"])
         self.assertIn("POST /api/jobs/<job_id>/cancel", self.manifest["native_comfyui_api"])
         mcp_source = MCP_PATH.read_text(encoding="utf-8")
+        backend_source = BACKEND_PATH.read_text(encoding="utf-8")
         cancel_source = CANCEL_PATH.read_text(encoding="utf-8")
         self.assertIn("from .comfyui_cancel import cancel_prompt", mcp_source)
         self.assertIn("async def cancel_generation", mcp_source)
-        self.assertIn("/api/jobs/", cancel_source)
-        self.assertIn("legacy_pending_queue_delete", cancel_source)
+        self.assertIn("def cancel_job(", backend_source)
+        self.assertIn("def delete_pending(", backend_source)
+        self.assertIn("backend.cancel_job(", cancel_source)
+        self.assertIn("backend.delete_pending(", cancel_source)
+        self.assertNotIn("backend._request", cancel_source)
+        self.assertNotIn("backend._open", cancel_source)
         self.assertNotIn('"/interrupt"', cancel_source)
 
     def test_chatgpt_contract_uses_secure_tunnel_not_direct_localhost(self) -> None:
