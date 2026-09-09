@@ -96,6 +96,13 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
         self.assertNotRegex(source, r"(?i)set\s+[\"']?CONTROL_PLANE_API_KEY\s*=")
         self.assertNotIn("$env:CONTROL_PLANE_API_KEY = $env:CONTROL_PLANE_API_KEY", source)
 
+    def test_doctor_verifies_tunnel_executable_integrity(self) -> None:
+        source = text("doctor")
+        self.assertIn("tunnel_client_integrity", source)
+        self.assertIn("binary_digest", source)
+        self.assertIn("Get-FileHash -Path $binary -Algorithm SHA256", source)
+        self.assertIn("hash-verified executable smoke check passed", source)
+
     def test_doctor_never_serializes_or_prints_the_key(self) -> None:
         source = text("doctor")
         self.assertIn("tunnel-client", source)
