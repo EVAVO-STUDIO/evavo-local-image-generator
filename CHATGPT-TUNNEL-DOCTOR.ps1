@@ -1,4 +1,6 @@
 # Diagnose the EVAVO ChatGPT Secure MCP Tunnel without exposing secrets.
+# Note: tunnel-client doctor is a local preflight. It does not by itself prove
+# ChatGPT workspace visibility or that a daemon has successfully polled work.
 
 param(
     [string]$Profile,
@@ -43,8 +45,8 @@ $profileOk = [bool]$Profile -and $Profile -match '^[A-Za-z0-9._-]+$'
 Add-Check "profile" $profileOk ($(if ($profileOk) { $Profile } else { "missing or invalid" }))
 
 $tunnelId = if ($state) { [string]$state.tunnel_id } else { "" }
-$tunnelIdOk = [bool]$tunnelId -and $tunnelId -match '^tunnel_[A-Za-z0-9_-]{8,}$'
-Add-Check "tunnel_id" $tunnelIdOk ($(if ($tunnelIdOk) { $tunnelId } else { "missing or invalid" }))
+$tunnelIdOk = [bool]$tunnelId -and $tunnelId -match '^tunnel_[0-9a-f]{32}$'
+Add-Check "tunnel_id" $tunnelIdOk ($(if ($tunnelIdOk) { $tunnelId } else { "missing or invalid; expected tunnel_<32 lowercase hex characters>" }))
 
 $mcpUrl = if ($state -and $state.mcp_server_url) { [string]$state.mcp_server_url } else { "http://127.0.0.1:8765/mcp" }
 $uri = $null
@@ -120,38 +122,40 @@ elseif ($env:LOCALAPPDATA) {
 $keySeverity = if ($RequireRuntimeKey) { "error" } else { "warning" }
 Add-Check "runtime_key" $keyAvailable ($(if ($keyAvailable) { "available from $keySource" } else { $keySource })) $keySeverity
 
-$controlPlaneOk = $false
-$controlPlaneDetail = "skipped"
+# Kept as -SkipControlPlane for command compatibility, but tunnel-client doctor
+# is treated as local/runtime preflight rather than proof of connector visibility.
+$preflightOk = $false
+$preflightDetail = "skipped"
 if (-not $SkipControlPlane -and $binaryOk -and $profileOk -and $keyAvailable) {
     try {
         $doctorOutput = & $binary doctor --profile $Profile --explain 2>&1
-        $controlPlaneOk = $LASTEXITCODE -eq 0
-        if ($controlPlaneOk) {
-            $controlPlaneDetail = "tunnel-client doctor passed"
+        $preflightOk = $LASTEXITCODE -eq 0
+        if ($preflightOk) {
+            $preflightDetail = "tunnel-client local preflight passed"
         }
         else {
-            $controlPlaneDetail = (($doctorOutput | Out-String).Trim())
-            if ($controlPlaneDetail.Length -gt 1200) {
-                $controlPlaneDetail = $controlPlaneDetail.Substring($controlPlaneDetail.Length - 1200)
+            $preflightDetail = (($doctorOutput | Out-String).Trim())
+            if ($preflightDetail.Length -gt 1200) {
+                $preflightDetail = $preflightDetail.Substring($preflightDetail.Length - 1200)
             }
         }
     }
     catch {
-        $controlPlaneDetail = $_.Exception.Message
+        $preflightDetail = $_.Exception.Message
     }
 }
 elseif ($SkipControlPlane) {
-    $controlPlaneOk = $true
-    $controlPlaneDetail = "skipped by request"
+    $preflightOk = $true
+    $preflightDetail = "skipped by request"
 }
 elseif (-not $keyAvailable) {
-    $controlPlaneDetail = "runtime key unavailable"
+    $preflightDetail = "runtime key unavailable"
 }
 else {
-    $controlPlaneDetail = "binary/profile unavailable"
+    $preflightDetail = "binary/profile unavailable"
 }
-$controlPlaneSeverity = if ($RequireRuntimeKey -and -not $SkipControlPlane) { "error" } else { "warning" }
-Add-Check "control_plane_doctor" $controlPlaneOk $controlPlaneDetail $controlPlaneSeverity
+$preflightSeverity = if ($RequireRuntimeKey -and -not $SkipControlPlane) { "error" } else { "warning" }
+Add-Check "tunnel_local_preflight" $preflightOk $preflightDetail $preflightSeverity
 
 $process = $null
 if ($profileOk) {
@@ -166,17 +170,26 @@ if ($profileOk) {
 }
 $running = $null -ne $process
 $runningSeverity = if ($RequireRunning) { "error" } else { "warning" }
-Add-Check "tunnel_process" $running ($(if ($running) { "running PID $($process.ProcessId)" } else { "not running" })) $runningSeverity
+Add-Check "tunnel_process" $running ($(if ($running) { "tunnel-client run process active, PID $($process.ProcessId)" } else { "not running" })) $runningSeverity
 
 $hardFailures = @($checks | Where-Object { -not $_.ok -and $_.severity -eq "error" })
 $warnings = @($checks | Where-Object { -not $_.ok -and $_.severity -eq "warning" })
-$status = if ($hardFailures.Count -gt 0) { "needs_attention" } elseif ($running -and $controlPlaneOk -and $localMcpOk) { "running" } elseif ($warnings.Count -gt 0) { "configured_with_warnings" } else { "ready_to_start" }
+$status = if ($hardFailures.Count -gt 0) {
+    "needs_attention"
+} elseif ($running -and $preflightOk -and $localMcpOk) {
+    "runtime_running"
+} elseif ($warnings.Count -gt 0) {
+    "configured_with_warnings"
+} else {
+    "ready_to_start"
+}
 $payload = [pscustomobject][ordered]@{
     ok = $hardFailures.Count -eq 0
     status = $status
     profile = $Profile
     tunnel_id = $tunnelId
     private_mcp_url = $mcpUrl
+    note = "A running process/local preflight does not by itself prove ChatGPT workspace app visibility; that is completed in OpenAI Platform/ChatGPT."
     checks = @($checks)
 }
 
@@ -199,6 +212,7 @@ else {
     }
     Write-Host ("=" * 82)
     Write-Host $status
+    Write-Host $payload.note -ForegroundColor DarkGray
 }
 
 if ($hardFailures.Count -gt 0) {
