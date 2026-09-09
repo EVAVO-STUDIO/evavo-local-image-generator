@@ -40,7 +40,6 @@ function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
     if ($Value.Contains('"') -or $Value.Contains("`r") -or $Value.Contains("`n")) {
         throw "Cannot persist $Name into CMD autostart because its value contains an unsupported quote/newline. Configure it as a Windows user environment variable instead."
     }
-    # Percent signs are expanded by cmd.exe even inside quoted SET syntax.
     $safe = $Value.Replace('%', '%%')
     return "set `"$Name=$safe`""
 }
@@ -49,6 +48,7 @@ function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
 # setup shell after a reboot. Signed checkpoint URLs are intentionally excluded.
 $persistedEnvironment = [ordered]@{
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
+    "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
     "EVAVO_COMFYUI_ENDPOINT" = "http://127.0.0.1:8188"
     "EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path $repo ".evavo\outputs")
 }
@@ -94,7 +94,7 @@ Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 Write-Host "Installed EVAVO agent MCP autostart:" -ForegroundColor Green
 Write-Host "  $launcher"
 Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in." -ForegroundColor Green
-Write-Host "Safe local ComfyUI provisioning settings were embedded for reboot persistence." -ForegroundColor Green
+Write-Host "Safe local ComfyUI/checkpoint provisioning settings were embedded for reboot persistence." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
     Write-Host "Shared ComfyUI model roots were embedded for reboot persistence." -ForegroundColor Green
 }
