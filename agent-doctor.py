@@ -24,9 +24,11 @@ from evavo_local_image_generator.comfyui_runtime import (
 )
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_ENDPOINT = (os.getenv("EVAVO_COMFYUI_ENDPOINT") or os.getenv("COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
+DEFAULT_ENDPOINT = (os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
 DEFAULT_MCP_HOST = os.getenv("EVAVO_MCP_HOST", "127.0.0.1")
-DEFAULT_MCP_PORT = int(os.getenv("EVAVO_MCP_PORT", "8765"))
+# Keep the raw environment value so argparse, not module import, owns integer
+# validation and returns a normal CLI error for malformed configuration.
+DEFAULT_MCP_PORT = os.getenv("EVAVO_MCP_PORT", "8765")
 
 
 def _port_open(host: str, port: int) -> bool:
@@ -237,10 +239,6 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
     shared_configured, shared_ok, shared_detail = _shared_model_configuration()
     add("shared_model_roots", shared_ok, shared_detail, severity=renderer_severity if shared_configured else "info")
 
-    # Probe the configured native endpoint before deciding whether any runtime
-    # installation/provisioning work is necessary. A healthy externally started
-    # ComfyUI is already a valid renderer even when its filesystem path is not
-    # discoverable by EVAVO.
     health = native_health(endpoint)
     installs = discover_comfyui()
     provision_attempted = False
