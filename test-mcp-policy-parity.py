@@ -16,6 +16,7 @@ POLICY_ENV = (
     "COMFYUI_ENDPOINT",
     "EVAVO_COMFYUI_ENDPOINT",
     "EVAVO_GENERATION_OUTPUT_DIR",
+    "EVAVO_TASK_HISTORY",
     "EVAVO_MCP_OUTPUT_ROOTS",
     "EVAVO_COMFYUI_WORKFLOW",
     "EVAVO_MCP_ALLOW_WORKFLOW_PATHS",
@@ -85,6 +86,43 @@ class McpPolicyParityTests(unittest.TestCase):
             policy = mcp_policy.validate_environment()
         self.assertTrue(policy["ok"], policy)
         self.assertEqual(policy["policy"]["comfyui_endpoint"], "http://[::1]:8188")
+
+    def test_task_history_policy_matches_runtime_tracker_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            history = Path(temp) / "state" / "history.json"
+            env = clean_env()
+            env["EVAVO_TASK_HISTORY"] = str(history)
+            with patch.dict(os.environ, env, clear=True):
+                policy = mcp_policy.validate_environment()
+                tracker = mcp_server._tracker()
+        self.assertTrue(policy["ok"], policy)
+        self.assertEqual(Path(policy["policy"]["task_history_file"]), history.resolve())
+        self.assertEqual(tracker.history_file, history.resolve())
+
+    def test_task_history_rejects_directory_or_symlink_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / "history.json"
+            directory.mkdir()
+            env = clean_env()
+            env["EVAVO_TASK_HISTORY"] = str(directory)
+            with patch.dict(os.environ, env, clear=True):
+                policy = mcp_policy.validate_environment()
+            self.assertFalse(policy["ok"])
+            self.assertTrue(any("EVAVO_TASK_HISTORY" in item for item in policy["errors"]))
+
+            actual = root / "actual.json"
+            actual.write_text("[]\n", encoding="utf-8")
+            link = root / "linked.json"
+            try:
+                link.symlink_to(actual)
+            except (OSError, NotImplementedError):
+                return
+            env["EVAVO_TASK_HISTORY"] = str(link)
+            with patch.dict(os.environ, env, clear=True):
+                linked_policy = mcp_policy.validate_environment()
+            self.assertFalse(linked_policy["ok"])
+            self.assertTrue(any("symlink" in item.lower() for item in linked_policy["errors"]))
 
     def test_default_and_additional_output_roots_match_server_authority(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
