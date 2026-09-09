@@ -10,13 +10,10 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+# Production MCP always runs from the repository-local isolated environment.
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) {
-        throw "Python 3.10+ was not found."
-    }
-    $python = $cmd.Source
+    throw "EVAVO .venv is not ready. Run UPDATE-AND-VERIFY-EVAVO.ps1 before starting persistent/private MCP."
 }
 $python = (Resolve-Path $python).Path
 
@@ -49,24 +46,20 @@ function Test-EvavoMcpListenerIdentity($Listener) {
         if ($commandLine -notmatch $pattern) { return $false }
     }
 
-    # Current validated entrypoint: exact expected Python is sufficient together
-    # with the exact loopback/port/path/module argument contract above.
     $isValidatedEntry = $commandLine -match "evavo_local_image_generator\.mcp_entry"
     if ($isValidatedEntry -and $executable -and [System.StringComparer]::OrdinalIgnoreCase.Equals([System.IO.Path]::GetFullPath($executable), [System.IO.Path]::GetFullPath($python))) {
         return $true
     }
 
     # Migration path: an older mcp_server listener is trusted only when its
-    # parent is this exact repository launcher. It will be recycled below into
+    # parent is this exact repository launcher. It is recycled below into
     # mcp_entry rather than adopted as current.
     $parentPid = [int]$owner.ParentProcessId
     if ($parentPid -gt 0) {
         $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$parentPid" -ErrorAction SilentlyContinue
         $parentCommand = if ($parent) { [string]$parent.CommandLine } else { "" }
         $escapedLauncher = [regex]::Escape((Join-Path $PSScriptRoot "START-AGENT-MCP.ps1"))
-        if ($parentCommand -match $escapedLauncher) {
-            return $true
-        }
+        if ($parentCommand -match $escapedLauncher) { return $true }
     }
     return $false
 }
@@ -81,10 +74,6 @@ function Wait-PortClosed([int]$PortNumber, [int]$Seconds = 10) {
     return $false
 }
 
-# Avoid duplicate login/manual listeners. A verified listener can be recycled
-# after an update so the process actually loads the current checkout. Unknown
-# processes are never adopted or stopped. Legacy mcp_server listeners are always
-# migrated to the validated mcp_entry production entrypoint.
 $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($listener) {
     if (-not (Test-EvavoMcpListenerIdentity $listener)) {
@@ -110,15 +99,11 @@ if ($listener) {
 if (-not $SkipValidation) {
     Write-Host "Validating EVAVO agent integration..." -ForegroundColor Cyan
     & $python (Join-Path $PSScriptRoot "test-agent-integration.py")
-    if ($LASTEXITCODE -ne 0) {
-        throw "Agent integration tests failed."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "Agent integration tests failed." }
 
     Write-Host "Checking EVAVO/ComfyUI environment..." -ForegroundColor Cyan
     & $python (Join-Path $PSScriptRoot "evavo.py") doctor
-    if ($LASTEXITCODE -ne 0) {
-        throw "EVAVO operations doctor found a blocking problem."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "EVAVO operations doctor found a blocking problem." }
 }
 
 $argsList = @(
@@ -128,9 +113,7 @@ $argsList = @(
     "--port", "$Port",
     "--path", $Path
 )
-if ($JsonResponse) {
-    $argsList += "--json-response"
-}
+if ($JsonResponse) { $argsList += "--json-response" }
 
 Write-Host "Starting policy-validated EVAVO MCP at http://127.0.0.1:$Port$Path" -ForegroundColor Green
 Write-Host "Native ComfyUI will auto-start/provision; configured checkpoints can auto-repair the built-in workflow." -ForegroundColor Green
