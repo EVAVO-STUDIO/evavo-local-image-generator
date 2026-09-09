@@ -1,211 +1,124 @@
-# EVAVO Fully Automated Generation Guide
+# EVAVO Automation Guide
 
-Complete automation system for EVAVO multi-modal AI generation. Works with Claude, ChatGPT, and direct command line.
+This repository now has one verified production contract: **local image generation through native ComfyUI**. Historical multimodal startup instructions are retired.
 
-## Quick Start
+## Canonical Windows setup
 
-### From Claude (Cowork)
-```
-Execute this automation:
-python EVAVO-AUTOMATION.py
-```
-
-### From ChatGPT / Command Line
-```bash
+```powershell
 cd C:\Gitrepos\evavo-local-image-generator
-python EVAVO-AUTOMATION.py
+git pull --ff-only origin main
+.\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-## Modes
+The updater safely fast-forwards `main`, installs dependencies, runs the authoritative verifier, repairs/provisions native ComfyUI when allowed, validates model/workflow readiness, configures Claude stdio MCP and the private loopback MCP listener, and configures the ChatGPT Secure MCP Tunnel when a valid OpenAI tunnel ID is already available.
 
-### Full Automation (Default)
-```bash
-python EVAVO-AUTOMATION.py
-# or
-python EVAVO-AUTOMATION.py --mode full
-```
-- Starts ComfyUI, Ollama, and Kokoro services
-- Runs complete multi-modal generation tests (71 tests)
-- Copies all outputs to `C:\Users\User\beestation\evavo-generation\`
+## Real image generation
 
-**Duration:** ~10-30 minutes depending on system and generation complexity
-
-### Test Only
-```bash
-python EVAVO-AUTOMATION.py --mode test
-```
-- Runs generation tests WITHOUT starting services
-- **Requires:** ComfyUI, Ollama running separately
-- Useful for testing when services are already running
-
-### Generation Only
-```bash
-python EVAVO-AUTOMATION.py --mode generate
-```
-- Runs generation without full test suite
-- **Requires:** ComfyUI, Ollama running separately
-
-## What Gets Generated
-
-The automation generates real, AI-produced content across 7 modalities:
-
-1. **Images** (45 tests)
-   - Text-to-image generation
-   - Image upscaling and enhancement
-   - Style transfers
-
-2. **Videos** (3 tests)
-   - Text-to-video synthesis
-   - Image animation
-   - Video interpolation
-
-3. **Audio** (6 tests)
-   - Text-to-speech synthesis
-   - Voice cloning
-   - Audio generation
-
-4. **Text** (3 tests)
-   - LLM-based text generation
-   - Prompt refinement
-   - Content creation
-
-5. **3D Models** (6 tests)
-   - 3D asset generation
-   - Model variations
-   - Mesh generation
-
-6. **Particles & Effects** (4 tests)
-   - Particle system generation
-   - VFX creation
-   - Animation effects
-
-7. **PBR Textures** (4 tests)
-   - Material generation
-   - Texture creation
-   - Surface attributes
-
-**Total: 71 comprehensive tests** generating real AI content
-
-## Output Location
-
-All generated content is saved to:
-```
-C:\Users\User\beestation\evavo-generation\
+```powershell
+python evavo.py generate --prompts "your prompt" --project demo --wait
 ```
 
-Organized by modality:
-```
-evavo-generation/
-├── evavo-images/        (45 generated images)
-├── evavo-videos/        (3 generated videos)
-├── evavo-audio/         (6 generated audio files)
-├── evavo-text/          (3 generated text files)
-├── evavo-particles/     (4 particle systems)
-├── evavo-models/        (6 3D models)
-├── evavo-textures/      (4 texture sets)
-└── evavo-state/         (generation metadata & logs)
+Batch:
+
+```powershell
+python evavo.py generate --prompts "prompt one" "prompt two" --project batch --wait
 ```
 
-## Prerequisites
+Custom ComfyUI API workflow:
 
-### On Windows Machine
-- **Python 3.8+** installed
-- **ComfyUI** running at `C:\AI\ComfyUI\`
-- **Ollama** installed and available
-- **Kokoro TTS** (optional, at `C:\AI\Kokoro-FastAPI\`)
-- **GPU** with adequate VRAM (RTX 3080+ recommended for optimal speed)
-
-### From Claude/ChatGPT
-- Session linked to Windows machine via Cowork
-- Device has `device_bash` access to mounted folders
-- Sufficient disk space in `C:\Users\User\beestation\`
-
-## Usage from AI Assistants
-
-### Claude (Cowork)
-```python
-# In Cowork, run directly:
-Execute full EVAVO automation:
-python C:\Gitrepos\evavo-local-image-generator\EVAVO-AUTOMATION.py
-
-# Or specify mode:
-Run tests only:
-python C:\Gitrepos\evavo-local-image-generator\EVAVO-AUTOMATION.py --mode test
+```powershell
+python evavo.py generate --prompts "your prompt" --workflow "C:\workflows\api.json" --wait
 ```
 
-### ChatGPT (with File Upload)
-1. Attach this automation script to ChatGPT
-2. Ask: "Run the EVAVO automation to generate content"
-3. ChatGPT will execute the automation and report progress
+No compatibility launcher generates samples unless prompts or `--examples` are explicitly supplied.
 
-### Direct Command Line
-```bash
-# Navigate to repo
-cd C:\Gitrepos\evavo-local-image-generator
+## Agent automation
 
-# Run automation
-python EVAVO-AUTOMATION.py
+### Claude Desktop
 
-# Or with specific mode
-python EVAVO-AUTOMATION.py --mode full
+Claude uses local stdio MCP. The updater configures it automatically, or run:
+
+```powershell
+.\INSTALL-CLAUDE-MCP.ps1
 ```
 
-## Troubleshooting
+Restart Claude Desktop after configuration changes.
 
-### ComfyUI Not Found
-- Ensure ComfyUI is at `C:\AI\ComfyUI\`
-- Run ComfyUI separately: `cd C:\AI\ComfyUI && python main.py`
+### ChatGPT
 
-### Ollama Not Running
-- Install Ollama from https://ollama.ai/
-- Start Ollama service before running automation
-- Check: `ollama serve` in terminal
+Cloud ChatGPT does not connect directly to workstation localhost. EVAVO uses the official outbound OpenAI Secure MCP Tunnel while keeping MCP and ComfyUI private on loopback.
 
-### Generation Errors
-- Check `evavo-state/generation-report.json` for details
-- Ensure GPU has sufficient VRAM
-- Try running in test-only mode first
+See:
 
-### Permission Errors
-- Ensure write access to `C:\Users\User\beestation\`
-- Check folder ownership and permissions
-- Run as Administrator if needed
-
-## Advanced Options
-
-### Custom Output Location
-Edit the script and change:
-```python
-self.beestation = Path("C:\\Users\\User\\your-custom-path\\evavo-generation")
+```text
+CHATGPT-TUNNEL.md
 ```
 
-### Custom Test Suite
-Replace `COMPLETE-MULTIMODAL-TEST.py` with your own test file
+### Private local MCP
 
-### Extend Automation
-Add new modalities by editing the `run_generation()` method
-
-## Integration with CI/CD
-
-The automation can be integrated into CI/CD pipelines:
-
-```yaml
-# Example GitHub Actions
-- name: Run EVAVO Generation
-  run: python EVAVO-AUTOMATION.py --mode full
-  timeout-minutes: 60
+```text
+http://127.0.0.1:8765/mcp
 ```
 
-## Support
+```powershell
+.\START-AGENT-MCP.ps1
+.\INSTALL-AGENT-MCP-AUTOSTART.ps1
+```
 
-For issues or feature requests:
-1. Check `evavo-state/generation-report.json` for error details
-2. Review logs in the respective output directories
-3. Verify all prerequisites are installed
-4. Run in test-only mode to isolate issues
+The listener is for local MCP clients, testing, and as the private target of the ChatGPT tunnel. Do not expose it directly to the public internet.
 
-## Version
+## Agent tools
 
-- **Current:** 1.0 (Production Ready)
-- **Platform:** Windows + Linux VM (mounted paths)
-- **Tested with:** Claude, ChatGPT, Direct CLI
+Current MCP tools include:
+
+```text
+provision_backend
+ensure_backend
+health_check
+discover_backends
+list_checkpoints
+model_inventory
+workflow_preflight
+generate_image
+generate_batch
+generation_status
+collect_generation
+read_output_image
+task_history
+task_statistics
+stop_managed_backend
+```
+
+`generate_image` and `generate_batch` can automatically ensure/provision the native renderer when enabled, wait for completion, download outputs, persist task history, and return concrete file paths. `read_output_image` returns an authorized generated image as native MCP image content.
+
+## Verification and repair
+
+Authoritative repository verifier:
+
+```powershell
+python evavo.py verify --full --require-powershell
+```
+
+Strict real-generation readiness/repair:
+
+```powershell
+python agent-doctor.py --repair --provision
+```
+
+The deterministic EVAVO mock cannot satisfy the strict real-generation gate.
+
+## Compatibility entry points
+
+Historical filenames such as `EVAVO-AUTOMATION.py`, `run_autonomous.py`, `RUN-GENERATION.py`, `START-EVERYTHING.ps1`, and related batch files remain only as safe compatibility shims. They delegate to the canonical verifier/controller and do not maintain their own ComfyUI/Ollama/Kokoro lifecycle, copy to hardcoded BeeStation paths, create Scheduled Tasks, or fabricate multimodal outputs.
+
+## What is not claimed by this repository
+
+Video, audio, 3D model, particle, text, and dedicated PBR-texture generation are **not** part of the verified production runtime here. Use the appropriate dedicated EVAVO repository/tooling for those capabilities rather than treating placeholder metadata as generated assets.
+
+## More detail
+
+- `README.md` — current repository overview
+- `AGENT-INTEGRATION.md` — Claude/MCP/runtime details
+- `CHATGPT-TUNNEL.md` — real ChatGPT workstation connectivity
+- `OPERATIONS-GUIDE.md` — operational behavior/recovery
+- `QUICK-REFERENCE.md` — concise commands
