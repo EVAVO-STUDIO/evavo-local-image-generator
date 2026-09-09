@@ -44,6 +44,8 @@ REQUIRED_FILES = [
     "test-agent-integration.py",
     "test-provisioning.py",
     "test-backend-automation.py",
+    "test-batch-workflow-preflight.py",
+    "test-agent-doctor-workflows.py",
     "test-chatgpt-tunnel.py",
     "provision-comfyui.py",
     "UPDATE-AND-VERIFY-EVAVO.ps1",
@@ -181,8 +183,6 @@ def start_service(endpoint: str, wait_seconds: float = 90.0, allow_mock: bool = 
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    # Native ComfyUI wins. native_health explicitly rejects the deterministic
-    # EVAVO mock even though the simulator exposes native-like routes for tests.
     current_native = native_health(endpoint)
     if current_native:
         try:
@@ -193,7 +193,6 @@ def start_service(endpoint: str, wait_seconds: float = 90.0, allow_mock: bool = 
         print(json.dumps({"ok": True, **result}, indent=2))
         return 0
 
-    # Try to discover/start real ComfyUI before accepting or starting a mock.
     try:
         result = ensure_comfyui(endpoint, wait_seconds=wait_seconds, allow_start=True)
         print(json.dumps({"ok": True, **result}, indent=2))
@@ -201,8 +200,6 @@ def start_service(endpoint: str, wait_seconds: float = 90.0, allow_mock: bool = 
     except RuntimeError as exc:
         native_error = str(exc)
 
-    # On non-default isolated test ports native auto-start is intentionally not
-    # supported. If a healthy EVAVO mock already owns that endpoint, reuse it.
     try:
         existing = service_health(endpoint)
         if existing.get("mode") == "mock" and allow_mock:
@@ -227,8 +224,6 @@ def stop_service() -> int:
         if stop_managed_mock():
             mock_result = {"status": "stopped", "stopped": True, "pid": mock_pid}
         else:
-            # Never trust a stale/reused PID. Clearing EVAVO's stale state is safe;
-            # killing an unrelated process is not.
             clear_state()
             mock_result = {"status": "stale_or_identity_mismatch", "stopped": False, "pid": mock_pid}
     print(json.dumps({"ok": True, "status": "stopped", "components": {"native": native_result, "mock": mock_result}}, indent=2))
@@ -355,19 +350,22 @@ def sync_main() -> int:
     return 0
 
 
-def bootstrap(endpoint: str, skip_pull: bool = False) -> int:
+def bootstrap(endpoint: str, skip_pull: bool = False, skip_verify: bool = False) -> int:
     if not skip_pull:
         code = sync_main()
         if code != 0:
             return code
     controller = str(ROOT / "evavo.py")
-    steps = [
-        [sys.executable, controller, "doctor", "--endpoint", endpoint],
-        [sys.executable, controller, "verify"],
-        [sys.executable, controller, "test"],
+    steps: List[List[str]] = [[sys.executable, controller, "doctor", "--endpoint", endpoint]]
+    if not skip_verify:
+        verify_command = [sys.executable, controller, "verify", "--full"]
+        if os.name == "nt":
+            verify_command.append("--require-powershell")
+        steps.append(verify_command)
+    steps.extend([
         [sys.executable, controller, "start", "--endpoint", endpoint],
         [sys.executable, controller, "status", "--endpoint", endpoint],
-    ]
+    ])
     for command in steps:
         print(f"\n>>> {' '.join(command)}")
         result = subprocess.run(command, cwd=str(ROOT))
@@ -401,9 +399,10 @@ def main() -> int:
     verify_parser.add_argument("--require-powershell", action="store_true", help="Fail if PowerShell is unavailable")
     verify_parser.add_argument("--json", action="store_true")
 
-    bootstrap_parser = subparsers.add_parser("bootstrap", help="Sync main, verify, test, start and verify backend health")
+    bootstrap_parser = subparsers.add_parser("bootstrap", help="Sync main, fully verify, start and verify backend health")
     bootstrap_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     bootstrap_parser.add_argument("--skip-pull", action="store_true")
+    bootstrap_parser.add_argument("--skip-verify", action="store_true", help="Skip full verifier only when it already passed in the caller")
 
     generate = subparsers.add_parser("generate", help="Generate image prompts through the active backend")
     generate.add_argument("--prompts", nargs="+")
@@ -449,7 +448,7 @@ def main() -> int:
             forwarded.append("--json")
         return run_passthrough("verify-evavo.py", forwarded)
     if args.command == "bootstrap":
-        return bootstrap(args.endpoint, args.skip_pull)
+        return bootstrap(args.endpoint, args.skip_pull, args.skip_verify)
     if args.command == "sync":
         return sync_main()
     if args.command == "generate":
