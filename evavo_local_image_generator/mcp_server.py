@@ -22,6 +22,7 @@ except ImportError as exc:  # pragma: no cover
 
 from evavo_operations import ROOT, TaskTracker
 from .backends import ComfyUIBackend
+from .comfyui_cancel import cancel_prompt
 from .comfyui_runtime import (
     diagnose_comfyui_startup,
     discover_comfyui,
@@ -502,6 +503,28 @@ async def generation_status(task_id: str, auto_start: bool = False) -> Dict[str,
     else:
         warning = await _track_update(task_id, status, backend_mode="native-comfyui")
         result = {"ok": True, **state}
+    if warning and warning != "task was not present in local history":
+        result["tracking_warning"] = warning
+    return result
+
+
+@mcp.tool()
+async def cancel_generation(task_id: str, auto_start: bool = False) -> Dict[str, Any]:
+    """Cancel exactly one pending/running generation without stopping the renderer."""
+    if not isinstance(task_id, str) or not task_id.strip():
+        return {"ok": False, "status": "failed", "error_code": "INVALID_TASK_ID", "message": "task_id must be a non-empty string"}
+    task_id = task_id.strip()
+    await _ensure(auto_start=auto_start)
+    backend = _backend()
+    try:
+        result = await asyncio.to_thread(cancel_prompt, backend, task_id)
+    except Exception as exc:
+        return {"ok": False, "task_id": task_id, "status": "failed", "error_code": "CANCEL_FAILED", "message": str(exc)}
+
+    status = str(result.get("status") or "unknown")
+    warning: Optional[str] = None
+    if status in {"queued", "running", "completed", "failed", "cancelled", "unknown"}:
+        warning = await _track_update(task_id, status, backend_mode="native-comfyui")
     if warning and warning != "task was not present in local history":
         result["tracking_warning"] = warning
     return result
