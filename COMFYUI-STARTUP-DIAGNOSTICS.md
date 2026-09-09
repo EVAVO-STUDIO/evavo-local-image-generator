@@ -4,7 +4,17 @@ EVAVO treats ComfyUI startup as an observable lifecycle, not a blind subprocess 
 
 ## Normal agent path
 
-The image-generator MCP already exposes `ensure_backend`. Startup failures preserve a structured record at:
+The image-generator MCP exposes:
+
+```text
+ensure_backend
+diagnose_backend
+last_startup_failure
+```
+
+For Claude, ChatGPT or another connected MCP agent, prefer `diagnose_backend(seconds=60, cpu=true)` before dropping to shell automation. The tool runs the same bounded owned-child diagnostic and returns structured failure evidence without exposing arbitrary shell authority. `last_startup_failure` is read-only and returns the most recently persisted startup failure.
+
+Startup failures preserve a structured record at:
 
 `<evavo-local-image-generator>/.evavo/native-comfyui-last-failure.json`
 
@@ -20,9 +30,9 @@ C:\AI\python_embeded\python.exe -s C:\AI\ComfyUI\main.py --windows-standalone-bu
 
 Source/venv installs do not receive portable-only flags.
 
-## Bounded 60-second probe
+## Bounded 60-second CLI probe
 
-From this repository:
+When MCP is unavailable or the client has not yet reloaded the updated server, run from this repository:
 
 ```powershell
 python .\diagnose-comfyui-startup.py
@@ -30,7 +40,7 @@ python .\diagnose-comfyui-startup.py
 
 The default probe runs for 60 seconds, launches ComfyUI in CPU mode, captures stdout and stderr separately in real time, probes `/system_stats`, and terminates only the process tree it created. It never kills a pre-existing listener on port 8188.
 
-If the result recommends custom-node isolation, run:
+If the result recommends custom-node isolation, use MCP `diagnose_backend(seconds=60, cpu=true, disable_all_custom_nodes=true)` or run:
 
 ```powershell
 python .\diagnose-comfyui-startup.py --disable-all-custom-nodes
