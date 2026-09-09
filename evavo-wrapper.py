@@ -64,6 +64,13 @@ def _output_dir(payload: Dict[str, Any]) -> Path:
     return Path(raw).expanduser().resolve() if isinstance(raw, str) and raw.strip() else DEFAULT_OUTPUT_DIR.resolve()
 
 
+def _use_environment(payload: Dict[str, Any]) -> bool:
+    value = payload.get("use_environment", True)
+    if not isinstance(value, bool):
+        raise ValueError("use_environment must be true or false")
+    return value
+
+
 def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     prompt = payload.get("prompt")
     project_name = payload.get("project_name", "batch_gen")
@@ -73,6 +80,7 @@ def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("prompt exceeds 100000 characters")
     if not isinstance(project_name, str) or not project_name.strip():
         raise ValueError("project_name must be a non-empty string")
+    use_environment = _use_environment(payload)
 
     backend = detect_backend(endpoint)
     if backend["kind"] == "native-comfyui":
@@ -81,10 +89,10 @@ def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             prompt.strip(),
             project_name=project_name.strip(),
             negative_prompt=str(payload.get("negative_prompt", "")),
-            width=payload.get("width", 1024),
-            height=payload.get("height", 1024),
-            steps=payload.get("steps", 24),
-            cfg_scale=payload.get("cfg_scale", 7.0),
+            width=payload.get("width"),
+            height=payload.get("height"),
+            steps=payload.get("steps"),
+            cfg_scale=payload.get("cfg_scale"),
             seed=payload.get("seed"),
             checkpoint=payload.get("checkpoint"),
             workflow_path=payload.get("workflow_path"),
@@ -102,6 +110,7 @@ def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             lora_name=payload.get("lora_name"),
             lora_model_strength=payload.get("lora_model_strength"),
             lora_clip_strength=payload.get("lora_clip_strength"),
+            use_environment=use_environment,
         )
         response.update({"ok": True, "endpoint": endpoint, "timestamp": now_iso()})
         if bool(payload.get("wait")):
