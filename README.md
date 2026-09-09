@@ -33,7 +33,7 @@ For a current checkout, just run:
 .\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-The updater safely fast-forwards `main`, installs dependencies, runs the authoritative verifier, prepares/provisions native ComfyUI when allowed, and runs strict agent-doctor readiness. If strict doctor fails, it may make **one** evidence-gated core dependency repair attempt through the constrained shared repair bridge, unless `-SkipComfyUIDependencyRepair` is supplied. It then re-proves strict readiness, bootstraps native ComfyUI, installs/reloads Claude/private HTTP MCP, runs final doctor, and finally executes one **real native generation smoke proof**. Setup does not report success unless the active workflow actually renders and EVAVO downloads a signature-validated image. ChatGPT Secure MCP Tunnel configuration is then completed when its external tunnel identity/key are available.
+The updater safely fast-forwards `main`, installs dependencies, runs the authoritative verifier, prepares/provisions native ComfyUI when allowed, and runs strict agent-doctor readiness. If strict doctor fails, it may make **one** evidence-gated core dependency repair attempt through the constrained shared repair bridge, unless `-SkipComfyUIDependencyRepair` is supplied. It then re-proves strict readiness, bootstraps native ComfyUI, and performs one **real native generation smoke proof before any Claude/Windows Startup agent configuration is written**. Only after that validated image proof does it install/reload Claude/private HTTP MCP, run final doctor/status, and conditionally complete the ChatGPT Secure MCP Tunnel. Setup does not report success unless the active workflow actually renders and EVAVO downloads a signature-validated image.
 
 The updater never enables `force_sync` dependency repair. That override requires explicit workstation-owner authorization through:
 
@@ -139,7 +139,7 @@ cancelled
 unknown
 ```
 
-`cancel_generation` cancels **one job**. Current ComfyUI uses its per-job cancel endpoint. Older servers may delete one proven-pending prompt, but EVAVO refuses broad `/interrupt` for a running legacy job because that could affect unrelated work.
+`cancel_generation` cancels **one job**. Current ComfyUI uses its per-job cancel endpoint. Older servers may delete one proven-pending prompt, but EVAVO refuses broad `/interrupt` for a running legacy job because that could affect unrelated work. A running targeted-cancel request remains `running` in shared history while its request time/method/backend state are recorded; terminal `cancelled` is written only after backend confirmation.
 
 ## MCP filesystem policy
 
@@ -174,7 +174,7 @@ $env:EVAVO_MCP_WORKFLOW_ROOT = "D:\EVAVO\workflows\approved"
 
 Workflow/output image paths must be ordinary files/directories under owner-authorized roots. Symlinks and redirected parent paths are rejected. `read_output_image` additionally validates PNG/JPEG/GIF/WebP signatures instead of trusting extensions.
 
-Claude and private-HTTP login installers persist approved **non-secret** MCP path policy. Signed checkpoint URLs are deliberately not persisted.
+Claude and private-HTTP login installers persist approved **non-secret** MCP path policy. Both installers validate that owner-granted policy before writing persistent configuration; signed checkpoint URLs are deliberately not persisted.
 
 ## Native ComfyUI
 
@@ -233,7 +233,10 @@ CLI and MCP share lock-protected atomic history including backend/checkpoint/wor
 ```powershell
 python evavo.py tasks --limit 20
 python evavo.py stats
+.\AGENT-STATUS.ps1
 ```
+
+`AGENT-STATUS.ps1` reports the latest real `setup-smoke` proof separately from current backend health, including whether its validated output files are still present. An old smoke record never substitutes for live readiness after reboot.
 
 ## Optional HTTP gateway
 
