@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Concurrent batch image generation for EVAVO mock or native ComfyUI."""
+"""Quality-first batch image generation for EVAVO mock or native ComfyUI."""
 
 from __future__ import annotations
 
@@ -90,9 +90,6 @@ async def queue_generation(
         process_timeout = max(timeout, wait_timeout + 30.0) if wait else timeout
         child_env = None
         if workflow_path and workflow_preflight_already_done:
-            # The parent process has validated this workflow against the same
-            # endpoint. Disable only the redundant child check; never mutate the
-            # parent environment or other concurrently running commands.
             child_env = os.environ.copy()
             child_env["EVAVO_PREFLIGHT_CUSTOM_WORKFLOW"] = "0"
         try:
@@ -270,6 +267,9 @@ async def async_main(args: argparse.Namespace, prompts: List[str]) -> int:
                 print(f"ERROR: custom workflow preflight failed before queueing any task: {exc}", file=sys.stderr)
             return 3
 
+    if args.concurrency > 1 and args.wait and not args.json:
+        print("NOTE: quality-first EVAVO defaults to concurrency=1. Higher concurrency is explicit and may increase VRAM/offload pressure on a 12 GB GPU.")
+
     results = await batch_generate(
         prompts,
         args.project,
@@ -308,7 +308,12 @@ def main() -> int:
     parser.add_argument("--project", default="batch_gen", help="Project name")
     parser.add_argument("--examples", action="store_true", help="Use built-in examples")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="EVAVO or native ComfyUI base URL")
-    parser.add_argument("--concurrency", type=int, default=4, help="Maximum wrapper processes in flight (default: 4)")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=int(os.getenv("EVAVO_BATCH_CONCURRENCY", "1")),
+        help="Maximum wrapper processes in flight (quality-first default: 1; override only after VRAM benchmarking)",
+    )
     parser.add_argument("--timeout", type=float, default=30.0, help="Queue request timeout in seconds")
     parser.add_argument("--wait", action="store_true", help="Wait for native ComfyUI outputs and download them")
     parser.add_argument("--wait-timeout", type=float, default=600.0, help="Maximum render wait per image in seconds")
