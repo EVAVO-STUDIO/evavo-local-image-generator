@@ -4,13 +4,21 @@ EVAVO treats ComfyUI startup as an observable lifecycle, not a blind subprocess 
 
 ## Normal agent path
 
-The image-generator MCP already exposes `ensure_backend`. Startup failures now preserve a structured record at:
+The image-generator MCP already exposes `ensure_backend`. Startup failures preserve a structured record at:
 
 `<evavo-local-image-generator>/.evavo/native-comfyui-last-failure.json`
 
 The record includes the selected Python interpreter, `main.py`, working directory, full launch command, stable failure category, missing-module names, port ownership when available, and a bounded log tail. The full process output remains in `.evavo/native-comfyui.log`.
 
-On Windows, direct checkouts such as `C:\AI\ComfyUI\main.py` now detect a parent-level portable interpreter such as `C:\AI\python_embeded\python.exe`. This avoids accidentally launching ComfyUI with an unrelated system Python that does not have ComfyUI's dependencies.
+On Windows, direct checkouts such as `C:\AI\ComfyUI\main.py` detect a parent-level portable interpreter such as `C:\AI\python_embeded\python.exe`. This avoids accidentally launching ComfyUI with an unrelated system Python that does not have ComfyUI's dependencies.
+
+When the selected interpreter is the Windows portable embedded Python, EVAVO matches ComfyUI's portable launch isolation:
+
+```text
+C:\AI\python_embeded\python.exe -s C:\AI\ComfyUI\main.py --windows-standalone-build ...
+```
+
+Source/venv installs do not receive portable-only flags.
 
 ## Bounded 60-second probe
 
