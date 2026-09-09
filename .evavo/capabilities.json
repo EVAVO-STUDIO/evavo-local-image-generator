@@ -10,6 +10,7 @@
       "description": "Discover source/portable/external ComfyUI instances, probe live native endpoints and reuse healthy user-managed renderers without killing or replacing them merely because their filesystem install is not discoverable.",
       "interfaces": ["cli", "mcp", "automation", "library"],
       "effects": ["read", "compute", "network", "execute"],
+      "entrypoints": ["python evavo.py verify --full", "health_check", "discover_backends", "ensure_backend"],
       "tags": ["image", "comfyui", "backend", "health", "windows"],
       "requires": ["Local/loopback ComfyUI endpoint for live readiness"]
     },
@@ -19,6 +20,7 @@
       "description": "Reuse reviewed existing source/portable installs before optionally cloning/provisioning official ComfyUI, isolate source runtimes, validate Torch/CUDA/entrypoint readiness and never silently choose a diffusion model.",
       "interfaces": ["cli", "mcp", "automation"],
       "effects": ["read", "compute", "network", "write", "execute"],
+      "entrypoints": ["python provision-comfyui.py", "provision_backend", "ensure_backend", "UPDATE-AND-VERIFY-EVAVO.ps1"],
       "tags": ["image", "comfyui", "provision", "cuda", "windows"],
       "requires": ["Explicit provisioning authority", "Compatible Windows/Python/GPU environment where applicable"]
     },
@@ -28,6 +30,7 @@
       "description": "Discover checkpoints, LoRAs, VAEs, ControlNets, UNETs, text encoders, CLIP vision and upscalers including shared external model libraries without copying multi-gigabyte files.",
       "interfaces": ["cli", "mcp", "library"],
       "effects": ["read", "compute", "network"],
+      "entrypoints": ["model_inventory", "list_checkpoints", "python evavo.py verify --full"],
       "tags": ["image", "models", "checkpoint", "lora", "controlnet", "inventory"],
       "requires": ["Discoverable native ComfyUI model configuration"]
     },
@@ -37,6 +40,7 @@
       "description": "Render the same template substitutions as generation and validate live node classes, required inputs and literal model/loader choices against the active backend without queueing a prompt or writing task history.",
       "interfaces": ["cli", "mcp", "library", "automation"],
       "effects": ["read", "compute", "network"],
+      "entrypoints": ["workflow_preflight", "python evavo.py verify --full"],
       "tags": ["image", "comfyui", "workflow", "preflight", "read-only"],
       "requires": ["Healthy ComfyUI backend", "Custom workflow template"]
     },
@@ -46,6 +50,7 @@
       "description": "Submit standard or preflighted custom workflows to native ComfyUI, retain real prompt IDs, wait on history when requested and collect authorized output files atomically. Real generation cannot be satisfied by the deterministic EVAVO mock.",
       "interfaces": ["cli", "mcp", "automation", "library"],
       "effects": ["read", "compute", "network", "execute", "write"],
+      "entrypoints": ["python evavo.py generate", "generate_image", "generation_status", "collect_generation"],
       "tags": ["image", "generation", "comfyui", "txt2img", "workflow"],
       "requires": ["Healthy native ComfyUI", "Compatible selected workflow/model resources"]
     },
@@ -55,6 +60,7 @@
       "description": "Run multiple generation requests with bounded concurrency, shared lock-protected task history and per-generation status/output evidence rather than launching unbounded renderer work.",
       "interfaces": ["cli", "mcp", "automation"],
       "effects": ["read", "compute", "network", "execute", "write"],
+      "entrypoints": ["python evavo.py generate", "generate_batch", "task_history", "task_statistics"],
       "tags": ["image", "batch", "generation", "concurrency", "tasks"],
       "requires": ["Healthy native ComfyUI", "Bounded batch request"]
     },
@@ -64,6 +70,7 @@
       "description": "Track prompt completion, collect outputs through native /view, atomically download authorized files and return generated images as native MCP image content so host models can inspect the actual result rather than only a Windows path.",
       "interfaces": ["cli", "mcp", "library"],
       "effects": ["read", "compute", "network", "write"],
+      "entrypoints": ["generation_status", "collect_generation", "read_output_image"],
       "tags": ["image", "output", "mcp", "inspection", "history"],
       "requires": ["Authorized completed generation output"]
     },
@@ -73,6 +80,7 @@
       "description": "Maintain lock-protected atomic task history shared by CLI and MCP and expose bounded status/statistics for operational diagnosis without treating history as creative approval.",
       "interfaces": ["cli", "mcp", "library"],
       "effects": ["read", "compute", "write"],
+      "entrypoints": ["task_history", "task_statistics", "python evavo.py verify --full"],
       "tags": ["image", "tasks", "history", "statistics", "operations"],
       "requires": ["Writable local task-history store"]
     },
@@ -82,6 +90,7 @@
       "description": "Serve MCP v2 over stdio and private loopback Streamable HTTP, configure Claude Desktop and optionally start the private HTTP MCP at Windows login without making the loopback endpoint public directly.",
       "interfaces": ["mcp", "cli", "automation"],
       "effects": ["read", "compute", "execute", "write", "network"],
+      "entrypoints": ["INSTALL-CLAUDE-MCP.ps1", "http://127.0.0.1:8765/mcp", "UPDATE-AND-VERIFY-EVAVO.ps1"],
       "tags": ["image", "mcp", "claude", "localhost", "agent"],
       "requires": ["Trusted local host", "Configured MCP client/runtime"]
     },
@@ -91,6 +100,7 @@
       "description": "Configure the supported outbound OpenAI Secure MCP Tunnel using a pre-existing tunnel ID/runtime key, verify downloaded tunnel-client release integrity and protect persisted runtime keys with current-user Windows DPAPI rather than exposing local loopback directly.",
       "interfaces": ["cli", "automation", "mcp"],
       "effects": ["read", "compute", "network", "execute", "write"],
+      "entrypoints": ["INSTALL-CHATGPT-MCP-TUNNEL.ps1", "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1", "CHATGPT-TUNNEL.md"],
       "tags": ["image", "chatgpt", "mcp", "tunnel", "dpapi", "security"],
       "requires": ["Existing authorised OpenAI tunnel identity/key", "Verified tunnel-client release"]
     },
@@ -100,8 +110,15 @@
       "description": "Run read-only structural verification plus full safety/integration checks, optionally requiring PowerShell AST validation, and distinguish mock contract tests from real native-backend readiness.",
       "interfaces": ["cli", "testing", "automation"],
       "effects": ["read", "compute", "execute", "write"],
+      "entrypoints": ["python evavo.py verify", "python evavo.py verify --full", "python evavo.py verify --full --require-powershell", "UPDATE-AND-VERIFY-EVAVO.ps1"],
       "tags": ["image", "validation", "powershell", "windows", "testing"],
       "requires": ["Repository Python/PowerShell environment", "Native ComfyUI only for live generation validation"]
     }
-  ]
+  ],
+  "brain": {
+    "consult": true,
+    "sanityCheck": true,
+    "topics": ["local image generation", "ComfyUI readiness", "model inventory", "workflow preflight", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling"]
+  },
+  "reviewedAt": "2026-09-09T16:39:00+10:00"
 }
