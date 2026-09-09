@@ -34,6 +34,7 @@ CRITICAL_FILES: Sequence[str] = (
     "test-operations.py",
     "test-provisioning.py",
     "test-backend-automation.py",
+    "test-batch-workflow-preflight.py",
     "test-agent-integration.py",
     "test-agent-doctor-workflows.py",
     "test-chatgpt-tunnel.py",
@@ -70,6 +71,7 @@ POWERSHELL_SCRIPTS: Sequence[str] = (
 FULL_TESTS: Sequence[str] = (
     "test-provisioning.py",
     "test-backend-automation.py",
+    "test-batch-workflow-preflight.py",
     "test-chatgpt-tunnel.py",
     "test-agent-integration.py",
     "test-agent-doctor-workflows.py",
