@@ -28,6 +28,7 @@ EXPECTED_TOOLS = {
     "health_check",
     "discover_backends",
     "list_checkpoints",
+    "model_inventory",
     "generate_image",
     "generate_batch",
     "generation_status",
@@ -36,6 +37,16 @@ EXPECTED_TOOLS = {
     "task_history",
     "task_statistics",
     "stop_managed_backend",
+}
+EXPECTED_MODEL_CATEGORIES = {
+    "checkpoints": "evavo-test-model.safetensors",
+    "loras": "evavo-test-lora.safetensors",
+    "vae": "evavo-test-vae.safetensors",
+    "controlnet": "evavo-test-controlnet.safetensors",
+    "diffusion_models": "evavo-test-unet.safetensors",
+    "text_encoders": "evavo-test-clip.safetensors",
+    "clip_vision": "evavo-test-clip-vision.safetensors",
+    "upscale_models": "evavo-test-upscaler.pth",
 }
 
 
@@ -130,6 +141,7 @@ class AgentIntegrationTests(unittest.TestCase):
             self.assertIn(payload["status"], {"operational", "degraded"})
             names = {item["name"] for item in payload["checks"]}
             self.assertIn("mcp_sdk", names)
+            self.assertIn("shared_model_roots", names)
             self.assertIn("output_directory", names)
             self.assertIn("claude_stdio", names)
             self.assertIn("mcp_http", names)
@@ -195,6 +207,22 @@ class AgentIntegrationTests(unittest.TestCase):
                     async with Client(f"http://127.0.0.1:{HTTP_PORT}/mcp") as client:
                         names = tool_names(await client.list_tools())
                         self.assertTrue(EXPECTED_TOOLS.issubset(names), names)
+
+                        inventory_result = await client.call_tool("model_inventory", {"auto_start": False, "limit_per_category": 20})
+                        inventory = inventory_result.structured_content
+                        self.assertIsInstance(inventory, dict)
+                        assert isinstance(inventory, dict)
+                        categories = inventory.get("categories")
+                        self.assertIsInstance(categories, dict)
+                        assert isinstance(categories, dict)
+                        self.assertEqual(int(inventory.get("available_categories", 0)), len(EXPECTED_MODEL_CATEGORIES))
+                        for category, expected_model in EXPECTED_MODEL_CATEGORIES.items():
+                            entry = categories.get(category)
+                            self.assertIsInstance(entry, dict, category)
+                            assert isinstance(entry, dict)
+                            self.assertTrue(entry.get("available"), entry)
+                            self.assertEqual(entry.get("count"), 1)
+                            self.assertIn(expected_model, entry.get("items", []))
 
                         single = await client.call_tool(
                             "generate_image",
