@@ -3,7 +3,8 @@
 
 param(
     [switch]$Uninstall,
-    [int]$Port = 8765
+    [int]$Port = 8765,
+    [switch]$SkipValidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +34,23 @@ if (-not (Test-Path $script)) {
     throw "Missing START-AGENT-MCP.ps1"
 }
 
+$python = Join-Path $repo ".venv\Scripts\python.exe"
+if (-not (Test-Path $python)) {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $cmd) {
+        throw "Python 3.10+ was not found."
+    }
+    $python = $cmd.Source
+}
+
+if (-not $SkipValidation) {
+    Write-Host "Validating EVAVO MCP before installing login autostart..." -ForegroundColor Cyan
+    & $python (Join-Path $repo "test-agent-integration.py")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Agent/MCP integration tests failed."
+    }
+}
+
 function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
     if (-not $Value) {
         return $null
@@ -44,8 +62,6 @@ function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
     return "set `"$Name=$safe`""
 }
 
-# Persist only non-secret local settings so login autostart behaves like the
-# setup shell after a reboot. Signed checkpoint URLs are intentionally excluded.
 $persistedEnvironment = [ordered]@{
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
     "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
@@ -87,13 +103,13 @@ $cmd = @"
 @echo off
 $environmentBlock
 cd /d "$escapedRepo"
-start "EVAVO Agent MCP" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$escapedScript" -Port $Port
+start "EVAVO Agent MCP" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$escapedScript" -Port $Port -SkipValidation
 "@
 Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 
 Write-Host "Installed EVAVO agent MCP autostart:" -ForegroundColor Green
 Write-Host "  $launcher"
-Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in." -ForegroundColor Green
+Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in without rerunning the full integration suite." -ForegroundColor Green
 Write-Host "Safe local ComfyUI/checkpoint provisioning settings were embedded for reboot persistence." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
     Write-Host "Shared ComfyUI model roots were embedded for reboot persistence." -ForegroundColor Green
@@ -102,12 +118,9 @@ if ($env:EVAVO_CHECKPOINT_URL) {
     Write-Host "Note: EVAVO_CHECKPOINT_URL was not persisted because checkpoint URLs may contain credentials/tokens." -ForegroundColor Yellow
 }
 
-# Start it now without blocking this installer. The spawned process inherits the
-# current environment (including an explicitly configured temporary URL), while
-# future login starts use only the safe values embedded above.
 Write-Host "Starting it now in a hidden process..." -ForegroundColor Cyan
 $quotedScript = '"' + $script.Replace('"', '\"') + '"'
-$argumentLine = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $quotedScript -Port $Port"
+$argumentLine = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $quotedScript -Port $Port -SkipValidation"
 Start-Process -FilePath "powershell.exe" -ArgumentList $argumentLine -WorkingDirectory $repo -WindowStyle Hidden | Out-Null
 
 $deadline = (Get-Date).AddSeconds(20)
