@@ -48,6 +48,88 @@ def _env_true(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+class RequestBodyLimitMiddleware:
+    """Reject oversized HTTP request bodies before FastAPI/Pydantic parsing.
+
+    Content-Length is rejected immediately when present. Bodies without a
+    trustworthy length (including chunked transfer encoding) are consumed only
+    up to the configured cap and then replayed to the application. This keeps
+    the ingress memory bound aligned with the gateway's request contract.
+    """
+
+    def __init__(self, app: Any, max_bytes: int):
+        self.app = app
+        self.max_bytes = int(max_bytes)
+
+    async def _reject(self, scope: Dict[str, Any], receive: Any, send: Any, status: int, detail: str) -> None:
+        response = JSONResponse(status_code=status, content={"detail": detail})
+        await response(scope, receive, send)
+
+    async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or str(scope.get("method", "GET")).upper() not in {"POST", "PUT", "PATCH"}:
+            await self.app(scope, receive, send)
+            return
+
+        content_length: Optional[int] = None
+        for name, value in scope.get("headers", []):
+            if bytes(name).lower() != b"content-length":
+                continue
+            try:
+                content_length = int(bytes(value).decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                await self._reject(scope, receive, send, 400, "invalid Content-Length header")
+                return
+            break
+        if content_length is not None:
+            if content_length < 0:
+                await self._reject(scope, receive, send, 400, "invalid Content-Length header")
+                return
+            if content_length > self.max_bytes:
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    413,
+                    f"request exceeds EVAVO gateway limit of {self.max_bytes} bytes",
+                )
+                return
+
+        buffered: list[Dict[str, Any]] = []
+        total = 0
+        while True:
+            message = await receive()
+            buffered.append(message)
+            if message.get("type") == "http.disconnect":
+                break
+            if message.get("type") != "http.request":
+                break
+            body = message.get("body", b"")
+            total += len(body) if isinstance(body, (bytes, bytearray)) else 0
+            if total > self.max_bytes:
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    413,
+                    f"request exceeds EVAVO gateway limit of {self.max_bytes} bytes",
+                )
+                return
+            if not message.get("more_body", False):
+                break
+
+        index = 0
+
+        async def replay_receive() -> Dict[str, Any]:
+            nonlocal index
+            if index < len(buffered):
+                message = buffered[index]
+                index += 1
+                return message
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay_receive, send)
+
+
 class GenerationRequest(BaseModel):
     """Compatible generation request: prompt is stable, extra fields are additive."""
 
@@ -407,6 +489,7 @@ if cors_origins:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BYTES)
 
 
 @app.get("/health")
