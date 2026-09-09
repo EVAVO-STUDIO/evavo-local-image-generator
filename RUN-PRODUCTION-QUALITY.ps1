@@ -8,6 +8,7 @@ param(
     [string]$GatewayEndpoint = "http://127.0.0.1:8000",
     [string]$AtmosphereRoot = "C:\GitRepos\atmosphere-studio",
     [string]$ThreeDRoot = "C:\GitRepos\evavo-3d-studio",
+    [string]$ThreeDPython = "",
     [string]$ThreeDWorkerEndpoint = "http://127.0.0.1:4314",
     [switch]$RequireGateway,
     [switch]$Require3DExecution,
@@ -28,6 +29,7 @@ New-Item -ItemType Directory -Force -Path $ResultRoot | Out-Null
 $KokoroRuntimeEvidence = Join-Path $ResultRoot "kokoro-runtime.json"
 $ThreeDRuntimeEvidence = Join-Path $ResultRoot "3d-runtime.json"
 $AtmosphereRuntimeEvidence = Join-Path $ResultRoot "atmosphere-runtime.json"
+$ResolvedThreeDPython = $null
 
 function Invoke-Gate {
     param(
@@ -95,6 +97,32 @@ function Test-LoopbackHttpEndpoint {
     } catch {
         return $false
     }
+}
+
+function Resolve-RepoPython {
+    param([string]$Root, [string]$Override, [string]$Fallback)
+    if (-not [string]::IsNullOrWhiteSpace($Override)) {
+        if (Test-Path -LiteralPath $Override -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $Override).Path
+        }
+        $command = Get-Command $Override -ErrorAction SilentlyContinue
+        if ($command) { return $command.Source }
+        throw "Requested repository Python was not found: $Override"
+    }
+    foreach ($candidate in @(
+        (Join-Path $Root ".venv\Scripts\python.exe"),
+        (Join-Path $Root "venv\Scripts\python.exe"),
+        (Join-Path $Root ".venv\bin\python"),
+        (Join-Path $Root "venv\bin\python")
+    )) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Resolve-Path -LiteralPath $candidate).Path
+        }
+    }
+    $fallbackCommand = Get-Command $Fallback -ErrorAction SilentlyContinue
+    if ($fallbackCommand) { return $fallbackCommand.Source }
+    if (Test-Path -LiteralPath $Fallback -PathType Leaf) { return (Resolve-Path -LiteralPath $Fallback).Path }
+    throw "Could not resolve a Python runtime for repository $Root"
 }
 
 # Offline gates first: fast and deterministic, no GPU/service dependency.
@@ -169,38 +197,51 @@ if (-not $Skip3D) {
         $Failures.Add("EVAVO 3D Studio not found at $ThreeDRoot")
         Write-Host "[FAIL] EVAVO 3D Studio not found at $ThreeDRoot" -ForegroundColor Red
     } else {
-        # 3D Studio already owns candidate comparison, topology/UV/tangent/LOD,
-        # Blender finishing, material evidence and runtime certification. Reuse
-        # those governed checks rather than duplicating weaker mesh heuristics.
-        Invoke-Gate "3d-studio-doctor" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "doctor") | Out-Null
-        if ($Mode -in @("standard", "full")) {
-            Invoke-Gate "3d-studio-toolchain" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "toolchain", "inspect") | Out-Null
-            Invoke-Gate "3d-studio-providers" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "providers", "list") | Out-Null
-            $brief = Join-Path $ThreeDRoot "examples\rainy-red-bicycle.brief.json"
-            if (Test-Path $brief) {
-                Invoke-Gate "3d-studio-brief-validate" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "brief", "validate", $brief) | Out-Null
-                $planOutput = Join-Path $ResultRoot "3d-studio\rainy-red-bicycle-plan.json"
-                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $planOutput) | Out-Null
-                Invoke-Gate "3d-studio-plan-compile" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "plan", "compile", $brief, "--vram", "12", "--output", $planOutput) | Out-Null
-            } else {
-                $Failures.Add("3D Studio example brief missing: $brief")
-                Write-Host "[FAIL] 3D Studio example brief missing: $brief" -ForegroundColor Red
+        try {
+            $ResolvedThreeDPython = Resolve-RepoPython $ThreeDRoot $ThreeDPython $Python
+            & $ResolvedThreeDPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 2)"
+            if ($LASTEXITCODE -ne 0) { throw "EVAVO 3D Studio requires Python 3.11+" }
+            Write-Host "[INFO] 3D Studio Python: $ResolvedThreeDPython"
+        } catch {
+            $Failures.Add("3D Studio Python ($($_.Exception.Message))")
+            Write-Host "[FAIL] $($_.Exception.Message)" -ForegroundColor Red
+        }
+
+        if ($ResolvedThreeDPython) {
+            # 3D Studio already owns candidate comparison, topology/UV/tangent/LOD,
+            # Blender finishing, material evidence and runtime certification. Reuse
+            # those governed checks rather than duplicating weaker mesh heuristics.
+            Invoke-Gate "3d-studio-doctor" $ThreeDRoot $ResolvedThreeDPython @("-m", "evavo_3d_studio", "doctor") | Out-Null
+            if ($Mode -in @("standard", "full")) {
+                Invoke-Gate "3d-studio-toolchain" $ThreeDRoot $ResolvedThreeDPython @("-m", "evavo_3d_studio", "toolchain", "inspect") | Out-Null
+                Invoke-Gate "3d-studio-providers" $ThreeDRoot $ResolvedThreeDPython @("-m", "evavo_3d_studio", "providers", "list") | Out-Null
+                $brief = Join-Path $ThreeDRoot "examples\rainy-red-bicycle.brief.json"
+                if (Test-Path $brief) {
+                    Invoke-Gate "3d-studio-brief-validate" $ThreeDRoot $ResolvedThreeDPython @("-m", "evavo_3d_studio", "brief", "validate", $brief) | Out-Null
+                    $planOutput = Join-Path $ResultRoot "3d-studio\rainy-red-bicycle-plan.json"
+                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $planOutput) | Out-Null
+                    Invoke-Gate "3d-studio-plan-compile" $ThreeDRoot $ResolvedThreeDPython @("-m", "evavo_3d_studio", "plan", "compile", $brief, "--vram", "12", "--output", $planOutput) | Out-Null
+                } else {
+                    $Failures.Add("3D Studio example brief missing: $brief")
+                    Write-Host "[FAIL] 3D Studio example brief missing: $brief" -ForegroundColor Red
+                }
+            }
+            if ($Mode -eq "full") {
+                Invoke-Gate "3d-studio-regression-suite" $ThreeDRoot $ResolvedThreeDPython @("scripts\check.py") | Out-Null
+                $snapshotArgs = @(
+                    "studio-runtime-snapshot.py", "3d",
+                    "--root", $ThreeDRoot,
+                    "--python", $ResolvedThreeDPython,
+                    "--output", $ThreeDRuntimeEvidence,
+                    "--require-complete"
+                )
+                if ($Require3DExecution) {
+                    $snapshotArgs += @("--worker-endpoint", $ThreeDWorkerEndpoint)
+                }
+                Invoke-Gate "3d-runtime-attestation" $PSScriptRoot $Python $snapshotArgs | Out-Null
             }
         }
-        if ($Mode -eq "full") {
-            Invoke-Gate "3d-studio-regression-suite" $ThreeDRoot $Python @("scripts\check.py") | Out-Null
-            $snapshotArgs = @(
-                "studio-runtime-snapshot.py", "3d",
-                "--root", $ThreeDRoot,
-                "--python", $Python,
-                "--output", $ThreeDRuntimeEvidence,
-                "--require-complete"
-            )
-            if ($Require3DExecution) {
-                $snapshotArgs += @("--worker-endpoint", $ThreeDWorkerEndpoint)
-            }
-            Invoke-Gate "3d-runtime-attestation" $PSScriptRoot $Python $snapshotArgs | Out-Null
-        }
+
         if ($Require3DExecution) {
             if (-not (Test-LoopbackHttpEndpoint $ThreeDWorkerEndpoint)) {
                 $Failures.Add("3D execution worker endpoint must be loopback HTTP: $ThreeDWorkerEndpoint")
@@ -271,7 +312,7 @@ if (-not $SkipAtmosphere) {
 
 $Finished = Get-Date
 $Summary = [ordered]@{
-    schemaVersion = 5
+    schemaVersion = 6
     mode = $Mode
     startedAt = $Started.ToString("o")
     finishedAt = $Finished.ToString("o")
@@ -283,6 +324,7 @@ $Summary = [ordered]@{
     requireGateway = [bool]$RequireGateway
     atmosphereRoot = $AtmosphereRoot
     threeDRoot = $ThreeDRoot
+    threeDPython = $ResolvedThreeDPython
     threeDWorkerEndpoint = $ThreeDWorkerEndpoint
     require3DExecution = [bool]$Require3DExecution
     threeDAuthorityContractChecked = [bool]$Require3DExecution
