@@ -10,72 +10,44 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-if ($Port -lt 1 -or $Port -gt 65535) {
-    throw "Port must be between 1 and 65535."
-}
-
+if ($Port -lt 1 -or $Port -gt 65535) { throw "Port must be between 1 and 65535." }
 $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
 $launcher = Join-Path $startupDir "EVAVO-Agent-MCP.cmd"
-
 if ($Uninstall) {
-    if (Test-Path $launcher) {
-        Remove-Item -Force $launcher
-        Write-Host "Removed EVAVO agent MCP autostart: $launcher" -ForegroundColor Green
-    } else {
-        Write-Host "EVAVO agent MCP autostart was not installed." -ForegroundColor Yellow
-    }
+    if (Test-Path $launcher) { Remove-Item -Force $launcher; Write-Host "Removed EVAVO agent MCP autostart: $launcher" -ForegroundColor Green }
+    else { Write-Host "EVAVO agent MCP autostart was not installed." -ForegroundColor Yellow }
     exit 0
 }
 
 $repo = (Resolve-Path $PSScriptRoot).Path
 $script = Join-Path $repo "START-AGENT-MCP.ps1"
-if (-not (Test-Path $script)) {
-    throw "Missing START-AGENT-MCP.ps1"
-}
-
+if (-not (Test-Path $script)) { throw "Missing START-AGENT-MCP.ps1" }
 $python = Join-Path $repo ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
     $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) {
-        throw "Python 3.10+ was not found."
-    }
+    if (-not $cmd) { throw "Python 3.10+ was not found." }
     $python = $cmd.Source
 }
 
 if (-not $SkipValidation) {
     Write-Host "Validating EVAVO MCP before installing login autostart..." -ForegroundColor Cyan
     & $python (Join-Path $repo "test-agent-integration.py")
-    if ($LASTEXITCODE -ne 0) {
-        throw "Agent/MCP integration tests failed."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "Agent/MCP integration tests failed." }
 }
 
-# Always validate owner-granted filesystem authority before creating or
-# replacing a Windows Startup launcher. -SkipValidation only skips the expensive
-# protocol suite; it never skips this read-only security/configuration gate.
+# This read-only gate always runs, including the canonical updater's fast path.
 Write-Host "Validating MCP filesystem authority before changing login autostart..." -ForegroundColor Cyan
 $policyOutput = & $python -m evavo_local_image_generator.mcp_policy --json
-$policyCode = $LASTEXITCODE
-if ($policyCode -ne 0) {
-    throw "MCP filesystem policy is invalid. Windows login autostart was not changed."
-}
-try {
-    $policyResult = ($policyOutput -join "`n") | ConvertFrom-Json
-}
-catch {
-    throw "MCP filesystem policy returned invalid JSON. Windows login autostart was not changed."
-}
+if ($LASTEXITCODE -ne 0) { throw "MCP filesystem policy is invalid. Windows login autostart was not changed." }
+try { $policyResult = ($policyOutput -join "`n") | ConvertFrom-Json }
+catch { throw "MCP filesystem policy returned invalid JSON. Windows login autostart was not changed." }
 $generationOutputDir = [string]$policyResult.policy.default_output_root
-if (-not $generationOutputDir) {
-    throw "MCP filesystem policy did not return a validated default output root. Windows login autostart was not changed."
-}
+if (-not $generationOutputDir) { throw "MCP filesystem policy did not return a validated default output root. Windows login autostart was not changed." }
 
 New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
 
 function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
-    if (-not $Value) {
-        return $null
-    }
+    if (-not $Value) { return $null }
     if ($Value.Contains('"') -or $Value.Contains("`r") -or $Value.Contains("`n")) {
         throw "Cannot persist $Name into CMD autostart because its value contains an unsupported quote/newline. Configure it as a Windows user environment variable instead."
     }
@@ -83,16 +55,9 @@ function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
     return "set `"$Name=$safe`""
 }
 
-# COMFYUI_ENDPOINT is canonical. Migrate a legacy alias value into the canonical
-# variable rather than persisting both and allowing different entry points to
-# target different renderers after reboot.
 $comfyEndpoint = [Environment]::GetEnvironmentVariable("COMFYUI_ENDPOINT")
-if (-not $comfyEndpoint) {
-    $comfyEndpoint = [Environment]::GetEnvironmentVariable("EVAVO_COMFYUI_ENDPOINT")
-}
-if (-not $comfyEndpoint) {
-    $comfyEndpoint = "http://127.0.0.1:8188"
-}
+if (-not $comfyEndpoint) { $comfyEndpoint = [Environment]::GetEnvironmentVariable("EVAVO_COMFYUI_ENDPOINT") }
+if (-not $comfyEndpoint) { $comfyEndpoint = "http://127.0.0.1:8188" }
 
 $persistedEnvironment = [ordered]@{
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
@@ -100,6 +65,20 @@ $persistedEnvironment = [ordered]@{
     "COMFYUI_ENDPOINT" = $comfyEndpoint
     "EVAVO_GENERATION_OUTPUT_DIR" = $generationOutputDir
 }
+
+# Persist normalized MCP authority paths returned by the validator, not raw
+# relative environment strings whose meaning could change after reboot.
+$approvedRoots = @($policyResult.policy.additional_output_roots)
+if ($approvedRoots.Count -gt 0) { $persistedEnvironment["EVAVO_MCP_OUTPUT_ROOTS"] = ($approvedRoots -join ";") }
+$ownerWorkflow = [string]$policyResult.policy.owner_workflow
+if ($ownerWorkflow) { $persistedEnvironment["EVAVO_COMFYUI_WORKFLOW"] = $ownerWorkflow }
+if ([bool]$policyResult.policy.tool_workflow_paths_allowed) {
+    $toolWorkflowRoot = [string]$policyResult.policy.tool_workflow_root
+    if (-not $toolWorkflowRoot) { throw "Validated tool workflow authority is enabled but no workflow root was returned." }
+    $persistedEnvironment["EVAVO_MCP_ALLOW_WORKFLOW_PATHS"] = "1"
+    $persistedEnvironment["EVAVO_MCP_WORKFLOW_ROOT"] = $toolWorkflowRoot
+}
+
 $nonSecretEnvironment = @(
     "EVAVO_COMFYUI_HOME",
     "EVAVO_COMFYUI_PYTHON",
@@ -108,29 +87,20 @@ $nonSecretEnvironment = @(
     "EVAVO_CHECKPOINT_FILE",
     "EVAVO_CHECKPOINT_SHA256",
     "EVAVO_CHECKPOINT_NAME",
-    "EVAVO_COMFYUI_WORKFLOW",
     "EVAVO_COMFYUI_CHECKPOINT",
     "EVAVO_TASK_HISTORY",
-    "EVAVO_TORCH_INDEX_URL",
-    "EVAVO_MCP_OUTPUT_ROOTS",
-    "EVAVO_MCP_ALLOW_WORKFLOW_PATHS",
-    "EVAVO_MCP_WORKFLOW_ROOT"
+    "EVAVO_TORCH_INDEX_URL"
 )
 foreach ($name in $nonSecretEnvironment) {
     $value = [Environment]::GetEnvironmentVariable($name)
-    if ($value) {
-        $persistedEnvironment[$name] = $value
-    }
+    if ($value) { $persistedEnvironment[$name] = $value }
 }
 
 $envLines = New-Object System.Collections.Generic.List[string]
 foreach ($entry in $persistedEnvironment.GetEnumerator()) {
     $line = ConvertTo-CmdSetLine $entry.Key ([string]$entry.Value)
-    if ($line) {
-        $envLines.Add($line)
-    }
+    if ($line) { $envLines.Add($line) }
 }
-
 $escapedRepo = $repo.Replace('"', '""')
 $escapedScript = $script.Replace('"', '""')
 $environmentBlock = ($envLines -join "`r`n")
@@ -142,19 +112,11 @@ start "EVAVO Agent MCP" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -
 "@
 Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 
-Write-Host "Installed EVAVO agent MCP autostart:" -ForegroundColor Green
-Write-Host "  $launcher"
-Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in without rerunning the full integration suite." -ForegroundColor Green
-Write-Host "ComfyUI endpoint: $comfyEndpoint (persisted as canonical COMFYUI_ENDPOINT)" -ForegroundColor Green
-Write-Host "Generation output root: $generationOutputDir (validated before persistence)" -ForegroundColor Green
-Write-Host "Safe local ComfyUI/checkpoint provisioning settings were embedded for reboot persistence." -ForegroundColor Green
-Write-Host "MCP file policy was validated before write; arbitrary output/workflow paths remain denied." -ForegroundColor Green
-if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
-    Write-Host "Shared ComfyUI model roots were embedded for reboot persistence." -ForegroundColor Green
-}
-if ($env:EVAVO_CHECKPOINT_URL) {
-    Write-Host "Note: EVAVO_CHECKPOINT_URL was not persisted because checkpoint URLs may contain credentials/tokens." -ForegroundColor Yellow
-}
+Write-Host "Installed EVAVO agent MCP autostart: $launcher" -ForegroundColor Green
+Write-Host "ComfyUI endpoint: $comfyEndpoint" -ForegroundColor Green
+Write-Host "Generation output root: $generationOutputDir" -ForegroundColor Green
+Write-Host "MCP launch and persisted path authority are policy-validated." -ForegroundColor Green
+if ($env:EVAVO_CHECKPOINT_URL) { Write-Host "EVAVO_CHECKPOINT_URL was not persisted because URLs may contain secrets." -ForegroundColor Yellow }
 
 Write-Host "Starting/reloading it now in a hidden process..." -ForegroundColor Cyan
 $quotedScript = '"' + $script.Replace('"', '\"') + '"'
@@ -168,19 +130,11 @@ while ((Get-Date) -lt $deadline) {
         $client = New-Object System.Net.Sockets.TcpClient
         $iar = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
         if ($iar.AsyncWaitHandle.WaitOne(300) -and $client.Connected) {
-            $client.EndConnect($iar)
-            $client.Close()
-            $ready = $true
-            break
+            $client.EndConnect($iar); $client.Close(); $ready = $true; break
         }
         $client.Close()
-    } catch {
-    }
+    } catch {}
     Start-Sleep -Milliseconds 250
 }
-
-if (-not $ready) {
-    throw "EVAVO MCP did not begin listening on port $Port within 20 seconds. Run START-AGENT-MCP.ps1 manually for diagnostics."
-}
-
+if (-not $ready) { throw "EVAVO MCP did not begin listening on port $Port within 20 seconds. Run START-AGENT-MCP.ps1 manually for diagnostics." }
 Write-Host "EVAVO MCP is listening at http://127.0.0.1:$Port/mcp" -ForegroundColor Green
