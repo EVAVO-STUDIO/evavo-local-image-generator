@@ -4,9 +4,11 @@ param(
     [string]$Python = "python",
     [string]$ComfyEndpoint = "http://127.0.0.1:8188",
     [string]$KokoroEndpoint = "http://127.0.0.1:8880",
+    [string]$GatewayEndpoint = "http://127.0.0.1:8000",
     [string]$AtmosphereRoot = "C:\GitRepos\atmosphere-studio",
     [string]$ThreeDRoot = "C:\GitRepos\evavo-3d-studio",
     [string]$ThreeDWorkerEndpoint = "http://127.0.0.1:4314",
+    [switch]$RequireGateway,
     [switch]$Require3DExecution,
     [switch]$SkipComfy,
     [switch]$SkipKokoro,
@@ -93,6 +95,8 @@ function Test-LoopbackHttpEndpoint {
 
 # Offline gates first: fast and deterministic, no GPU/service dependency.
 Invoke-Gate "image-quality-profile-tests" $PSScriptRoot $Python @("test_quality_profiles.py") | Out-Null
+Invoke-Gate "prompt-quality-tests" $PSScriptRoot $Python @("test_prompt_quality.py") | Out-Null
+Invoke-Gate "audio-quality-tests" $PSScriptRoot $Python @("test_audio_quality.py") | Out-Null
 
 if (-not $SkipComfy) {
     $profiles = "quality,euler_reference"
@@ -116,10 +120,29 @@ if (-not $SkipComfy) {
     ) | Out-Null
 }
 
+if ($RequireGateway) {
+    if (-not (Test-LoopbackHttpEndpoint $GatewayEndpoint)) {
+        $Failures.Add("Gateway endpoint must be loopback HTTP: $GatewayEndpoint")
+        Write-Host "[FAIL] Gateway endpoint must be loopback HTTP" -ForegroundColor Red
+    } else {
+        $powershell = (Get-Process -Id $PID).Path
+        Invoke-Gate "gateway-native-image-roundtrip" $PSScriptRoot $powershell @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", (Join-Path $PSScriptRoot "RUN-GATEWAY-QUALITY-SMOKE.ps1"),
+            "-Python", $Python,
+            "-GatewayBase", $GatewayEndpoint,
+            "-ComfyEndpoint", $ComfyEndpoint,
+            "-Profile", "quality",
+            "-Seed", "1337",
+            "-Output", (Join-Path $ResultRoot "gateway\smoke.png")
+        ) | Out-Null
+    }
+}
+
 if (-not $SkipKokoro) {
     $texts = "neutral"
     if ($Mode -eq "standard") { $texts = "neutral,numbers" }
-    if ($Mode -eq "full") { $texts = "neutral,numbers,expressive" }
+    if ($Mode -eq "full") { $texts = "neutral,numbers,expressive,technical,proper_nouns" }
     Invoke-Gate "kokoro-golden-audio" $PSScriptRoot $Python @(
         "kokoro-quality-test.py",
         "--endpoint", $KokoroEndpoint,
@@ -218,13 +241,15 @@ if (-not $SkipAtmosphere) {
 
 $Finished = Get-Date
 $Summary = [ordered]@{
-    schemaVersion = 3
+    schemaVersion = 4
     mode = $Mode
     startedAt = $Started.ToString("o")
     finishedAt = $Finished.ToString("o")
     durationSeconds = [math]::Round(($Finished - $Started).TotalSeconds, 3)
     comfyEndpoint = $ComfyEndpoint
     kokoroEndpoint = $KokoroEndpoint
+    gatewayEndpoint = $GatewayEndpoint
+    requireGateway = [bool]$RequireGateway
     atmosphereRoot = $AtmosphereRoot
     threeDRoot = $ThreeDRoot
     threeDWorkerEndpoint = $ThreeDWorkerEndpoint
