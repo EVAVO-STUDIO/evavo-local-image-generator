@@ -27,6 +27,22 @@ def load_provisioner():
     return module
 
 
+def provision_args(target: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        target=str(target),
+        repository="https://example.invalid/ComfyUI.git",
+        skip_update=True,
+        skip_pytorch=False,
+        torch_index_url="https://example.invalid/torch",
+        checkpoint_only=False,
+        checkpoint_file=None,
+        checkpoint_url=None,
+        checkpoint_sha256=None,
+        checkpoint_name=None,
+        allow_http_checkpoint=False,
+    )
+
+
 class ProvisioningSafetyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -154,6 +170,62 @@ class ProvisioningSafetyTests(unittest.TestCase):
                 self.module.ensure_checkout(target, "https://example.invalid/ComfyUI.git", update=False)
             self.assertIn("COMFYUI_TARGET_CONFLICT", str(context.exception))
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
+    def test_healthy_source_runtime_skips_dependency_reinstall(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "ComfyUI"
+            target.mkdir()
+            (target / "main.py").write_text("# source fixture\n", encoding="utf-8")
+            python = self.module.venv_python(target)
+            python.parent.mkdir(parents=True)
+            python.write_text("fixture", encoding="utf-8")
+            verification = {
+                "main_py": str(target / "main.py"),
+                "python": str(python),
+                "torch": {"torch_version": "test", "cuda_available": True},
+                "entrypoint_smoke": "ok",
+                "checkpoint_directory": str(target / "models" / "checkpoints"),
+                "checkpoint_files": [],
+            }
+            with (
+                patch.object(self.module, "verify_runtime", return_value=verification) as verify,
+                patch.object(self.module, "install_runtime") as install,
+                patch.object(self.module, "save_state"),
+            ):
+                payload = self.module.provision(provision_args(target))
+            self.assertEqual(payload["status"], "runtime_reused")
+            self.assertEqual(payload["install"]["status"], "existing_runtime_verified")
+            verify.assert_called_once()
+            install.assert_not_called()
+
+    def test_invalid_source_runtime_reinstalls_dependencies_then_verifies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "ComfyUI"
+            target.mkdir()
+            (target / "main.py").write_text("# source fixture\n", encoding="utf-8")
+            (target / "requirements.txt").write_text("# fixture\n", encoding="utf-8")
+            python = self.module.venv_python(target)
+            python.parent.mkdir(parents=True)
+            python.write_text("fixture", encoding="utf-8")
+            verification = {
+                "main_py": str(target / "main.py"),
+                "python": str(python),
+                "torch": {"torch_version": "test", "cuda_available": True},
+                "entrypoint_smoke": "ok",
+                "checkpoint_directory": str(target / "models" / "checkpoints"),
+                "checkpoint_files": [],
+            }
+            with (
+                patch.object(self.module, "verify_runtime", side_effect=[RuntimeError("broken runtime"), verification]) as verify,
+                patch.object(self.module, "install_runtime", return_value={"status": "installed"}) as install,
+                patch.object(self.module, "save_state"),
+            ):
+                payload = self.module.provision(provision_args(target))
+            self.assertEqual(payload["status"], "provisioned")
+            self.assertEqual(payload["install"]["previous_validation_error"], "broken runtime")
+            self.assertFalse(payload["install"]["runtime_reused"])
+            self.assertEqual(verify.call_count, 2)
+            install.assert_called_once()
 
     def test_shared_model_config_only_emits_existing_supported_directories(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
