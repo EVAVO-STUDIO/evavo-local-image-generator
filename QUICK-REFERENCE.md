@@ -7,7 +7,7 @@ cd C:\Gitrepos\evavo-local-image-generator
 .\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-The updater safely fast-forwards `main`, parses canonical PowerShell scripts before configuration writes, installs dependencies, runs all offline/integration suites, configures Claude + private HTTP MCP, provisions/repairs ComfyUI when allowed, runs strict real-renderer readiness checks, and configures the ChatGPT Secure MCP Tunnel when a valid tunnel ID is already available.
+The updater safely fast-forwards `main`, parses canonical PowerShell scripts before configuration writes, installs dependencies, runs all offline/integration suites, configures Claude + private HTTP MCP, provisions/repairs ComfyUI when allowed, validates the active generation contract, and configures the ChatGPT Secure MCP Tunnel when a valid tunnel ID is already available.
 
 Troubleshooting switches:
 
@@ -17,6 +17,28 @@ Troubleshooting switches:
 .\UPDATE-AND-VERIFY-EVAVO.ps1 -SkipChatGPTTunnel
 ```
 
+## Repository verification
+
+Fast read-only structural/Python/PowerShell-when-available verification:
+
+```powershell
+python evavo.py verify
+```
+
+Full repository contract plus all Python safety/integration suites:
+
+```powershell
+python evavo.py verify --full
+```
+
+Require a real PowerShell parser rather than allowing that one platform-specific check to be skipped:
+
+```powershell
+python evavo.py verify --full --require-powershell
+```
+
+`verify-evavo.py` compiles Python sources in memory and does not create `__pycache__` as part of syntax checking.
+
 ## Agent readiness
 
 ```powershell
@@ -25,7 +47,14 @@ python agent-doctor.py --repair --provision
 python agent-doctor.py --repair --provision --json
 ```
 
-Strict repair requires real native ComfyUI plus at least one checkpoint for the built-in workflow. The deterministic mock cannot satisfy this gate. The doctor also validates shared model roots and reports checkpoint/LoRA/VAE/ControlNet/UNET/text-encoder/CLIP-vision/upscaler inventories.
+Strict repair requires a real native ComfyUI plus a usable **active generation contract**:
+
+- with no `EVAVO_COMFYUI_WORKFLOW`, the built-in checkpoint workflow requires a usable checkpoint;
+- with `EVAVO_COMFYUI_WORKFLOW` configured, that custom workflow is rendered and preflighted against live ComfyUI nodes/models, and checkpoint absence is non-blocking unless that workflow itself requires one.
+
+A healthy externally started ComfyUI is reused even when its filesystem install is not discoverable. EVAVO does not clone a second runtime merely because discovery cannot locate the already-running renderer.
+
+The deterministic mock cannot satisfy the strict real-renderer gate. The doctor also validates shared model roots and reports checkpoint/LoRA/VAE/ControlNet/UNET/text-encoder/CLIP-vision/upscaler inventories.
 
 ## Claude Desktop
 
@@ -88,7 +117,7 @@ Persistent login startup requires the runtime key to be stored with Windows curr
 .\INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1
 ```
 
-The installer downloads the latest official `openai/tunnel-client` Windows release and verifies the SHA-256 digest published in GitHub release metadata before extraction. The runtime key is never stored in Git, `.evavo/chatgpt-tunnel.json`, or Windows Startup plaintext.
+The installer downloads the latest official `openai/tunnel-client` Windows release, verifies the SHA-256 digest published in GitHub release metadata before extraction, records the extracted executable SHA-256, and rechecks that executable before every tunnel run. The runtime key is never stored in Git, `.evavo/chatgpt-tunnel.json`, or Windows Startup plaintext.
 
 `CHATGPT-TUNNEL-DOCTOR.ps1` is a local preflight/process diagnostic. It deliberately does not claim that a passing local doctor alone proves ChatGPT workspace visibility.
 
@@ -103,6 +132,7 @@ health_check
 discover_backends
 list_checkpoints
 model_inventory
+workflow_preflight
 generate_image
 generate_batch
 generation_status
@@ -113,7 +143,9 @@ task_statistics
 stop_managed_backend
 ```
 
-`generate_image` / `generate_batch` auto-start and wait by default. `read_output_image` returns an authorized generated file as native MCP image content so an agent can visually inspect it.
+`workflow_preflight` is read-only: it renders a custom API workflow with the same substitution path used by generation, checks live ComfyUI node classes/required inputs/literal model choices, and returns structured compatibility diagnostics **without queueing work or writing task history**.
+
+`generate_image` / `generate_batch` auto-start and wait by default. Custom workflows are preflighted automatically before `/prompt`; set `EVAVO_PREFLIGHT_CUSTOM_WORKFLOW=0` only as an explicit escape hatch for unusual graphs. `read_output_image` returns an authorized generated file as native MCP image content so an agent can visually inspect it.
 
 ## Real image generation
 
@@ -133,6 +165,8 @@ python evavo.py generate --prompts "PS1 corridor" --project ps1 --wait --output-
 # Custom ComfyUI API workflow
 python evavo.py generate --prompts "PS1 corridor" --workflow "C:\EVAVO\workflows\workflow-api.json" --wait
 ```
+
+For Claude/ChatGPT, call `workflow_preflight` on a custom workflow before a long batch when you want explicit compatibility diagnostics up front.
 
 ## Runtime/model provisioning
 
@@ -164,7 +198,7 @@ EVAVO_AUTO_PROVISION_COMFYUI=1
 EVAVO_AUTO_PROVISION_CHECKPOINT=1
 ```
 
-Checkpoint repair uses only workstation-configured sources. Custom UNET/Flux workflows do not trigger checkpoint provisioning merely because `CheckpointLoaderSimple` is empty.
+Checkpoint repair uses only workstation-configured sources. Custom UNET/Flux workflows do not trigger checkpoint provisioning merely because `CheckpointLoaderSimple` is empty or absent.
 
 ## Shared model libraries
 
@@ -227,6 +261,8 @@ $env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\image-generation-history.json"
 | Operation | Command |
 |---|---|
 | Diagnose operations/models | `python evavo.py doctor` |
+| Verify repo contracts | `python evavo.py verify` |
+| Full contract/tests | `python evavo.py verify --full` |
 | Strict agent repair | `python agent-doctor.py --repair --provision` |
 | Sync `main` | `python evavo.py sync` |
 | Full bootstrap | `python evavo.py bootstrap` |
@@ -237,6 +273,7 @@ $env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\image-generation-history.json"
 | Statistics | `python evavo.py stats` |
 | Operational tests | `python evavo.py test` |
 | Agent/MCP tests | `python test-agent-integration.py` |
+| Workflow-aware doctor tests | `python test-agent-doctor-workflows.py` |
 | Provision/runtime safety | `python test-provisioning.py` |
 | Backend/file-boundary safety | `python test-backend-automation.py` |
 | ChatGPT tunnel contracts | `python test-chatgpt-tunnel.py` |
@@ -289,14 +326,11 @@ Persistent tunnel runtime key (outside the repository):
 ## Recovery
 
 ```powershell
+python evavo.py verify --full --require-powershell
 python agent-doctor.py --repair --provision
 python evavo.py doctor
 python monitor-evavo.py --json
-python test-provisioning.py
-python test-backend-automation.py
-python test-chatgpt-tunnel.py
-python test-agent-integration.py
-python evavo.py test
+python test-agent-doctor-workflows.py
 .\CHATGPT-TUNNEL-DOCTOR.ps1 -RequireRuntimeKey -RequireRunning
 Get-Content .\.evavo\native-comfyui.log -Tail 100
 Get-Content .\.evavo\mock-service.log -Tail 100
