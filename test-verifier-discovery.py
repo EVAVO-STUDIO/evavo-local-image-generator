@@ -58,6 +58,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "tests/test_gateway_service_manager_locking.py",
             "evavo_local_image_generator/tests/test_backends.py",
             "evavo_local_image_generator/tests/test_generators.py",
+            "evavo_local_image_generator/tests/test_unsupported_modalities.py",
         }
         self.assertTrue(required.issubset(tests), sorted(required - tests))
 
