@@ -46,6 +46,12 @@
         "persistent_profiles_keep_non_secret_policy": true
       },
       "invalid_request_preflight_before_backend_work": true,
+      "generation_status": {
+        "source": ["GET /history/<prompt_id>", "GET /queue"],
+        "normalized_states": ["queued", "running", "completed", "failed", "unknown"],
+        "failed_history_updates_shared_task_history": true,
+        "missing_prompt_is_unknown_not_queued": true
+      },
       "tools": [
         "provision_backend", "ensure_backend", "health_check", "discover_backends", "list_checkpoints",
         "model_inventory", "workflow_preflight", "generate_image", "generate_batch", "generation_status",
@@ -90,7 +96,7 @@
       }
     }
   },
-  "native_comfyui_api": ["GET /system_stats", "GET /object_info[/<node>]", "POST /prompt", "GET /history/<prompt_id>", "GET /view"],
+  "native_comfyui_api": ["GET /system_stats", "GET /object_info[/<node>]", "POST /prompt", "GET /history/<prompt_id>", "GET /queue", "GET /view"],
   "model_inventory_categories": ["checkpoints", "loras", "vae", "controlnet", "diffusion_models", "text_encoders", "clip_vision", "upscale_models"],
   "automation": {
     "windows_setup": ".\\UPDATE-AND-VERIFY-EVAVO.ps1",
@@ -104,7 +110,8 @@
     "shared_task_history": true,
     "native_mcp_image_content": true,
     "gateway_auxiliary_provider_readiness": true,
-    "persistent_mcp_file_policy": true
+    "persistent_mcp_file_policy": true,
+    "normalized_prompt_status": true
   },
   "security": {
     "public_bind_by_default": false,
@@ -128,6 +135,7 @@
     "mcp_output_symlink_or_parent_redirection_rejected": true,
     "mcp_image_signature_validation": true,
     "mcp_invalid_file_or_wait_policy_preflight": true,
+    "mcp_failed_prompt_not_reported_as_queued": true,
     "broad_python_process_kill": false,
     "managed_process_identity_verification": true,
     "user_managed_comfyui_never_killed": true,
