@@ -13,6 +13,11 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any, Dict, Optional
 
 
+def _align8(value: float) -> int:
+    number = max(64, int(round(value)))
+    return max(64, number - (number % 8))
+
+
 @dataclass(frozen=True)
 class ImageQualitySettings:
     name: str
@@ -23,9 +28,41 @@ class ImageQualitySettings:
     sampler_name: str
     scheduler: str
     denoise: float = 1.0
+    upscale_factor: float = 1.0
+    second_pass_steps: int = 0
+    second_pass_cfg_scale: Optional[float] = None
+    second_pass_sampler_name: Optional[str] = None
+    second_pass_scheduler: Optional[str] = None
+    second_pass_denoise: float = 0.0
+    latent_upscale_method: str = "bislerp"
+
+    @property
+    def second_pass_enabled(self) -> bool:
+        return self.upscale_factor > 1.0 and self.second_pass_steps > 0 and self.second_pass_denoise > 0.0
+
+    @property
+    def output_width(self) -> int:
+        return _align8(self.width * self.upscale_factor) if self.second_pass_enabled else self.width
+
+    @property
+    def output_height(self) -> int:
+        return _align8(self.height * self.upscale_factor) if self.second_pass_enabled else self.height
+
+    @property
+    def pass_count(self) -> int:
+        return 2 if self.second_pass_enabled else 1
 
     def as_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload.update(
+            {
+                "second_pass_enabled": self.second_pass_enabled,
+                "pass_count": self.pass_count,
+                "output_width": self.output_width,
+                "output_height": self.output_height,
+            }
+        )
+        return payload
 
 
 QUALITY_PROFILES: Dict[str, ImageQualitySettings] = {
@@ -40,6 +77,21 @@ QUALITY_PROFILES: Dict[str, ImageQualitySettings] = {
     "detail": ImageQualitySettings(
         name="detail", width=1024, height=1024, steps=42, cfg_scale=6.0,
         sampler_name="dpmpp_3m_sde", scheduler="karras",
+    ),
+    # Hero deliberately remains opt-in. It keeps the proven 1024 SDXL base pass,
+    # expands the latent to 1.5x, then performs a restrained low-denoise second
+    # pass. This avoids a second model/refiner allocation and stays sequential on
+    # the 12 GB target GPU while giving fine detail room to resolve at ~1536px.
+    "hero": ImageQualitySettings(
+        name="hero", width=1024, height=1024, steps=36, cfg_scale=6.5,
+        sampler_name="dpmpp_2m_sde", scheduler="karras",
+        upscale_factor=1.5,
+        second_pass_steps=18,
+        second_pass_cfg_scale=5.5,
+        second_pass_sampler_name="dpmpp_2m_sde",
+        second_pass_scheduler="karras",
+        second_pass_denoise=0.24,
+        latent_upscale_method="bislerp",
     ),
     "euler_reference": ImageQualitySettings(
         name="euler_reference", width=1024, height=1024, steps=30, cfg_scale=6.5,
@@ -105,6 +157,13 @@ def resolve_quality_settings(
     sampler_name: Optional[str] = None,
     scheduler: Optional[str] = None,
     denoise: Any = None,
+    upscale_factor: Any = None,
+    second_pass_steps: Any = None,
+    second_pass_cfg_scale: Any = None,
+    second_pass_sampler_name: Optional[str] = None,
+    second_pass_scheduler: Optional[str] = None,
+    second_pass_denoise: Any = None,
+    latent_upscale_method: Optional[str] = None,
 ) -> ImageQualitySettings:
     """Resolve a render profile plus explicit/env overrides.
 
@@ -114,6 +173,11 @@ def resolve_quality_settings(
     legacy pair is treated as "unset" so old gateway/wrapper callers inherit the
     new production-quality profile. Use ``quality_profile="custom"`` to keep an
     intentional 24/7 request.
+
+    The two-pass fields are intentionally independent from the first-pass fields.
+    They default to disabled for every profile except ``hero``. This keeps normal
+    production predictable while allowing a higher-resolution render to be
+    benchmarked and promoted per subject instead of becoming a hidden cost.
     """
 
     raw_profile = (quality_profile or os.getenv("EVAVO_IMAGE_QUALITY_PROFILE") or "quality").strip().lower()
@@ -149,6 +213,30 @@ def resolve_quality_settings(
     if denoise is None:
         denoise = os.getenv("EVAVO_IMAGE_DENOISE", base.denoise)
 
+    if upscale_factor is None:
+        upscale_factor = os.getenv("EVAVO_IMAGE_UPSCALE_FACTOR", base.upscale_factor)
+    if second_pass_steps is None:
+        second_pass_steps = os.getenv("EVAVO_IMAGE_SECOND_STEPS", base.second_pass_steps)
+    if second_pass_cfg_scale is None:
+        second_pass_cfg_scale = os.getenv(
+            "EVAVO_IMAGE_SECOND_CFG",
+            base.second_pass_cfg_scale if base.second_pass_cfg_scale is not None else base.cfg_scale,
+        )
+    if second_pass_sampler_name is None:
+        second_pass_sampler_name = os.getenv(
+            "EVAVO_IMAGE_SECOND_SAMPLER",
+            base.second_pass_sampler_name or base.sampler_name,
+        )
+    if second_pass_scheduler is None:
+        second_pass_scheduler = os.getenv(
+            "EVAVO_IMAGE_SECOND_SCHEDULER",
+            base.second_pass_scheduler or base.scheduler,
+        )
+    if second_pass_denoise is None:
+        second_pass_denoise = os.getenv("EVAVO_IMAGE_SECOND_DENOISE", base.second_pass_denoise)
+    if latent_upscale_method is None:
+        latent_upscale_method = os.getenv("EVAVO_IMAGE_LATENT_UPSCALE_METHOD", base.latent_upscale_method)
+
     resolved = replace(
         base,
         name="custom" if custom else base.name,
@@ -159,11 +247,38 @@ def resolve_quality_settings(
         sampler_name=str(sampler_name).strip(),
         scheduler=str(scheduler).strip(),
         denoise=_finite_float(denoise, name="denoise", minimum=0.0, maximum=1.0),
+        upscale_factor=_finite_float(upscale_factor, name="upscale_factor", minimum=1.0, maximum=2.0),
+        second_pass_steps=_positive_int(second_pass_steps, name="second_pass_steps", minimum=0, maximum=100),
+        second_pass_cfg_scale=_finite_float(
+            second_pass_cfg_scale,
+            name="second_pass_cfg_scale",
+            minimum=0.0,
+            maximum=100.0,
+        ),
+        second_pass_sampler_name=str(second_pass_sampler_name).strip(),
+        second_pass_scheduler=str(second_pass_scheduler).strip(),
+        second_pass_denoise=_finite_float(
+            second_pass_denoise,
+            name="second_pass_denoise",
+            minimum=0.0,
+            maximum=1.0,
+        ),
+        latent_upscale_method=str(latent_upscale_method).strip(),
     )
     if not resolved.sampler_name:
         raise ValueError("sampler_name must not be empty")
     if not resolved.scheduler:
         raise ValueError("scheduler must not be empty")
+    if not resolved.second_pass_sampler_name:
+        raise ValueError("second_pass_sampler_name must not be empty")
+    if not resolved.second_pass_scheduler:
+        raise ValueError("second_pass_scheduler must not be empty")
+    if not resolved.latent_upscale_method:
+        raise ValueError("latent_upscale_method must not be empty")
+    if resolved.output_width > 4096 or resolved.output_height > 4096:
+        raise ValueError(
+            f"second-pass output {resolved.output_width}x{resolved.output_height} exceeds the 4096px safety limit"
+        )
     return resolved
 
 

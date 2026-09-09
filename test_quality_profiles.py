@@ -1,4 +1,4 @@
-"""Offline regression tests for EVAVO production image quality profiles."""
+"""Offline regressions for EVAVO production quality profiles and gateway audio fallback."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from evavo_local_image_generator.quality_profiles import (
     recommended_sdxl_dimensions,
     resolve_quality_settings,
 )
+from test_kokoro_gateway_provider import KokoroGatewayProviderContractTests  # noqa: F401
 
 
 class StubQualityBackend(QualityComfyUIBackend):
@@ -26,6 +27,10 @@ class StubQualityBackend(QualityComfyUIBackend):
             return ["euler", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_3m_sde"]
         if node_class == "KSampler" and input_name == "scheduler":
             return ["normal", "karras", "simple"]
+        if node_class == "LatentUpscale" and input_name == "upscale_method":
+            return ["nearest-exact", "bilinear", "area", "bicubic", "bislerp"]
+        if node_class == "LoraLoader" and input_name == "lora_name":
+            return ["detail-style.safetensors", "character-identity.safetensors"]
         return []
 
 
@@ -40,6 +45,23 @@ class QualityProfileTests(unittest.TestCase):
         self.assertEqual(profile.cfg_scale, 6.5)
         self.assertEqual(profile.sampler_name, "dpmpp_2m_sde")
         self.assertEqual(profile.scheduler, "karras")
+        self.assertFalse(profile.second_pass_enabled)
+        self.assertEqual(profile.pass_count, 1)
+        self.assertEqual((profile.output_width, profile.output_height), (1024, 1024))
+
+    def test_hero_profile_is_explicit_two_pass_1536_path(self):
+        profile = get_quality_profile("hero")
+        self.assertEqual((profile.width, profile.height), (1024, 1024))
+        self.assertEqual(profile.steps, 36)
+        self.assertEqual(profile.cfg_scale, 6.5)
+        self.assertEqual(profile.upscale_factor, 1.5)
+        self.assertEqual(profile.second_pass_steps, 18)
+        self.assertEqual(profile.second_pass_cfg_scale, 5.5)
+        self.assertEqual(profile.second_pass_denoise, 0.24)
+        self.assertEqual(profile.latent_upscale_method, "bislerp")
+        self.assertTrue(profile.second_pass_enabled)
+        self.assertEqual(profile.pass_count, 2)
+        self.assertEqual((profile.output_width, profile.output_height), (1536, 1536))
 
     def test_legacy_wrapper_default_pair_is_upgraded(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -54,6 +76,7 @@ class QualityProfileTests(unittest.TestCase):
         self.assertEqual(settings.name, "custom")
         self.assertEqual(settings.steps, 24)
         self.assertEqual(settings.cfg_scale, 7.0)
+        self.assertFalse(settings.second_pass_enabled)
 
     def test_builtin_workflow_uses_quality_sampler(self):
         backend = StubQualityBackend("http://127.0.0.1:8188")
@@ -65,6 +88,10 @@ class QualityProfileTests(unittest.TestCase):
         self.assertEqual(sampler["cfg"], 6.5)
         self.assertEqual(sampler["sampler_name"], "dpmpp_2m_sde")
         self.assertEqual(sampler["scheduler"], "karras")
+        self.assertNotIn("8", workflow)
+        self.assertNotIn("9", workflow)
+        self.assertNotIn("10", workflow)
+        self.assertEqual(workflow["6"]["inputs"]["samples"], ["5", 0])
 
     def test_detail_profile_uses_higher_quality_budget(self):
         backend = StubQualityBackend("http://127.0.0.1:8188")
@@ -75,10 +102,125 @@ class QualityProfileTests(unittest.TestCase):
         self.assertEqual(sampler["sampler_name"], "dpmpp_3m_sde")
         self.assertEqual(sampler["scheduler"], "karras")
 
+    def test_hero_workflow_appends_latent_upscale_and_low_denoise_second_sampler(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        workflow = backend.build_txt2img_workflow("hero regression", seed=1337, quality_profile="hero")
+
+        first = workflow["5"]["inputs"]
+        upscale = workflow["8"]
+        second = workflow["9"]["inputs"]
+
+        self.assertEqual(first["seed"], 1337)
+        self.assertEqual(first["steps"], 36)
+        self.assertEqual(first["cfg"], 6.5)
+        self.assertEqual(first["denoise"], 1.0)
+
+        self.assertEqual(upscale["class_type"], "LatentUpscale")
+        self.assertEqual(upscale["inputs"]["samples"], ["5", 0])
+        self.assertEqual(upscale["inputs"]["upscale_method"], "bislerp")
+        self.assertEqual((upscale["inputs"]["width"], upscale["inputs"]["height"]), (1536, 1536))
+        self.assertEqual(upscale["inputs"]["crop"], "disabled")
+
+        self.assertEqual(second["seed"], 1337)
+        self.assertEqual(second["steps"], 18)
+        self.assertEqual(second["cfg"], 5.5)
+        self.assertEqual(second["sampler_name"], "dpmpp_2m_sde")
+        self.assertEqual(second["scheduler"], "karras")
+        self.assertEqual(second["denoise"], 0.24)
+        self.assertEqual(second["latent_image"], ["8", 0])
+        self.assertEqual(workflow["6"]["inputs"]["samples"], ["9", 0])
+        self.assertEqual(workflow["7"]["inputs"]["images"], ["6", 0])
+
+    def test_lora_routes_model_and_clip_through_one_loader(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        workflow = backend.build_txt2img_workflow(
+            "LoRA regression",
+            seed=1337,
+            lora_name="detail-style.safetensors",
+            lora_model_strength=0.7,
+            lora_clip_strength=0.6,
+        )
+        loader = workflow["10"]
+        self.assertEqual(loader["class_type"], "LoraLoader")
+        self.assertEqual(loader["inputs"]["lora_name"], "detail-style.safetensors")
+        self.assertEqual(loader["inputs"]["strength_model"], 0.7)
+        self.assertEqual(loader["inputs"]["strength_clip"], 0.6)
+        self.assertEqual(loader["inputs"]["model"], ["1", 0])
+        self.assertEqual(loader["inputs"]["clip"], ["1", 1])
+        self.assertEqual(workflow["2"]["inputs"]["clip"], ["10", 1])
+        self.assertEqual(workflow["3"]["inputs"]["clip"], ["10", 1])
+        self.assertEqual(workflow["5"]["inputs"]["model"], ["10", 0])
+
+    def test_lora_also_drives_hero_second_pass_model(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        workflow = backend.build_txt2img_workflow(
+            "LoRA hero regression",
+            seed=1337,
+            quality_profile="hero",
+            lora_name="detail-style.safetensors",
+        )
+        self.assertEqual(workflow["5"]["inputs"]["model"], ["10", 0])
+        self.assertEqual(workflow["9"]["inputs"]["model"], ["10", 0])
+        self.assertEqual(workflow["2"]["inputs"]["clip"], ["10", 1])
+        self.assertEqual(workflow["6"]["inputs"]["samples"], ["9", 0])
+
+    def test_lora_not_in_inventory_is_rejected(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        with self.assertRaisesRegex(RuntimeError, "COMFYUI_LORA_NOT_FOUND"):
+            backend.build_txt2img_workflow("missing LoRA", lora_name="missing.safetensors")
+
+    def test_lora_strength_is_bounded(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        with self.assertRaisesRegex(ValueError, "between -4 and 4"):
+            backend.build_txt2img_workflow(
+                "invalid LoRA strength",
+                lora_name="detail-style.safetensors",
+                lora_model_strength=9,
+            )
+
+    def test_lora_refuses_arbitrary_custom_workflow_topology(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        with self.assertRaisesRegex(RuntimeError, "COMFYUI_LORA_CUSTOM_WORKFLOW_UNSUPPORTED"):
+            backend.build_txt2img_workflow(
+                "LoRA custom workflow regression",
+                seed=1337,
+                lora_name="detail-style.safetensors",
+                workflow_path="does-not-need-to-exist.json",
+            )
+
+    def test_hero_scales_native_wide_bucket_without_changing_aspect(self):
+        settings = resolve_quality_settings(quality_profile="hero", width=1344, height=768)
+        self.assertEqual((settings.width, settings.height), (1344, 768))
+        self.assertEqual((settings.output_width, settings.output_height), (2016, 1152))
+
+    def test_hero_rejects_output_that_exceeds_safety_ceiling(self):
+        with self.assertRaisesRegex(ValueError, "exceeds the 4096px safety limit"):
+            resolve_quality_settings(quality_profile="hero", width=4096, height=4096)
+
+    def test_hero_refuses_arbitrary_custom_workflow_topology(self):
+        backend = StubQualityBackend("http://127.0.0.1:8188")
+        with self.assertRaisesRegex(RuntimeError, "COMFYUI_HERO_CUSTOM_WORKFLOW_UNSUPPORTED"):
+            backend.build_txt2img_workflow(
+                "hero custom workflow regression",
+                seed=1337,
+                quality_profile="hero",
+                workflow_path="does-not-need-to-exist.json",
+            )
+
     def test_sampler_falls_back_to_available_quality_option(self):
         self.assertEqual(
             StubQualityBackend._choose_available("missing", ["euler", "dpmpp_2m"], StubQualityBackend._SAMPLER_FALLBACKS),
             "dpmpp_2m",
+        )
+
+    def test_latent_upscale_method_falls_back_to_available_core_option(self):
+        self.assertEqual(
+            StubQualityBackend._choose_available(
+                "missing",
+                ["bilinear", "bicubic"],
+                StubQualityBackend._LATENT_UPSCALE_FALLBACKS,
+            ),
+            "bicubic",
         )
 
     def test_sdxl_buckets_include_square_and_wide_native_sizes(self):

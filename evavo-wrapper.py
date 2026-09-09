@@ -88,6 +88,20 @@ def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             seed=payload.get("seed"),
             checkpoint=payload.get("checkpoint"),
             workflow_path=payload.get("workflow_path"),
+            quality_profile=payload.get("quality_profile"),
+            sampler_name=payload.get("sampler_name"),
+            scheduler=payload.get("scheduler"),
+            denoise=payload.get("denoise"),
+            upscale_factor=payload.get("upscale_factor"),
+            second_pass_steps=payload.get("second_pass_steps"),
+            second_pass_cfg_scale=payload.get("second_pass_cfg_scale"),
+            second_pass_sampler_name=payload.get("second_pass_sampler_name"),
+            second_pass_scheduler=payload.get("second_pass_scheduler"),
+            second_pass_denoise=payload.get("second_pass_denoise"),
+            latent_upscale_method=payload.get("latent_upscale_method"),
+            lora_name=payload.get("lora_name"),
+            lora_model_strength=payload.get("lora_model_strength"),
+            lora_clip_strength=payload.get("lora_clip_strength"),
         )
         response.update({"ok": True, "endpoint": endpoint, "timestamp": now_iso()})
         if bool(payload.get("wait")):

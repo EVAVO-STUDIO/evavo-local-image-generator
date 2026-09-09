@@ -5,9 +5,13 @@ param(
     [string]$ComfyEndpoint = "http://127.0.0.1:8188",
     [string]$KokoroEndpoint = "http://127.0.0.1:8880",
     [string]$AtmosphereRoot = "C:\GitRepos\atmosphere-studio",
+    [string]$ThreeDRoot = "C:\GitRepos\evavo-3d-studio",
+    [string]$ThreeDWorkerEndpoint = "http://127.0.0.1:4314",
+    [switch]$Require3DExecution,
     [switch]$SkipComfy,
     [switch]$SkipKokoro,
-    [switch]$SkipAtmosphere
+    [switch]$SkipAtmosphere,
+    [switch]$Skip3D
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,6 +53,44 @@ function Invoke-Gate {
     return $true
 }
 
+function Test-JsonEndpoint {
+    param([string]$Name, [string]$Url, [scriptblock]$Predicate)
+    Write-Host ""
+    Write-Host "== $Name ==" -ForegroundColor Cyan
+    $safe = ($Name -replace '[^A-Za-z0-9._-]', '-')
+    $LogPath = Join-Path $ResultRoot "$safe.log"
+    try {
+        $payload = Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec 5 -ErrorAction Stop
+        $payload | ConvertTo-Json -Depth 20 | Set-Content -Path $LogPath -Encoding UTF8
+        if (-not (& $Predicate $payload)) {
+            throw "endpoint returned JSON but did not satisfy the production-readiness predicate"
+        }
+        Write-Host "[PASS] $Name" -ForegroundColor Green
+        return $true
+    } catch {
+        $_ | Out-String | Set-Content -Path $LogPath -Encoding UTF8
+        $Failures.Add("$Name ($($_.Exception.Message))")
+        Write-Host "[FAIL] $Name" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Test-LoopbackHttpEndpoint {
+    param([string]$Url)
+    try {
+        $uri = [System.Uri]$Url
+        return (
+            $uri.Scheme -eq "http" -and
+            $uri.Host -in @("127.0.0.1", "localhost", "::1") -and
+            -not $uri.UserInfo -and
+            -not $uri.Query -and
+            -not $uri.Fragment
+        )
+    } catch {
+        return $false
+    }
+}
+
 # Offline gates first: fast and deterministic, no GPU/service dependency.
 Invoke-Gate "image-quality-profile-tests" $PSScriptRoot $Python @("test_quality_profiles.py") | Out-Null
 
@@ -86,6 +128,75 @@ if (-not $SkipKokoro) {
     ) | Out-Null
 }
 
+if (-not $Skip3D) {
+    if (-not (Test-Path (Join-Path $ThreeDRoot "pyproject.toml"))) {
+        $Failures.Add("EVAVO 3D Studio not found at $ThreeDRoot")
+        Write-Host "[FAIL] EVAVO 3D Studio not found at $ThreeDRoot" -ForegroundColor Red
+    } else {
+        # 3D Studio already owns candidate comparison, topology/UV/tangent/LOD,
+        # Blender finishing, material evidence and runtime certification. Reuse
+        # those governed checks rather than duplicating weaker mesh heuristics.
+        Invoke-Gate "3d-studio-doctor" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "doctor") | Out-Null
+        if ($Mode -in @("standard", "full")) {
+            Invoke-Gate "3d-studio-toolchain" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "toolchain", "inspect") | Out-Null
+            Invoke-Gate "3d-studio-providers" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "providers", "list") | Out-Null
+            $brief = Join-Path $ThreeDRoot "examples\rainy-red-bicycle.brief.json"
+            if (Test-Path $brief) {
+                Invoke-Gate "3d-studio-brief-validate" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "brief", "validate", $brief) | Out-Null
+                $planOutput = Join-Path $ResultRoot "3d-studio\rainy-red-bicycle-plan.json"
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $planOutput) | Out-Null
+                Invoke-Gate "3d-studio-plan-compile" $ThreeDRoot $Python @("-m", "evavo_3d_studio", "plan", "compile", $brief, "--vram", "12", "--output", $planOutput) | Out-Null
+            } else {
+                $Failures.Add("3D Studio example brief missing: $brief")
+                Write-Host "[FAIL] 3D Studio example brief missing: $brief" -ForegroundColor Red
+            }
+        }
+        if ($Mode -eq "full") {
+            Invoke-Gate "3d-studio-regression-suite" $ThreeDRoot $Python @("scripts\check.py") | Out-Null
+        }
+        if ($Require3DExecution) {
+            if (-not (Test-LoopbackHttpEndpoint $ThreeDWorkerEndpoint)) {
+                $Failures.Add("3D execution worker endpoint must be loopback HTTP: $ThreeDWorkerEndpoint")
+                Write-Host "[FAIL] 3D execution worker endpoint must be loopback HTTP" -ForegroundColor Red
+            } else {
+                $workerBase = $ThreeDWorkerEndpoint.TrimEnd('/')
+                Test-JsonEndpoint "3d-studio-execution-worker-health" "$workerBase/api/v1/health" {
+                    param($payload)
+                    return (
+                        $payload.ok -eq $true -and
+                        $payload.service -eq "evavo-3d-agent-worker" -and
+                        $payload.executionEnabled -eq $true -and
+                        $payload.authority -eq "token-gated-candidate-production-only"
+                    )
+                } | Out-Null
+
+                Test-JsonEndpoint "3d-studio-execution-worker-capabilities" "$workerBase/api/v1/capabilities" {
+                    param($payload)
+                    $requiredOperations = @(
+                        "pipeline.generate-candidates",
+                        "pipeline.finish-selected",
+                        "pipeline.full-candidate",
+                        "web-delivery.execute"
+                    )
+                    foreach ($operation in $requiredOperations) {
+                        if ($payload.operations -notcontains $operation) { return $false }
+                    }
+                    return (
+                        $payload.submit -eq $true -and
+                        $payload.status -eq $true -and
+                        $payload.automaticApproval -eq $false -and
+                        $payload.canonicalPromotion -eq $false -and
+                        $payload.gitMutation -eq $false -and
+                        $payload.deployment -eq $false -and
+                        $payload.publication -eq $false -and
+                        $payload.clientRelease -eq $false
+                    )
+                } | Out-Null
+            }
+        }
+    }
+}
+
 if (-not $SkipAtmosphere) {
     if (-not (Test-Path (Join-Path $AtmosphereRoot "package.json"))) {
         $Failures.Add("Atmosphere Studio not found at $AtmosphereRoot")
@@ -107,7 +218,7 @@ if (-not $SkipAtmosphere) {
 
 $Finished = Get-Date
 $Summary = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 3
     mode = $Mode
     startedAt = $Started.ToString("o")
     finishedAt = $Finished.ToString("o")
@@ -115,6 +226,10 @@ $Summary = [ordered]@{
     comfyEndpoint = $ComfyEndpoint
     kokoroEndpoint = $KokoroEndpoint
     atmosphereRoot = $AtmosphereRoot
+    threeDRoot = $ThreeDRoot
+    threeDWorkerEndpoint = $ThreeDWorkerEndpoint
+    require3DExecution = [bool]$Require3DExecution
+    threeDAuthorityContractChecked = [bool]$Require3DExecution
     resultRoot = $ResultRoot
     ok = ($Failures.Count -eq 0)
     failures = @($Failures)

@@ -143,6 +143,70 @@ if (-not $env:EVAVO_AUDIO_PROVIDER_ARGV) {
     }
 }
 
+# Kokoro-FastAPI is the quality speech fallback, not a replacement for Audio
+# Studio's broader music/SFX/mastering surface. Only auto-configure it when no
+# richer audio provider was found and the local loopback API proves healthy.
+if (-not $env:EVAVO_AUDIO_PROVIDER_ARGV) {
+    $kokoroWorker = Join-Path $PSScriptRoot "kokoro-provider.py"
+    $kokoroEndpoint = if ($env:KOKORO_ENDPOINT) {
+        [string]$env:KOKORO_ENDPOINT
+    }
+    elseif ($env:EVAVO_KOKORO_ENDPOINT) {
+        [string]$env:EVAVO_KOKORO_ENDPOINT
+    }
+    else {
+        "http://127.0.0.1:8880"
+    }
+
+    $kokoroLoopback = $false
+    try {
+        $kokoroUri = [System.Uri]$kokoroEndpoint
+        $kokoroLoopback = (
+            $kokoroUri.Scheme -eq "http" -and
+            $kokoroUri.Host -in @("127.0.0.1", "localhost", "::1") -and
+            -not $kokoroUri.UserInfo -and
+            -not $kokoroUri.Query -and
+            -not $kokoroUri.Fragment
+        )
+    }
+    catch {
+        $kokoroLoopback = $false
+    }
+
+    if ($kokoroLoopback -and (Test-Path -LiteralPath $kokoroWorker -PathType Leaf)) {
+        $kokoroReady = $false
+        $previousErrorPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $null = Invoke-RestMethod -Uri "$($kokoroEndpoint.TrimEnd('/'))/v1/audio/voices" -Method Get -TimeoutSec 4 -ErrorAction Stop
+            $kokoroReady = $true
+        }
+        catch {
+            $kokoroReady = $false
+        }
+        finally {
+            $ErrorActionPreference = $previousErrorPreference
+        }
+
+        if ($kokoroReady) {
+            $kokoroArgv = @(
+                $python,
+                $kokoroWorker,
+                "--request-json", "{request_json}",
+                "--output-dir", "{output_dir}",
+                "--task-id", "{task_id}",
+                "--endpoint", $kokoroEndpoint
+            )
+            $env:EVAVO_AUDIO_PROVIDER_ARGV = ConvertTo-Json -InputObject $kokoroArgv -Compress
+            $env:KOKORO_ENDPOINT = $kokoroEndpoint
+            if (-not $env:EVAVO_AUDIO_PROVIDER_TIMEOUT) {
+                $env:EVAVO_AUDIO_PROVIDER_TIMEOUT = "900"
+            }
+            Write-Host "Kokoro speech provider fallback: $kokoroEndpoint" -ForegroundColor DarkGreen
+        }
+    }
+}
+
 $manager = Join-Path $PSScriptRoot "EVAVO-SERVICE-MANAGER.py"
 if ($Monitor) {
     & $python $manager monitor --interval $Interval
