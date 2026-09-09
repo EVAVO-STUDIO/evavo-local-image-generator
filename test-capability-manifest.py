@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline synchronization tests for EVAVO-CAPABILITIES.json."""
+"""Offline synchronization tests for EVAVO capability manifests."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "EVAVO-CAPABILITIES.json"
+REPOSITORY_CAPABILITIES_PATH = ROOT / ".evavo" / "capabilities.json"
 MCP_PATH = ROOT / "evavo_local_image_generator" / "mcp_server.py"
 GATEWAY_PATH = ROOT / "EVAVO-GATEWAY.py"
 PROVIDER_PATH = ROOT / "evavo_local_image_generator" / "provider_runner.py"
@@ -39,6 +40,7 @@ class CapabilityManifestTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        cls.repository_capabilities = json.loads(REPOSITORY_CAPABILITIES_PATH.read_text(encoding="utf-8"))
 
     def test_manifest_is_machine_readable_and_owned_contract_is_image_only(self) -> None:
         self.assertEqual(self.manifest["schema_version"], 1)
@@ -136,6 +138,18 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertTrue(security["provider_receipt_digest_verification_when_supplied"])
         self.assertIn("PROVIDER_OUTPUT_INVALID", source)
         self.assertIn("sha256", source.lower())
+
+    def test_brain_capabilities_expose_hardened_gateway_without_claiming_mcp_ownership(self) -> None:
+        self.assertEqual(self.repository_capabilities["authority"], "local-image-generation-control-plane")
+        capabilities = {item.get("id"): item for item in self.repository_capabilities.get("capabilities", []) if isinstance(item, dict)}
+        private_gateway = capabilities.get("local-image.gateway.private-contract")
+        delegation = capabilities.get("local-image.gateway.aux-provider-delegation")
+        self.assertIsNotNone(private_gateway)
+        self.assertIsNotNone(delegation)
+        self.assertIn("request", str(private_gateway.get("description", "")).lower())
+        self.assertIn("interprocess", str(private_gateway.get("description", "")).lower())
+        self.assertIn("fail-closed", str(delegation.get("description", "")).lower())
+        self.assertNotIn("mcp", {str(value).lower() for value in delegation.get("interfaces", [])})
 
     def test_security_contract_rejects_old_dangerous_defaults(self) -> None:
         security = self.manifest["security"]
