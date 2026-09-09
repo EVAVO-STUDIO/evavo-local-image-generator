@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parent
 MANIFEST_PATH = ROOT / "EVAVO-CAPABILITIES.json"
 REPOSITORY_CAPABILITIES_PATH = ROOT / ".evavo" / "capabilities.json"
 MCP_PATH = ROOT / "evavo_local_image_generator" / "mcp_server.py"
+STATUS_PATH = ROOT / "evavo_local_image_generator" / "comfyui_status.py"
 GATEWAY_PATH = ROOT / "EVAVO-GATEWAY.py"
 MANAGER_PATH = ROOT / "EVAVO-SERVICE-MANAGER.py"
 OPERATIONS_PATH = ROOT / "evavo_operations.py"
@@ -79,6 +80,20 @@ class CapabilityManifestTests(unittest.TestCase):
             self.assertIn('"EVAVO_MCP_ALLOW_WORKFLOW_PATHS"', text)
             self.assertIn('"EVAVO_MCP_WORKFLOW_ROOT"', text)
             self.assertNotIn('"EVAVO_CHECKPOINT_URL",', text)
+
+    def test_mcp_generation_status_uses_history_and_queue_truthfully(self) -> None:
+        status_contract = self.manifest["interfaces"]["mcp"]["generation_status"]
+        self.assertEqual(set(status_contract["normalized_states"]), {"queued", "running", "completed", "failed", "unknown"})
+        self.assertTrue(status_contract["failed_history_updates_shared_task_history"])
+        self.assertTrue(status_contract["missing_prompt_is_unknown_not_queued"])
+        self.assertIn("GET /queue", self.manifest["native_comfyui_api"])
+        mcp_source = MCP_PATH.read_text(encoding="utf-8")
+        status_source = STATUS_PATH.read_text(encoding="utf-8")
+        self.assertIn("from .comfyui_status import prompt_status", mcp_source)
+        self.assertIn("prompt_status", mcp_source)
+        self.assertIn('error_code="COMFYUI_EXECUTION_FAILED"', mcp_source)
+        self.assertIn('backend._request("/queue"', status_source)
+        self.assertIn('status = "unknown"', status_source)
 
     def test_chatgpt_contract_uses_secure_tunnel_not_direct_localhost(self) -> None:
         chatgpt = self.manifest["interfaces"]["chatgpt"]
@@ -229,6 +244,7 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertTrue(security["mcp_output_symlink_or_parent_redirection_rejected"])
         self.assertTrue(security["mcp_image_signature_validation"])
         self.assertTrue(security["mcp_invalid_file_or_wait_policy_preflight"])
+        self.assertTrue(security["mcp_failed_prompt_not_reported_as_queued"])
         self.assertFalse(security["broad_python_process_kill"])
         self.assertTrue(security["managed_process_identity_verification"])
         self.assertTrue(security["chatgpt_tunnel_executable_sha256_verification"])
