@@ -22,32 +22,6 @@ function Test-Truthy([string]$Value) {
     return $Value.Trim().ToLowerInvariant() -in @("1", "true", "yes", "on")
 }
 
-function Assert-PowerShellSyntax {
-    $scripts = @(
-        "INSTALL-CLAUDE-MCP.ps1",
-        "START-AGENT-MCP.ps1",
-        "INSTALL-AGENT-MCP-AUTOSTART.ps1",
-        "INSTALL-CHATGPT-MCP-TUNNEL.ps1",
-        "SAVE-CHATGPT-TUNNEL-KEY.ps1",
-        "START-CHATGPT-MCP-TUNNEL.ps1",
-        "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
-        "CHATGPT-TUNNEL-DOCTOR.ps1"
-    )
-    foreach ($name in $scripts) {
-        $path = Join-Path $PSScriptRoot $name
-        if (-not (Test-Path $path)) {
-            Fail "Required PowerShell script is missing: $name" 3
-        }
-        $tokens = $null
-        $errors = $null
-        [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
-        if ($errors -and $errors.Count -gt 0) {
-            $detail = ($errors | ForEach-Object { "$($_.Extent.StartLineNumber):$($_.Extent.StartColumnNumber) $($_.Message)" }) -join "; "
-            Fail "PowerShell syntax validation failed for $name: $detail" 3
-        }
-    }
-}
-
 if ($McpPort -lt 1 -or $McpPort -gt 65535) {
     Fail "MCP port must be between 1 and 65535." 2
 }
@@ -77,10 +51,6 @@ if ($LASTEXITCODE -ne 0) {
     Fail "git pull --ff-only origin main failed." 3
 }
 
-Write-Host "Parsing canonical PowerShell agent/tunnel scripts before configuration..." -ForegroundColor Cyan
-Assert-PowerShellSyntax
-Write-Host "PowerShell syntax validation passed." -ForegroundColor Green
-
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $python)) {
     $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
@@ -104,38 +74,17 @@ if (-not $SkipDependencies) {
     }
 }
 
-Write-Host "Running provisioning/runtime safety tests..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "test-provisioning.py")
+# One authoritative, read-only validation surface owns the test inventory. This
+# prevents the updater, bootstrap and docs from silently drifting to different
+# subsets of the repository safety/integration suites.
+Write-Host "Running authoritative full repository verification..." -ForegroundColor Cyan
+& $python (Join-Path $PSScriptRoot "evavo.py") verify --full --require-powershell
 if ($LASTEXITCODE -ne 0) {
-    Fail "Provisioning/runtime safety tests failed." 3
+    Fail "Full repository verification failed. No agent configuration has been changed." 3
 }
 
-Write-Host "Running backend automation/MCP file-boundary tests..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "test-backend-automation.py")
-if ($LASTEXITCODE -ne 0) {
-    Fail "Backend automation/MCP file-boundary tests failed." 3
-}
-
-Write-Host "Running ChatGPT tunnel security-contract tests..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "test-chatgpt-tunnel.py")
-if ($LASTEXITCODE -ne 0) {
-    Fail "ChatGPT tunnel security-contract tests failed." 3
-}
-
-Write-Host "Running Claude/ChatGPT MCP transport validation..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "test-agent-integration.py")
-if ($LASTEXITCODE -ne 0) {
-    Fail "Agent/MCP integration tests failed." 3
-}
-
-Write-Host "Running workflow-aware strict agent-doctor validation..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "test-agent-doctor-workflows.py")
-if ($LASTEXITCODE -ne 0) {
-    Fail "Workflow-aware agent-doctor tests failed." 3
-}
-
-Write-Host "Running EVAVO bootstrap..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "evavo.py") bootstrap --skip-pull
+Write-Host "Bootstrapping the verified generation backend..." -ForegroundColor Cyan
+& $python (Join-Path $PSScriptRoot "evavo.py") bootstrap --skip-pull --skip-verify
 $code = $LASTEXITCODE
 if ($code -ne 0) {
     Fail "EVAVO bootstrap failed with exit code $code. Review doctor output and .evavo logs." $code
@@ -148,7 +97,7 @@ if (-not $SkipAgentConfiguration) {
         Fail "Claude MCP configuration failed." 3
     }
 
-    Write-Host "Installing/updating per-user HTTP MCP autostart..." -ForegroundColor Cyan
+    Write-Host "Installing/updating per-user private HTTP MCP autostart..." -ForegroundColor Cyan
     & (Join-Path $PSScriptRoot "INSTALL-AGENT-MCP-AUTOSTART.ps1") -Port $McpPort -SkipValidation
     if ($LASTEXITCODE -ne 0) {
         Fail "HTTP MCP autostart installation failed." 3
@@ -171,8 +120,8 @@ if ($LASTEXITCODE -ne 0) {
     Fail "Final backend status failed." 3
 }
 
-# ChatGPT cloud cannot directly reach workstation localhost. When an OpenAI
-# Secure MCP Tunnel ID is already configured, finish that bridge automatically.
+# Cloud ChatGPT cannot directly reach workstation localhost. When an OpenAI
+# Secure MCP Tunnel ID is already configured, finish that outbound bridge.
 $tunnelStatePath = Join-Path $PSScriptRoot ".evavo\chatgpt-tunnel.json"
 $tunnelId = [string]$env:EVAVO_OPENAI_TUNNEL_ID
 if (-not $tunnelId -and (Test-Path $tunnelStatePath)) {
@@ -214,7 +163,7 @@ if (-not $SkipChatGPTTunnel -and $tunnelId) {
         Write-Host "Validating OpenAI tunnel local preflight/profile configuration..." -ForegroundColor Cyan
         & (Join-Path $PSScriptRoot "CHATGPT-TUNNEL-DOCTOR.ps1") -RequireRuntimeKey
         if ($LASTEXITCODE -ne 0) {
-            Fail "ChatGPT tunnel doctor found a blocking profile/preflight problem." 3
+            Fail "ChatGPT tunnel doctor found a blocking profile/preflight/integrity problem." 3
         }
     }
 
@@ -231,8 +180,6 @@ if (-not $SkipChatGPTTunnel -and $tunnelId) {
         $chatGptTunnelStatus = "persistent_running"
     }
     elseif ($hasProcessKey) {
-        # Connect now for this Windows session without persisting the plaintext
-        # runtime key. The child tunnel-client inherits the temporary key.
         Write-Host "Starting ChatGPT tunnel for the current session (runtime key is not persisted)..." -ForegroundColor Cyan
         $starter = Join-Path $PSScriptRoot "START-CHATGPT-MCP-TUNNEL.ps1"
         $quotedStarter = '"' + $starter.Replace('"', '\"') + '"'
@@ -264,14 +211,10 @@ elseif (-not $SkipChatGPTTunnel) {
 
 Write-Host ""
 Write-Host "EVAVO workstation setup completed." -ForegroundColor Green
-Write-Host "  PowerShell syntax validation: passed" -ForegroundColor Green
-Write-Host "  Dependencies: installed/validated" -ForegroundColor Green
-Write-Host "  Provisioning/runtime safety tests: passed" -ForegroundColor Green
-Write-Host "  Backend repair/file-boundary/workflow-preflight tests: passed" -ForegroundColor Green
-Write-Host "  ChatGPT tunnel security-contract tests: passed" -ForegroundColor Green
-Write-Host "  Workflow-aware strict doctor tests: passed" -ForegroundColor Green
-Write-Host "  Operational tests: passed" -ForegroundColor Green
-Write-Host "  MCP negotiation/generation/model-inventory/workflow-preflight tests: passed" -ForegroundColor Green
+Write-Host "  Authoritative full verifier: passed" -ForegroundColor Green
+Write-Host "  Python sources + PowerShell scripts: parsed successfully" -ForegroundColor Green
+Write-Host "  All registered safety/integration suites: passed" -ForegroundColor Green
+Write-Host "  Generation backend bootstrap: passed" -ForegroundColor Green
 if (-not $SkipAgentConfiguration) {
     Write-Host "  Claude stdio MCP: installed/updated" -ForegroundColor Green
     Write-Host "  Private HTTP MCP autostart: installed and started" -ForegroundColor Green
