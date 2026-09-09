@@ -96,7 +96,6 @@ def default_target() -> Path:
 
 
 def resolve_app_root(target: Path) -> Path:
-    """Resolve either a source checkout root or Windows portable container."""
     target = target.expanduser().resolve()
     if (target / "main.py").is_file():
         return target
@@ -196,7 +195,12 @@ def install_runtime(target: Path, python: Path, *, install_pytorch: bool, torch_
     result = run([str(python), "-m", "pip", "install", "-r", str(requirements)], cwd=target, timeout=1800)
     require_ok(result, "COMFYUI_REQUIREMENTS_FAILED")
 
-    return {"nvidia_detected": nvidia, "pytorch_special_install": bool(nvidia and install_pytorch), "torch_index_url": torch_index_url if nvidia and install_pytorch else None}
+    return {
+        "status": "installed",
+        "nvidia_detected": nvidia,
+        "pytorch_special_install": bool(nvidia and install_pytorch),
+        "torch_index_url": torch_index_url if nvidia and install_pytorch else None,
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -313,7 +317,9 @@ def list_checkpoint_files(app_root: Path) -> List[str]:
     return sorted(path.name for path in checkpoints.iterdir() if path.is_file() and path.suffix.lower() in MODEL_EXTENSIONS)
 
 
-def verify_runtime(target: Path, python: Path) -> Dict[str, Any]:
+def verify_runtime(target: Path, python: Path, *, smoke_entrypoint: bool = True) -> Dict[str, Any]:
+    if not python.is_file():
+        raise RuntimeError(f"COMFYUI_PYTHON_MISSING:{python}")
     code = (
         "import json, torch; "
         "print(json.dumps({'torch_version': torch.__version__, 'cuda_available': bool(torch.cuda.is_available()), "
@@ -330,11 +336,18 @@ def verify_runtime(target: Path, python: Path) -> Dict[str, Any]:
     if not main_py.is_file():
         raise RuntimeError(f"COMFYUI_VERIFY_FAILED:missing {main_py}")
 
+    entrypoint_status = "not_run"
+    if smoke_entrypoint:
+        smoke = run([str(python), str(main_py), "--help"], cwd=target, timeout=120)
+        require_ok(smoke, "COMFYUI_ENTRYPOINT_VERIFY_FAILED")
+        entrypoint_status = "ok"
+
     checkpoint_files = list_checkpoint_files(target)
     return {
         "main_py": str(main_py),
         "python": str(python),
         "torch": torch_info,
+        "entrypoint_smoke": entrypoint_status,
         "checkpoint_directory": str(target / "models" / "checkpoints"),
         "checkpoint_files": checkpoint_files,
     }
@@ -395,8 +408,6 @@ def provision(args: argparse.Namespace) -> Dict[str, Any]:
         save_state(payload)
         return payload
 
-    # Portable bundles own their embedded Python/runtime. Reuse them rather than
-    # creating a second source checkout or mutating the embedded environment.
     if target.exists() and is_portable_container(target):
         app_root = resolve_app_root(target)
         checkpoint = provision_checkpoint(app_root, args)
@@ -404,18 +415,48 @@ def provision(args: argparse.Namespace) -> Dict[str, Any]:
 
     checkout = ensure_checkout(target, args.repository, not args.skip_update)
     app_root = resolve_app_root(target)
-    python = ensure_venv(app_root)
-    install = install_runtime(
-        app_root,
-        python,
-        install_pytorch=not args.skip_pytorch,
-        torch_index_url=args.torch_index_url,
-    )
+    python = venv_python(app_root)
+    runtime_reused = False
+    validation_error: Optional[str] = None
+    verification: Optional[Dict[str, Any]] = None
+
+    if python.is_file():
+        try:
+            verification = verify_runtime(app_root, python, smoke_entrypoint=True)
+            runtime_reused = True
+        except RuntimeError as exc:
+            validation_error = str(exc)
+
+    if not runtime_reused:
+        python = ensure_venv(app_root)
+        install = install_runtime(
+            app_root,
+            python,
+            install_pytorch=not args.skip_pytorch,
+            torch_index_url=args.torch_index_url,
+        )
+        verification = None
+    else:
+        install = {
+            "status": "existing_runtime_verified",
+            "runtime_reused": True,
+            "validation_error": None,
+        }
+
     checkpoint = provision_checkpoint(app_root, args)
-    verification = verify_runtime(app_root, python)
+    if verification is None:
+        verification = verify_runtime(app_root, python, smoke_entrypoint=True)
+    else:
+        verification["checkpoint_files"] = list_checkpoint_files(app_root)
+        verification["checkpoint_directory"] = str(app_root / "models" / "checkpoints")
+
+    if validation_error:
+        install["previous_validation_error"] = validation_error
+        install["runtime_reused"] = False
+
     payload = {
         "ok": True,
-        "status": "provisioned",
+        "status": "runtime_reused" if runtime_reused else "provisioned",
         "timestamp": now_iso(),
         "target": str(target),
         "app_root": str(app_root),
@@ -468,10 +509,13 @@ def main() -> int:
         print(f"App root:    {payload.get('app_root', payload['target'])}")
         if payload.get("checkout"):
             print(f"Checkout:    {payload['checkout']['status']}")
+        if payload.get("install"):
+            print(f"Runtime:     {payload['install'].get('status', 'unknown')}")
         if payload.get("verification", {}).get("python"):
             print(f"Python:      {payload['verification']['python']}")
             print(f"Torch:       {payload['verification']['torch']['torch_version']}")
             print(f"CUDA:        {payload['verification']['torch']['cuda_available']}")
+            print(f"Entrypoint:  {payload['verification'].get('entrypoint_smoke', 'unknown')}")
         print(f"Checkpoints: {len(payload.get('verification', {}).get('checkpoint_files', []))}")
         if payload.get("checkpoint"):
             print(f"Model:       {payload['checkpoint']['status']} -> {payload['checkpoint']['path']}")
