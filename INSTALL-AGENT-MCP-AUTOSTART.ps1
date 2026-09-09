@@ -79,7 +79,10 @@ $nonSecretEnvironment = @(
     "EVAVO_COMFYUI_WORKFLOW",
     "EVAVO_COMFYUI_CHECKPOINT",
     "EVAVO_TASK_HISTORY",
-    "EVAVO_TORCH_INDEX_URL"
+    "EVAVO_TORCH_INDEX_URL",
+    "EVAVO_MCP_OUTPUT_ROOTS",
+    "EVAVO_MCP_ALLOW_WORKFLOW_PATHS",
+    "EVAVO_MCP_WORKFLOW_ROOT"
 )
 foreach ($name in $nonSecretEnvironment) {
     $value = [Environment]::GetEnvironmentVariable($name)
@@ -111,6 +114,7 @@ Write-Host "Installed EVAVO agent MCP autostart:" -ForegroundColor Green
 Write-Host "  $launcher"
 Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in without rerunning the full integration suite." -ForegroundColor Green
 Write-Host "Safe local ComfyUI/checkpoint provisioning settings were embedded for reboot persistence." -ForegroundColor Green
+Write-Host "MCP file policy roots were persisted when explicitly configured; arbitrary output/workflow paths remain denied." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
     Write-Host "Shared ComfyUI model roots were embedded for reboot persistence." -ForegroundColor Green
 }
