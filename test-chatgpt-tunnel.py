@@ -35,6 +35,14 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
         self.assertIn("-Algorithm SHA256", source)
         self.assertIn("refusing unverified install", source.lower())
 
+    def test_installer_records_and_rechecks_extracted_executable_hash(self) -> None:
+        source = text("install")
+        self.assertIn("binary_digest", source)
+        self.assertIn("$installedBinaryHash", source)
+        self.assertIn("$recordedBinaryHash", source)
+        self.assertIn("Get-FileHash -Path $binary -Algorithm SHA256", source)
+        self.assertIn("hash-verified and executable", source)
+
     def test_installer_uses_supported_http_dcr_profile_shape(self) -> None:
         source = text("install")
         self.assertIn("sample_mcp_with_dcr", source)
@@ -60,6 +68,15 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
         self.assertIn("chatgpt-tunnel-runtime-key.dpapi", source)
         self.assertNotRegex(source, r"Set-Content[^\n]*CONTROL_PLANE_API_KEY")
 
+    def test_tunnel_launcher_verifies_binary_before_loading_runtime_key(self) -> None:
+        source = text("start")
+        integrity_index = source.index("tunnel-client-install.json")
+        key_index = source.index("# Load the runtime key")
+        self.assertLess(integrity_index, key_index)
+        self.assertIn("binary_digest", source)
+        self.assertIn("Get-FileHash -Path $binary -Algorithm SHA256", source)
+        self.assertIn("Refusing to run", source)
+
     def test_tunnel_launcher_loads_key_at_runtime_and_runs_named_profile(self) -> None:
         source = text("start")
         self.assertIn("CONTROL_PLANE_API_KEY", source)
@@ -76,8 +93,6 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
         self.assertIn("chatgpt-tunnel-runtime-key.dpapi", source)
         self.assertIn("login autostart requires the DPAPI key blob", source)
         self.assertIn("ConvertTo-SecureString", source)
-        # References/checks are allowed, but generated CMD must never contain a SET
-        # assignment for the runtime secret.
         self.assertNotRegex(source, r"(?i)set\s+[\"']?CONTROL_PLANE_API_KEY\s*=")
         self.assertNotIn("$env:CONTROL_PLANE_API_KEY = $env:CONTROL_PLANE_API_KEY", source)
 
@@ -92,7 +107,7 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
     def test_doctor_does_not_overclaim_chatgpt_workspace_visibility(self) -> None:
         source = text("doctor")
         self.assertIn("local preflight", source.lower())
-        self.assertIn("does not prove ChatGPT workspace visibility", source)
+        self.assertIn("does not by itself prove", source)
         self.assertNotIn('status = "chatgpt_connected"', source)
 
     def test_non_secret_tunnel_state_contains_no_api_key_field(self) -> None:
