@@ -11,7 +11,19 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+
+MODEL_LOADER_INPUTS: Dict[str, Tuple[str, str]] = {
+    "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
+    "loras": ("LoraLoader", "lora_name"),
+    "vae": ("VAELoader", "vae_name"),
+    "controlnet": ("ControlNetLoader", "control_net_name"),
+    "diffusion_models": ("UNETLoader", "unet_name"),
+    "text_encoders": ("CLIPLoader", "clip_name"),
+    "clip_vision": ("CLIPVisionLoader", "clip_name"),
+    "upscale_models": ("UpscaleModelLoader", "model_name"),
+}
 
 
 class ComfyUIBackend:
@@ -70,16 +82,70 @@ class ComfyUIBackend:
         suffix = f"/{urllib.parse.quote(node_class)}" if node_class else ""
         return self._request(f"/object_info{suffix}", timeout=15.0)
 
-    def checkpoints(self) -> List[str]:
-        info = self.object_info("CheckpointLoaderSimple")
-        node = info.get("CheckpointLoaderSimple") if isinstance(info.get("CheckpointLoaderSimple"), dict) else info
-        required = node.get("input", {}).get("required", {}) if isinstance(node, dict) else {}
-        spec = required.get("ckpt_name") if isinstance(required, dict) else None
-        if isinstance(spec, list) and spec:
-            values = spec[0]
-            if isinstance(values, list):
-                return [str(value) for value in values if isinstance(value, str) and value]
+    @staticmethod
+    def _extract_choice_values(info: Dict[str, Any], node_class: str, input_name: str) -> List[str]:
+        node = info.get(node_class) if isinstance(info.get(node_class), dict) else info
+        if not isinstance(node, dict):
+            return []
+        inputs = node.get("input")
+        if not isinstance(inputs, dict):
+            return []
+        for section_name in ("required", "optional"):
+            section = inputs.get(section_name)
+            if not isinstance(section, dict):
+                continue
+            spec = section.get(input_name)
+            if isinstance(spec, list) and spec:
+                values = spec[0]
+                if isinstance(values, list):
+                    return [str(value) for value in values if isinstance(value, str) and value]
         return []
+
+    def node_input_choices(self, node_class: str, input_name: str) -> List[str]:
+        """Return string choice values exposed by one ComfyUI node input."""
+        info = self.object_info(node_class)
+        return self._extract_choice_values(info, node_class, input_name)
+
+    def checkpoints(self) -> List[str]:
+        return self.node_input_choices("CheckpointLoaderSimple", "ckpt_name")
+
+    def model_inventory(self, limit_per_category: int = 200) -> Dict[str, Any]:
+        """Inspect common model loader choices without failing on missing node classes."""
+        limit = max(1, min(5000, int(limit_per_category)))
+        categories: Dict[str, Any] = {}
+        total_items = 0
+        available_categories = 0
+        for category, (node_class, input_name) in MODEL_LOADER_INPUTS.items():
+            try:
+                values = self.node_input_choices(node_class, input_name)
+            except RuntimeError as exc:
+                categories[category] = {
+                    "available": False,
+                    "node_class": node_class,
+                    "input_name": input_name,
+                    "count": 0,
+                    "items": [],
+                    "error": str(exc),
+                }
+                continue
+            available_categories += 1
+            total_items += len(values)
+            categories[category] = {
+                "available": True,
+                "node_class": node_class,
+                "input_name": input_name,
+                "count": len(values),
+                "items": values[:limit],
+                "truncated": len(values) > limit,
+            }
+        return {
+            "endpoint": self.endpoint,
+            "available_categories": available_categories,
+            "total_categories": len(MODEL_LOADER_INPUTS),
+            "total_items": total_items,
+            "limit_per_category": limit,
+            "categories": categories,
+        }
 
     def choose_checkpoint(self, requested: Optional[str] = None) -> str:
         checkpoints = self.checkpoints()
