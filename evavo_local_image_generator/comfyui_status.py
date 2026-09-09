@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import urllib.parse
 from typing import Any, Dict, List, Optional
 
 from .backends import ComfyUIBackend
@@ -64,15 +63,8 @@ def _queue_contains(items: Any, prompt_id: str) -> bool:
 
 
 def _current_job(backend: ComfyUIBackend, prompt_id: str) -> Optional[Dict[str, Any]]:
-    """Read the current jobs namespace when supported, otherwise return None.
-
-    Current ComfyUI exposes ``GET /api/jobs/{job_id}``. Older installations and
-    unknown job ids return 404, in which case EVAVO falls back to legacy
-    history/queue reconciliation rather than treating the backend as broken.
-    """
-    encoded = urllib.parse.quote(prompt_id, safe="")
     try:
-        payload = backend._request(f"/api/jobs/{encoded}", timeout=10.0)
+        payload = backend.job_detail(prompt_id)
     except RuntimeError as exc:
         if str(exc).startswith("COMFYUI_HTTP_ERROR:404:"):
             return None
@@ -85,13 +77,11 @@ def _history_state(backend: ComfyUIBackend, prompt_id: str) -> Optional[Dict[str
     entry = history.get(prompt_id)
     if not isinstance(entry, dict):
         return None
-
     outputs = _outputs_from_history(history, prompt_id)
     raw_status = entry.get("status") if isinstance(entry.get("status"), dict) else {}
     status_str = str(raw_status.get("status_str", "")).strip().lower()
     completed = raw_status.get("completed")
     messages = raw_status.get("messages") if isinstance(raw_status.get("messages"), list) else []
-
     if status_str in {"cancelled", "canceled", "interrupted"}:
         status = "cancelled"
     else:
@@ -111,7 +101,6 @@ def _history_state(backend: ComfyUIBackend, prompt_id: str) -> Optional[Dict[str
             status = "running"
         else:
             status = "unknown"
-
     return {
         "task_id": prompt_id,
         "status": status,
@@ -126,17 +115,10 @@ def _history_state(backend: ComfyUIBackend, prompt_id: str) -> Optional[Dict[str
 
 
 def prompt_status(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
-    """Return one normalized ComfyUI job state.
-
-    Current ``/api/jobs/{id}`` is preferred because it distinguishes cancellation
-    explicitly. Legacy ``/history`` + ``/queue`` remains the compatibility
-    fallback. Returned state is one of queued/running/completed/failed/cancelled/
-    unknown and never invents queued for an absent prompt.
-    """
+    """Return normalized queued/running/completed/failed/cancelled/unknown state."""
     if not isinstance(prompt_id, str) or not prompt_id.strip():
         raise ValueError("prompt_id must be a non-empty string")
     prompt_id = prompt_id.strip()
-
     job = _current_job(backend, prompt_id)
     if job is not None:
         raw = str(job.get("status", "")).strip().lower()
@@ -163,12 +145,10 @@ def prompt_status(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
             "messages": messages,
             "error_message": str(error_message) if error_message not in {None, ""} else None,
         }
-
     legacy = _history_state(backend, prompt_id)
     if legacy is not None:
         return legacy
-
-    queue = backend._request("/queue", timeout=10.0)
+    queue = backend.queue_state()
     running = queue.get("queue_running")
     pending = queue.get("queue_pending")
     if _queue_contains(running, prompt_id):
