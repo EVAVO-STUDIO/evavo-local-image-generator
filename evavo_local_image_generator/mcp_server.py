@@ -22,7 +22,13 @@ except ImportError as exc:  # pragma: no cover
 
 from evavo_operations import ROOT, TaskTracker
 from .backends import ComfyUIBackend
-from .comfyui_runtime import discover_comfyui, ensure_comfyui, stop_managed_comfyui
+from .comfyui_runtime import (
+    diagnose_comfyui_startup,
+    discover_comfyui,
+    ensure_comfyui,
+    load_last_failure,
+    stop_managed_comfyui,
+)
 from .comfyui_status import prompt_status
 
 mcp = MCPServer("EVAVO Local Image Generator")
@@ -350,6 +356,31 @@ async def ensure_backend(auto_start: bool = True, wait_seconds: float = 90.0) ->
         return await _ensure(auto_start=auto_start, wait_seconds=wait_seconds)
     except ValueError as exc:
         return {"ok": False, "status": "failed", "error_code": "INVALID_WAIT_SECONDS", "message": str(exc)}
+
+
+@mcp.tool()
+async def diagnose_backend(seconds: float = 60.0, cpu: bool = True, disable_all_custom_nodes: bool = False) -> Dict[str, Any]:
+    """Run a bounded ComfyUI startup diagnostic using only the process tree created by this call."""
+    try:
+        duration = _positive_seconds(seconds, name="seconds", maximum=600.0)
+    except ValueError as exc:
+        return {"ok": False, "status": "failed", "error_code": "INVALID_DIAGNOSTIC_SECONDS", "message": str(exc)}
+    return await asyncio.to_thread(
+        diagnose_comfyui_startup,
+        seconds=duration,
+        endpoint=_endpoint(),
+        cpu=bool(cpu),
+        disable_all_custom_nodes=bool(disable_all_custom_nodes),
+    )
+
+
+@mcp.tool()
+async def last_startup_failure() -> Dict[str, Any]:
+    """Return the last structured ComfyUI startup failure without changing process state."""
+    failure = await asyncio.to_thread(load_last_failure)
+    if not failure:
+        return {"ok": True, "status": "none", "failure": None}
+    return {"ok": True, "status": "available", "failure": failure}
 
 
 @mcp.tool()
