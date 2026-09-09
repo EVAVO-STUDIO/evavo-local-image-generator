@@ -27,6 +27,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
         required = {
             "test-capability-manifest.py",
             "test-comfyui-cancel.py",
+            "test-comfyui-repair-safety.py",
             "test-comfyui-status.py",
             "test-comfyui-terminal-wait.py",
             "test-gateway.py",
