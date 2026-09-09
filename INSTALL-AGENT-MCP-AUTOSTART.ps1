@@ -15,7 +15,6 @@ if ($Port -lt 1 -or $Port -gt 65535) {
 }
 
 $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
-New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
 $launcher = Join-Path $startupDir "EVAVO-Agent-MCP.cmd"
 
 if ($Uninstall) {
@@ -50,6 +49,17 @@ if (-not $SkipValidation) {
         throw "Agent/MCP integration tests failed."
     }
 }
+
+# Always validate owner-granted filesystem authority before creating or
+# replacing a Windows Startup launcher. -SkipValidation only skips the expensive
+# protocol suite; it never skips this read-only security/configuration gate.
+Write-Host "Validating MCP filesystem authority before changing login autostart..." -ForegroundColor Cyan
+& $python -m evavo_local_image_generator.mcp_policy --json
+if ($LASTEXITCODE -ne 0) {
+    throw "MCP filesystem policy is invalid. Windows login autostart was not changed."
+}
+
+New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
 
 function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
     if (-not $Value) {
@@ -126,7 +136,7 @@ Write-Host "  $launcher"
 Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in without rerunning the full integration suite." -ForegroundColor Green
 Write-Host "ComfyUI endpoint: $comfyEndpoint (persisted as canonical COMFYUI_ENDPOINT)" -ForegroundColor Green
 Write-Host "Safe local ComfyUI/checkpoint provisioning settings were embedded for reboot persistence." -ForegroundColor Green
-Write-Host "MCP file policy roots were persisted when explicitly configured; arbitrary output/workflow paths remain denied." -ForegroundColor Green
+Write-Host "MCP file policy was validated before write; arbitrary output/workflow paths remain denied." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
     Write-Host "Shared ComfyUI model roots were embedded for reboot persistence." -ForegroundColor Green
 }
