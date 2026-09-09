@@ -11,6 +11,7 @@ CURRENT_DOCS = (
     "README.md",
     "CLAUDE.md",
     "AGENT-INTEGRATION.md",
+    "AGENT-RECOVERY.md",
     "AUTOMATION-GUIDE.md",
     "AUTONOMOUS-AUTOMATION.md",
     "AUTONOMOUS_SETUP.md",
@@ -20,9 +21,12 @@ CURRENT_DOCS = (
     "DEPLOYMENT_GUIDE.md",
     "FINAL-INSTRUCTIONS.md",
     "GATEWAY-INTEGRATION-GUIDE.md",
+    "GATEWAY-AUX-PROVIDERS.md",
+    "PROVIDER-INTEGRATION-GUIDE.md",
     "OPERATIONS-GUIDE.md",
     "CHATGPT-TUNNEL.md",
     "QUICK-REFERENCE.md",
+    "PROJECT_SUMMARY.md",
 )
 HISTORICAL_DOCS = (
     "BEESTATION-UPGRADE-COMPLETE.md",
@@ -64,14 +68,27 @@ class DocumentationContractTests(unittest.TestCase):
                 self.assertIn("chatgpt", source)
                 self.assertIn("secure mcp tunnel", source)
 
-    def test_gateway_docs_are_explicitly_image_only_for_production(self) -> None:
+    def test_gateway_docs_preserve_owned_vs_delegated_boundary(self) -> None:
+        combined = "\n".join(
+            (ROOT / name).read_text(encoding="utf-8", errors="replace").lower()
+            for name in ("GATEWAY-INTEGRATION-GUIDE.md", "GATEWAY-AUX-PROVIDERS.md", "PROVIDER-INTEGRATION-GUIDE.md")
+        )
+        self.assertIn("native comfyui", combined)
+        self.assertIn("owned", combined)
+        self.assertIn("delegat", combined)
+        self.assertIn("fail", combined)
+        self.assertIn("/services", combined)
+        self.assertIn("/generate/video", combined)
+        self.assertIn("/generate/audio", combined)
+        self.assertIn("/generate/3d", combined)
+        self.assertIn("loopback", combined)
+        self.assertNotIn("these routes return `501`", combined)
+
+    def test_gateway_docs_do_not_claim_delegated_media_is_mcp_owned(self) -> None:
         source = (ROOT / "GATEWAY-INTEGRATION-GUIDE.md").read_text(encoding="utf-8", errors="replace").lower()
-        self.assertIn("native-image", source)
-        self.assertIn("501", source)
-        self.assertIn("/generate/video", source)
-        self.assertIn("/generate/audio", source)
-        self.assertIn("/generate/3d", source)
-        self.assertIn("loopback", source)
+        self.assertIn("mcp", source)
+        self.assertIn("image", source)
+        self.assertIn("not added to the mcp", source)
 
     def test_historical_reports_are_visibly_superseded(self) -> None:
         for name in HISTORICAL_DOCS:
