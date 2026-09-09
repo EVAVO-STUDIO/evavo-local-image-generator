@@ -55,6 +55,7 @@ $environment = [ordered]@{
     "EVAVO_COMFYUI_ENDPOINT" = "http://127.0.0.1:8188"
     "EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path $PSScriptRoot ".evavo\outputs")
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
+    "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
 }
 
 # Persist only local/non-secret configuration into Claude Desktop. In
@@ -100,7 +101,7 @@ Write-Host "  $configPath" -ForegroundColor Green
 Write-Host "Server: $ServerName" -ForegroundColor Green
 Write-Host "Python: $python" -ForegroundColor Green
 Write-Host "Repo:   $PSScriptRoot" -ForegroundColor Green
-Write-Host "Backend auto-provision: enabled (operator-controlled model sources only)" -ForegroundColor Green
+Write-Host "Backend/checkpoint auto-provision: enabled (operator-controlled model sources only)" -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
     Write-Host "Shared ComfyUI model roots: persisted into Claude MCP environment" -ForegroundColor Green
 }
