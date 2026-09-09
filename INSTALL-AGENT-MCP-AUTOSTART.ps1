@@ -33,10 +33,57 @@ if (-not (Test-Path $script)) {
     throw "Missing START-AGENT-MCP.ps1"
 }
 
+function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
+    if (-not $Value) {
+        return $null
+    }
+    if ($Value.Contains('"') -or $Value.Contains("`r") -or $Value.Contains("`n")) {
+        throw "Cannot persist $Name into CMD autostart because its value contains an unsupported quote/newline. Configure it as a Windows user environment variable instead."
+    }
+    # Percent signs are expanded by cmd.exe even inside quoted SET syntax.
+    $safe = $Value.Replace('%', '%%')
+    return "set `"$Name=$safe`""
+}
+
+# Persist only non-secret local settings so login autostart behaves like the
+# setup shell after a reboot. Signed checkpoint URLs are intentionally excluded.
+$persistedEnvironment = [ordered]@{
+    "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
+    "EVAVO_COMFYUI_ENDPOINT" = "http://127.0.0.1:8188"
+    "EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path $repo ".evavo\outputs")
+}
+$nonSecretEnvironment = @(
+    "EVAVO_COMFYUI_HOME",
+    "EVAVO_COMFYUI_PYTHON",
+    "EVAVO_CHECKPOINT_FILE",
+    "EVAVO_CHECKPOINT_SHA256",
+    "EVAVO_CHECKPOINT_NAME",
+    "EVAVO_COMFYUI_WORKFLOW",
+    "EVAVO_COMFYUI_CHECKPOINT",
+    "EVAVO_TASK_HISTORY",
+    "EVAVO_TORCH_INDEX_URL"
+)
+foreach ($name in $nonSecretEnvironment) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ($value) {
+        $persistedEnvironment[$name] = $value
+    }
+}
+
+$envLines = New-Object System.Collections.Generic.List[string]
+foreach ($entry in $persistedEnvironment.GetEnumerator()) {
+    $line = ConvertTo-CmdSetLine $entry.Key ([string]$entry.Value)
+    if ($line) {
+        $envLines.Add($line)
+    }
+}
+
 $escapedRepo = $repo.Replace('"', '""')
 $escapedScript = $script.Replace('"', '""')
+$environmentBlock = ($envLines -join "`r`n")
 $cmd = @"
 @echo off
+$environmentBlock
 cd /d "$escapedRepo"
 start "EVAVO Agent MCP" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$escapedScript" -Port $Port
 "@
@@ -45,9 +92,14 @@ Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 Write-Host "Installed EVAVO agent MCP autostart:" -ForegroundColor Green
 Write-Host "  $launcher"
 Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in." -ForegroundColor Green
+Write-Host "Safe local ComfyUI provisioning settings were embedded for reboot persistence." -ForegroundColor Green
+if ($env:EVAVO_CHECKPOINT_URL) {
+    Write-Host "Note: EVAVO_CHECKPOINT_URL was not persisted because checkpoint URLs may contain credentials/tokens." -ForegroundColor Yellow
+}
 
-# Start it now without blocking this installer. Quote the script path explicitly
-# because Start-Process joins ArgumentList values into a command line on Windows.
+# Start it now without blocking this installer. The spawned process inherits the
+# current environment (including an explicitly configured temporary URL), while
+# future login starts use only the safe values embedded above.
 Write-Host "Starting it now in a hidden process..." -ForegroundColor Cyan
 $quotedScript = '"' + $script.Replace('"', '\"') + '"'
 $argumentLine = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $quotedScript -Port $Port"
