@@ -1,6 +1,6 @@
 # EVAVO Agent Recovery
 
-Use this runbook when native image generation, Claude MCP, the private HTTP MCP listener, or the ChatGPT Secure MCP Tunnel appears stuck.
+Use this runbook when native image generation, Claude MCP, the private HTTP MCP listener, the ChatGPT Secure MCP Tunnel, or the optional HTTP gateway appears stuck.
 
 Do **not** kill all Python processes, delete `.git` locks, recreate the repository, expose local ports publicly, or regenerate source files from historical templates.
 
@@ -17,6 +17,8 @@ If the local checkout is intentionally clean and simply stale:
 git pull --ff-only origin main
 python evavo.py verify --full --require-powershell
 ```
+
+The full verifier covers root tests, the governed gateway provider suites under `tests/`, and package tests.
 
 ## 2. Repair the real image runtime
 
@@ -108,7 +110,17 @@ python EVAVO-SERVICE-MANAGER.py stop
 python gateway-smoke-test.py
 ```
 
-The gateway is loopback-only and production-image-only. Historical video/audio/3D routes intentionally return HTTP `501`.
+The gateway is loopback-only. Its **owned** production capability is native-ComfyUI image generation.
+
+Optional video/audio/3D gateway routes are governed delegations to sibling Studio providers. They are not MCP/package-owned modalities of this repo. Check provider readiness separately:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/services | ConvertTo-Json -Depth 8
+```
+
+If a provider is unavailable, its accepted task must fail closed with a structured `PROVIDER_*` error rather than report fake completion. See `GATEWAY-AUX-PROVIDERS.md` for provider-specific diagnostics.
+
+CORS is disabled by default. Do not fix browser access by setting `EVAVO_GATEWAY_CORS_ORIGINS=*`; wildcard/non-loopback origins are rejected. If local browser access is genuinely needed, configure explicit loopback origins only.
 
 ## 8. Full workstation convergence
 
@@ -128,4 +140,4 @@ Agents/orchestrators can inspect:
 EVAVO-CAPABILITIES.json
 ```
 
-That manifest is synchronized against the registered MCP tools by `test-capability-manifest.py`.
+That manifest is synchronized against the registered MCP tools and gateway ownership boundary by `test-capability-manifest.py`.
