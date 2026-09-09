@@ -18,6 +18,7 @@ QUALITY_PYTHON = (
     "quality-review-summary.py",
     "runtime-snapshot.py",
     "lora-sweep.py",
+    "prompt-quality.py",
     "gateway-smoke-test.py",
     "kokoro-quality-test.py",
     "kokoro-provider.py",
@@ -63,7 +64,16 @@ class FakeComfyUIBackend:
 
 class QualityOperationsContractTests(unittest.TestCase):
     def test_quality_entrypoints_exist(self):
-        for relative in (*QUALITY_PYTHON, *QUALITY_POWERSHELL, "QUALITY-PRODUCTION.md", "QUALITY-ADVANCED-WORKFLOWS.md", "GATEWAY-IMAGE-QUALITY.md"):
+        required = (
+            *QUALITY_PYTHON,
+            *QUALITY_POWERSHELL,
+            "QUALITY-PRODUCTION.md",
+            "QUALITY-ADVANCED-WORKFLOWS.md",
+            "GATEWAY-IMAGE-QUALITY.md",
+            "config/quality-golden-prompts-v1.json",
+            "evavo_local_image_generator/prompt_quality.py",
+        )
+        for relative in required:
             with self.subTest(path=relative):
                 self.assertTrue((ROOT / relative).is_file(), f"missing quality entrypoint: {relative}")
 
@@ -107,6 +117,15 @@ class QualityOperationsContractTests(unittest.TestCase):
                     0,
                     f"PowerShell parse failed for {relative}: {result.stderr or result.stdout}",
                 )
+
+    def test_benchmark_uses_versioned_prompt_corpus(self):
+        source = (ROOT / "quality-benchmark.py").read_text(encoding="utf-8-sig")
+        self.assertIn("quality-golden-prompts-v1.json", source)
+        self.assertIn("load_prompt_corpus", source)
+        self.assertIn("prompt_corpus", source)
+        self.assertIn("prompt_sha256", source)
+        self.assertIn("review_focus", source)
+        self.assertNotIn("PROMPTS = {", source)
 
     def test_wrapper_forwards_hero_lora_and_second_pass_controls(self):
         module = _load_wrapper_module()
