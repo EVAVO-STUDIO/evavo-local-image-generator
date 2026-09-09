@@ -1,47 +1,28 @@
-"""
-Particle system generation module for EVAVO system.
+"""Legacy particle-generation compatibility surface.
 
-Implements digest-bound particle generation tasks including:
-- Particle system synthesis
-- Visual effect creation
-- Particle physics simulation
+Particle generation is outside the verified scope of EVAVO Local Image Generator.
+All methods fail explicitly without network, filesystem, or task-history side effects.
 """
 
-from dataclasses import dataclass
-from typing import Optional, Dict
-from evavo_local_image_generator.scripts.generate import GenerationTask
+from __future__ import annotations
 
-@dataclass
-class ParticleGenerationTask(GenerationTask):
-    """Particle generation task with digest-bound validation."""
-    
-    task_type: str = "particle_generation"
-    particle_count: int = 10000
-    duration: float = 5.0
+from typing import Dict
+
+from ._unsupported import unsupported
+
 
 class ParticleGenerator:
-    """Generates particle systems from descriptions."""
-    
     def __init__(self):
         self.task_type = "particle_generation"
-    
+
     async def generate_particle_system(
         self,
         description: str,
         particle_count: int = 10000,
         duration: float = 5.0,
     ) -> Dict:
-        """Generate a particle system."""
-        task = ParticleGenerationTask(
-            prompt=description,
-            particle_count=particle_count,
-            duration=duration
-        )
-        
-        # TODO: Implement particle generation
-        raise NotImplementedError("Particle generation not yet implemented")
+        unsupported("particle-system")
+
 
 async def generate_particles(description: str, **kwargs) -> Dict:
-    """Convenience function for particle generation."""
-    generator = ParticleGenerator()
-    return await generator.generate_particle_system(description, **kwargs)
+    return await ParticleGenerator().generate_particle_system(description, **kwargs)
