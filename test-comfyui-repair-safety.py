@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import inspect
+import json
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from evavo_local_image_generator import comfyui_repair, mcp_server
@@ -26,7 +30,7 @@ class ComfyUIRepairSafetyTests(unittest.TestCase):
         self.assertNotIn("url", parameters)
 
     def test_normal_repair_requires_structured_missing_dependency_evidence(self) -> None:
-        with patch.object(comfyui_repair, "load_last_failure", return_value={}):
+        with patch.object(comfyui_repair, "_latest_repair_evidence", return_value={}):
             result = comfyui_repair.repair_backend_dependencies(timeout_seconds=10)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_code"], "NO_REPAIR_EVIDENCE")
@@ -34,7 +38,7 @@ class ComfyUIRepairSafetyTests(unittest.TestCase):
 
     def test_custom_node_failure_does_not_mutate_core_requirements(self) -> None:
         failure = {"category": "custom_node_dependency", "missing_modules": ["custom_module"]}
-        with patch.object(comfyui_repair, "load_last_failure", return_value=failure):
+        with patch.object(comfyui_repair, "_latest_repair_evidence", return_value=failure):
             result = comfyui_repair.repair_backend_dependencies(timeout_seconds=10)
         self.assertFalse(result["ok"])
         self.assertEqual(result["error_code"], "CUSTOM_NODE_DEPENDENCY")
@@ -49,7 +53,93 @@ class ComfyUIRepairSafetyTests(unittest.TestCase):
         self.assertIn("--verify-only", command)
         source = Path(comfyui_repair.__file__).read_text(encoding="utf-8")
         self.assertIn("subprocess.run", source)
+        self.assertIn("shell=False", source)
         self.assertNotIn("shell=True", source)
+
+    def test_build_command_carries_exact_comfy_home_and_python(self) -> None:
+        home = Path("C:/Gitrepos/ComfyUI")
+        python = Path("C:/Gitrepos/ComfyUI/.venv/Scripts/python.exe")
+        command = comfyui_repair.build_repair_command(
+            module="comfy_aimdo",
+            timeout_seconds=60,
+            comfy_home=home,
+            python_exe=python,
+        )
+        self.assertEqual(command[command.index("--comfy-home") + 1], str(home))
+        self.assertEqual(command[command.index("--python") + 1], str(python))
+
+    def test_structured_startup_failure_selects_exact_diagnosed_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            home = base / "portable" / "ComfyUI"
+            home.mkdir(parents=True)
+            (home / "main.py").write_text("# fixture\n", encoding="utf-8")
+            (home / "requirements.txt").write_text("# fixture\n", encoding="utf-8")
+            python = base / "portable" / "python_embeded" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"fixture")
+            evidence = {
+                "category": "missing_dependency",
+                "missing_modules": ["comfy_aimdo"],
+                "install": {"workdir": str(home), "python": str(python)},
+            }
+            target = comfyui_repair._repair_target(evidence)
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.assertEqual(target[0], home.resolve())
+        self.assertEqual(target[1], python.resolve())
+        self.assertEqual(target[2], "startup_failure")
+
+    def test_discovery_fallback_uses_same_first_install_contract_as_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            home = base / "ComfyUI"
+            home.mkdir()
+            main_py = home / "main.py"
+            main_py.write_text("# fixture\n", encoding="utf-8")
+            (home / "requirements.txt").write_text("# fixture\n", encoding="utf-8")
+            python = home / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"fixture")
+            install = SimpleNamespace(workdir=home.resolve(), python=python.resolve())
+            with patch.object(comfyui_repair, "discover_comfyui", return_value=[install]):
+                target = comfyui_repair._repair_target({})
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.assertEqual(target[0], home.resolve())
+        self.assertEqual(target[1], python.resolve())
+        self.assertEqual(target[2], "discovery")
+
+    def test_repair_receipt_proves_selected_runtime_handoff_without_running_pip(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            home = base / "ComfyUI"
+            home.mkdir()
+            (home / "main.py").write_text("# fixture\n", encoding="utf-8")
+            (home / "requirements.txt").write_text("# fixture\n", encoding="utf-8")
+            python = home / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.write_bytes(b"fixture")
+            evidence = {
+                "category": "missing_dependency",
+                "missing_modules": ["comfy_aimdo"],
+                "install": {"workdir": str(home), "python": str(python)},
+                "evidence_source": "test",
+            }
+            receipt = {"ok": True, "status": "repaired", "repair_performed": True}
+            completed = subprocess.CompletedProcess([], 0, stdout=json.dumps(receipt), stderr="")
+            with (
+                patch.object(comfyui_repair, "_latest_repair_evidence", return_value=evidence),
+                patch.object(comfyui_repair.subprocess, "run", return_value=completed) as run,
+            ):
+                result = comfyui_repair.repair_backend_dependencies(timeout_seconds=60)
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--comfy-home") + 1], str(home.resolve()))
+        self.assertEqual(command[command.index("--python") + 1], str(python.resolve()))
+        self.assertTrue(result["used_selected_runtime"])
+        self.assertEqual(result["target_source"], "startup_failure")
+        self.assertEqual(result["selected_comfy_home"], str(home.resolve()))
+        self.assertEqual(result["selected_python"], str(python.resolve()))
 
     def test_invalid_module_name_is_rejected_before_process_launch(self) -> None:
         with self.assertRaises(ValueError):
