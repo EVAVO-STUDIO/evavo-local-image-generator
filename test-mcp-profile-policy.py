@@ -31,6 +31,11 @@ def assert_profile_contract(test: unittest.TestCase, source: str) -> None:
     test.assertIn('$generationOutputDir = [string]$policyResult.policy.default_output_root', source)
     test.assertIn('"EVAVO_GENERATION_OUTPUT_DIR" = $generationOutputDir', source)
     test.assertNotIn('"EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path', source)
+    test.assertIn('@($policyResult.policy.additional_output_roots)', source)
+    test.assertIn('[string]$policyResult.policy.owner_workflow', source)
+    test.assertIn('[bool]$policyResult.policy.tool_workflow_paths_allowed', source)
+    test.assertIn('[string]$policyResult.policy.tool_workflow_root', source)
+    test.assertIn('-join ";"', source)
 
 
 class McpProfilePolicyTests(unittest.TestCase):
@@ -77,7 +82,18 @@ class McpProfilePolicyTests(unittest.TestCase):
                 skip_block = source.index("if (-not $SkipValidation)")
                 policy = source.index(POLICY_COMMAND)
                 self.assertGreater(policy, skip_block)
-                self.assertIn("Always validate", source[skip_block:policy])
+
+    def test_raw_relative_mcp_authority_is_not_re_persisted_from_environment(self) -> None:
+        for name in ("INSTALL-CLAUDE-MCP.ps1", "INSTALL-AGENT-MCP-AUTOSTART.ps1"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+            with self.subTest(name=name):
+                non_secret_start = source.index("$nonSecretEnvironment = @(")
+                non_secret_end = source.index(")", non_secret_start)
+                block = source[non_secret_start:non_secret_end]
+                self.assertNotIn('"EVAVO_COMFYUI_WORKFLOW"', block)
+                self.assertNotIn('"EVAVO_MCP_OUTPUT_ROOTS"', block)
+                self.assertNotIn('"EVAVO_MCP_ALLOW_WORKFLOW_PATHS"', block)
+                self.assertNotIn('"EVAVO_MCP_WORKFLOW_ROOT"', block)
 
     def test_root_mcp_profile_uses_validated_entry_and_canonical_endpoint(self) -> None:
         profile = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
