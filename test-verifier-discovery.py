@@ -28,6 +28,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "test-capability-manifest.py",
             "test-gateway.py",
             "test-gateway-config-safety.py",
+            "test-gateway-config-security.py",
             "test-service-manager-config-safety.py",
             "test-legacy-compatibility.py",
             "test-package-direct-execution.py",
@@ -35,6 +36,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "test_autonomous.py",
             "tests/test_gateway_providers.py",
             "tests/test_gateway_service_manager_providers.py",
+            "tests/test_gateway_service_manager_locking.py",
             "evavo_local_image_generator/tests/test_backends.py",
             "evavo_local_image_generator/tests/test_generators.py",
         }
