@@ -29,7 +29,7 @@ MAX_MCP_IMAGE_BYTES = 32 * 1024 * 1024
 
 
 def _endpoint() -> str:
-    return (os.getenv("EVAVO_COMFYUI_ENDPOINT") or os.getenv("COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
+    return (os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
 
 
 def _backend() -> ComfyUIBackend:
