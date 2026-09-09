@@ -7,6 +7,7 @@ operational utilities can run immediately after a normal Python install.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import tempfile
@@ -43,11 +44,7 @@ def request_json(
     payload: Optional[Dict[str, Any]] = None,
     timeout: float = 5.0,
 ) -> Dict[str, Any]:
-    """Perform an HTTP request and require a JSON object response.
-
-    Raises RuntimeError with a stable, human-readable category so all CLI
-    utilities report network and protocol failures consistently.
-    """
+    """Perform an HTTP request and require a JSON object response."""
     body = None
     headers = {"Accept": "application/json", "User-Agent": "EVAVO-Operations/1"}
     if payload is not None:
@@ -92,9 +89,113 @@ def validate_health(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _windows_mutex_name(lock_path: Path) -> str:
+    """Derive a short, non-secret per-lock Windows named-mutex identity."""
+    normalized = os.path.normcase(os.path.abspath(str(lock_path))).replace("/", "\\")
+    digest = hashlib.sha256(normalized.encode("utf-8", errors="surrogatepass")).hexdigest()
+    return f"Local\\EVAVO-{digest}"
+
+
+def _remaining_milliseconds(deadline: float) -> int:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return 0
+    return max(1, min(0xFFFFFFFE, int(remaining * 1000)))
+
+
+@contextmanager
+def _windows_interprocess_lock(lock_path: Path, timeout: float) -> Iterator[None]:
+    """Use a Windows named mutex and interoperate safely with legacy .lock files."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateMutexW.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel32.ReleaseMutex.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    WAIT_OBJECT_0 = 0x00000000
+    WAIT_ABANDONED = 0x00000080
+    WAIT_TIMEOUT = 0x00000102
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    handle = kernel32.CreateMutexW(None, False, _windows_mutex_name(lock_path))
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "CreateMutexW failed")
+
+    legacy_handle = None
+    mutex_acquired = False
+    legacy_locked = False
+    try:
+        status = kernel32.WaitForSingleObject(handle, _remaining_milliseconds(deadline))
+        if status == WAIT_TIMEOUT:
+            raise TimeoutError(f"Timed out acquiring EVAVO interprocess lock: {lock_path}")
+        if status not in {WAIT_OBJECT_0, WAIT_ABANDONED}:
+            raise OSError(f"WaitForSingleObject failed with status 0x{status:08x}")
+        mutex_acquired = True
+
+        if lock_path.exists():
+            try:
+                legacy_handle = open(lock_path, "r+b")
+            except OSError:
+                legacy_handle = None
+            if legacy_handle is not None:
+                while True:
+                    try:
+                        legacy_handle.seek(0)
+                        if legacy_handle.read(1) == b"":
+                            legacy_handle.seek(0)
+                            legacy_handle.write(b"0")
+                            legacy_handle.flush()
+                        legacy_handle.seek(0)
+                        msvcrt.locking(legacy_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        legacy_locked = True
+                        break
+                    except (OSError, BlockingIOError):
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError(f"Timed out acquiring legacy EVAVO interprocess lock: {lock_path}")
+                        time.sleep(0.05)
+
+        yield
+    finally:
+        if legacy_handle is not None:
+            try:
+                if legacy_locked:
+                    legacy_handle.seek(0)
+                    msvcrt.locking(legacy_handle.fileno(), msvcrt.LK_UNLCK, 1)
+            finally:
+                legacy_handle.close()
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+        if mutex_acquired:
+            kernel32.ReleaseMutex(handle)
+        kernel32.CloseHandle(handle)
+
+
 @contextmanager
 def interprocess_lock(lock_path: Path, timeout: float = 10.0) -> Iterator[None]:
-    """Acquire a tiny cross-platform advisory lock using only stdlib APIs."""
+    """Acquire a tiny cross-platform interprocess lock using only stdlib APIs.
+
+    Windows uses a named mutex, eliminating persistent ``*.lock`` artifacts that
+    some agent environments mistakenly treat as active blockers. During migration,
+    an already-existing legacy lock file is also honored so older EVAVO processes
+    cannot race newer ones. POSIX retains advisory ``flock`` semantics.
+    """
+    lock_path = Path(lock_path)
+    if os.name == "nt":
+        with _windows_interprocess_lock(lock_path, timeout):
+            yield
+        return
+
+    import fcntl
+
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(lock_path, "a+b")
     handle.seek(0, os.SEEK_END)
@@ -105,15 +206,7 @@ def interprocess_lock(lock_path: Path, timeout: float = 10.0) -> Iterator[None]:
 
     while True:
         try:
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
         except (OSError, BlockingIOError):
             if time.monotonic() >= deadline:
@@ -125,21 +218,11 @@ def interprocess_lock(lock_path: Path, timeout: float = 10.0) -> Iterator[None]:
         yield
     finally:
         try:
-            handle.seek(0)
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
 
 
-# Compatibility alias for older in-repository callers. New code should import
-# the public name so the shared lock is an explicit operational API.
 _interprocess_lock = interprocess_lock
 
 

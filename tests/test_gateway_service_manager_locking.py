@@ -84,7 +84,10 @@ class ServiceManagerLockingTests(unittest.TestCase):
         manager.save_state(payload)
         self.assertTrue(manager.STATE_FILE.is_file())
         self.assertEqual(manager.load_state(), payload)
-        self.assertTrue(manager.STATE_IO_LOCK.is_file())
+        if os.name == "nt":
+            self.assertFalse(manager.STATE_IO_LOCK.exists(), "Windows named mutexes should not leave fresh .lock artifacts")
+        else:
+            self.assertTrue(manager.STATE_IO_LOCK.is_file())
 
     def test_health_reports_busy_state_without_mutating_file(self) -> None:
         manager.STATE_DIR.mkdir(parents=True, exist_ok=True)

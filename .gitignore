@@ -66,6 +66,7 @@ evavo-logs/
 task_history.json
 task_history.json.lock
 task_history.json.*.tmp
+comfy-startup-output.txt
 
 # Platform specific
 CUsersUserbeestationevavo-generation/
