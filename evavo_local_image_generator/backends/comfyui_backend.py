@@ -278,6 +278,87 @@ class ComfyUIBackend:
         replacements["{{cfg}}"] = cfg_scale
         return replacements
 
+    @staticmethod
+    def _workflow_choice_values(spec: Any) -> List[str]:
+        if not isinstance(spec, list) or not spec or not isinstance(spec[0], list):
+            return []
+        return [str(value) for value in spec[0] if isinstance(value, str) and value]
+
+    def preflight_workflow(self, workflow: Dict[str, Any]) -> Dict[str, Any]:
+        """Validate custom workflow node classes/required inputs/literal choices against live ComfyUI."""
+        if not isinstance(workflow, dict) or not workflow:
+            raise RuntimeError("COMFYUI_WORKFLOW_PREFLIGHT_FAILED:workflow must be a non-empty object")
+
+        info = self.object_info()
+        missing_nodes: List[Dict[str, str]] = []
+        malformed_nodes: List[Dict[str, str]] = []
+        missing_inputs: List[Dict[str, str]] = []
+        invalid_choices: List[Dict[str, Any]] = []
+        node_classes = set()
+
+        for node_id, node in workflow.items():
+            node_key = str(node_id)
+            if not isinstance(node, dict):
+                malformed_nodes.append({"node_id": node_key, "reason": "node must be an object"})
+                continue
+            class_type = node.get("class_type")
+            inputs = node.get("inputs")
+            if not isinstance(class_type, str) or not class_type:
+                malformed_nodes.append({"node_id": node_key, "reason": "class_type is missing"})
+                continue
+            node_classes.add(class_type)
+            if not isinstance(inputs, dict):
+                malformed_nodes.append({"node_id": node_key, "reason": "inputs must be an object"})
+                continue
+
+            definition = info.get(class_type)
+            if not isinstance(definition, dict):
+                missing_nodes.append({"node_id": node_key, "class_type": class_type})
+                continue
+            input_definition = definition.get("input")
+            if not isinstance(input_definition, dict):
+                continue
+
+            required = input_definition.get("required")
+            if isinstance(required, dict):
+                for input_name in required:
+                    if input_name not in inputs:
+                        missing_inputs.append({"node_id": node_key, "class_type": class_type, "input": str(input_name)})
+
+            for section_name in ("required", "optional"):
+                section = input_definition.get(section_name)
+                if not isinstance(section, dict):
+                    continue
+                for input_name, spec in section.items():
+                    if input_name not in inputs:
+                        continue
+                    value = inputs[input_name]
+                    choices = self._workflow_choice_values(spec)
+                    # A list such as ["12", 0] is a dynamic connection, not a literal choice.
+                    if choices and isinstance(value, str) and value not in choices:
+                        invalid_choices.append({
+                            "node_id": node_key,
+                            "class_type": class_type,
+                            "input": str(input_name),
+                            "value": value,
+                            "available_count": len(choices),
+                            "available": choices[:20],
+                            "truncated": len(choices) > 20,
+                        })
+
+        result: Dict[str, Any] = {
+            "ok": not (missing_nodes or malformed_nodes or missing_inputs or invalid_choices),
+            "node_count": len(workflow),
+            "node_classes": sorted(node_classes),
+            "missing_nodes": missing_nodes,
+            "malformed_nodes": malformed_nodes,
+            "missing_inputs": missing_inputs,
+            "invalid_choices": invalid_choices,
+        }
+        if not result["ok"]:
+            raise RuntimeError("COMFYUI_WORKFLOW_PREFLIGHT_FAILED:" + json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return result
+
     def build_txt2img_workflow(self, prompt: str, *, negative_prompt: str = "", width: int = 1024, height: int = 1024, steps: int = 24, cfg_scale: float = 7.0, seed: Optional[int] = None, checkpoint: Optional[str] = None, filename_prefix: str = "EVAVO", workflow_path: Optional[str] = None) -> Dict[str, Any]:
         width = self._dimension(width, 1024)
         height = self._dimension(height, 1024)
@@ -330,6 +411,7 @@ class ComfyUIBackend:
         }
 
     def queue_image(self, prompt: str, *, project_name: str = "batch_gen", negative_prompt: str = "", width: int = 1024, height: int = 1024, steps: int = 24, cfg_scale: float = 7.0, seed: Optional[int] = None, checkpoint: Optional[str] = None, workflow_path: Optional[str] = None) -> Dict[str, Any]:
+        template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
         workflow = self.build_txt2img_workflow(
             prompt,
             negative_prompt=negative_prompt,
@@ -342,6 +424,8 @@ class ComfyUIBackend:
             filename_prefix=f"EVAVO/{project_name}",
             workflow_path=workflow_path,
         )
+        if template_path and self._truthy_environment("EVAVO_PREFLIGHT_CUSTOM_WORKFLOW", default=True):
+            self.preflight_workflow(workflow)
         response = self._request("/prompt", method="POST", payload={"prompt": workflow}, timeout=30.0)
         prompt_id = response.get("prompt_id")
         if not isinstance(prompt_id, str) or not prompt_id:
