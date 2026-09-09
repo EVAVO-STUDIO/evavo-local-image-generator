@@ -183,33 +183,72 @@ def provider_configuration_fingerprint() -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _read_state_strict() -> Dict[str, Any]:
+    """Read manager ownership state without treating corruption as 'no state'."""
+    if not STATE_FILE.exists():
+        return {}
+    if STATE_FILE.is_symlink():
+        raise RuntimeError(f"SERVICE_MANAGER_STATE_UNSAFE:{STATE_FILE}:state file must not be a symlink")
+    try:
+        payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_STATE_CORRUPT:{STATE_FILE}:{exc}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_STATE_READ_ERROR:{STATE_FILE}:{exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"SERVICE_MANAGER_STATE_CORRUPT:{STATE_FILE}:root must be a JSON object")
+    return payload
+
+
+def load_state() -> Dict[str, Any]:
+    """Read lifecycle-authority state; malformed state is a hard safety error."""
+    return _read_state_strict()
+
+
+def manager_state_health() -> Dict[str, Any]:
+    """Read-only state diagnosis used by health/status without mutating anything."""
+    if not STATE_FILE.exists():
+        return {"healthy": True, "status": "missing", "path": str(STATE_FILE)}
+    try:
+        state = _read_state_strict()
+    except RuntimeError as exc:
+        message = str(exc)
+        status = "unsafe" if message.startswith("SERVICE_MANAGER_STATE_UNSAFE:") else "corrupt"
+        if message.startswith("SERVICE_MANAGER_STATE_READ_ERROR:"):
+            status = "read_error"
+        return {"healthy": False, "status": status, "path": str(STATE_FILE), "error": message}
+    return {
+        "healthy": True,
+        "status": "ok",
+        "path": str(STATE_FILE),
+        "managed_gateway": bool(isinstance(state.get("gateway"), dict) and state["gateway"].get("managed")),
+        "managed_3d_worker": bool(isinstance(state.get("3d_worker"), dict) and state["3d_worker"].get("managed")),
+    }
+
+
 def full_health() -> Dict[str, Any]:
     comfy = comfyui_health()
     gateway = gateway_health()
     providers = gateway_services() if gateway["gateway_alive"] else None
+    manager_state = manager_state_health()
+    core_ready = bool(comfy["healthy"] and gateway["healthy"])
     return {
-        "status": "healthy" if comfy["healthy"] and gateway["healthy"] else "degraded",
+        "status": "healthy" if core_ready and manager_state["healthy"] else "degraded",
+        "core_ready": core_ready,
         "timestamp": now_iso(),
         "gateway": gateway,
         "comfyui": comfy,
         "providers": providers,
+        "manager_state": manager_state,
         "audio_provider": audio_provider_status(),
         "3d_worker": three_d_health(),
     }
 
 
-def load_state() -> Dict[str, Any]:
-    if not STATE_FILE.is_file():
-        return {}
-    try:
-        payload = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
 def save_state(state: Dict[str, Any]) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if STATE_FILE.is_symlink():
+        raise RuntimeError(f"SERVICE_MANAGER_STATE_UNSAFE:{STATE_FILE}:state file must not be a symlink")
     fd, temp_name = tempfile.mkstemp(prefix=STATE_FILE.name + ".", suffix=".tmp", dir=str(STATE_DIR))
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
@@ -562,11 +601,7 @@ def ensure_gateway_service(state: Dict[str, Any]) -> Dict[str, Any]:
     if existing["gateway_alive"]:
         managed = _managed_gateway_state(state)
         managed_pid = managed.get("pid")
-        identity_ok = (
-            managed.get("managed")
-            and isinstance(managed_pid, int)
-            and pid_matches(managed_pid, GATEWAY_SCRIPT)
-        )
+        identity_ok = managed.get("managed") and isinstance(managed_pid, int) and pid_matches(managed_pid, GATEWAY_SCRIPT)
         applied = managed.get("provider_fingerprint") == desired_fingerprint
         if identity_ok and not applied:
             terminate_pid(managed_pid)
@@ -652,8 +687,10 @@ def stop_services() -> Dict[str, Any]:
     stopped["comfyui"] = bool(native.get("stopped"))
     try:
         STATE_FILE.unlink()
-    except OSError:
+    except FileNotFoundError:
         pass
+    except OSError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_STATE_DELETE_ERROR:{STATE_FILE}:{exc}") from exc
     return {"ok": True, "stopped": stopped, "native": native, "timestamp": now_iso()}
 
 
@@ -663,6 +700,8 @@ def monitor(interval: float) -> int:
         while True:
             health = full_health()
             print(json.dumps(health, ensure_ascii=False), flush=True)
+            if not health["manager_state"]["healthy"]:
+                raise RuntimeError(str(health["manager_state"].get("error") or "SERVICE_MANAGER_STATE_UNHEALTHY"))
             if not health["comfyui"]["healthy"]:
                 ensure_comfyui_service()
             if not health["3d_worker"]["healthy"] and discover_3d_repo() is not None:
@@ -671,11 +710,7 @@ def monitor(interval: float) -> int:
                 except Exception as exc:
                     print(json.dumps({"provider": "3d", "status": "unavailable", "error": str(exc)}), file=sys.stderr, flush=True)
             configure_audio_provider()
-            if not health["gateway"]["gateway_alive"]:
-                ensure_gateway_service(load_state())
-            else:
-                # Provider configuration can change while the gateway remains healthy.
-                ensure_gateway_service(load_state())
+            ensure_gateway_service(load_state())
             time.sleep(interval)
     except KeyboardInterrupt:
         return 0
@@ -686,7 +721,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("start", help="Start/ensure native ComfyUI, local providers and the loopback gateway")
     subparsers.add_parser("stop", help="Stop only identity-verified EVAVO-managed components")
-    subparsers.add_parser("health", help="Print core health plus auxiliary provider readiness JSON")
+    subparsers.add_parser("health", help="Print core health plus auxiliary provider and manager-state readiness JSON")
     subparsers.add_parser("status", help="Alias for health")
     monitor_parser = subparsers.add_parser("monitor", help="Monitor and restore managed local service health")
     monitor_parser.add_argument("--interval", type=float, default=5.0)
