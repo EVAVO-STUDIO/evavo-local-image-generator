@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from evavo_operations import TaskTracker, interprocess_lock
 from evavo_local_image_generator.backends import ComfyUIBackend
 from evavo_local_image_generator.comfyui_runtime import ensure_comfyui, native_health
+from evavo_local_image_generator.quality_profiles import profile_names
 
 ROOT = Path(__file__).resolve().parent
 TASK_ID_RE = re.compile(r"^(img|vid|aud|3d)_\d+$")
@@ -451,29 +452,78 @@ def _providers():
     return ProviderRouter(ROOT, STATE_DIR, RESULT_DIR)
 
 
+_IMAGE_QUALITY_REQUEST_FIELDS = (
+    "quality_profile",
+    "sampler_name",
+    "scheduler",
+    "denoise",
+    "upscale_factor",
+    "second_pass_steps",
+    "second_pass_cfg_scale",
+    "second_pass_sampler_name",
+    "second_pass_scheduler",
+    "second_pass_denoise",
+    "latent_upscale_method",
+    "lora_name",
+    "lora_model_strength",
+    "lora_clip_strength",
+)
+
+
+def _image_queue_kwargs(request: Dict[str, Any], workflow_path: Any) -> Dict[str, Any]:
+    """Map the additive gateway request onto the canonical quality backend."""
+    kwargs: Dict[str, Any] = {
+        "project_name": str(request.get("project_name", "gateway")).strip()[:MAX_PROJECT_CHARS] or "gateway",
+        "negative_prompt": str(request.get("negative_prompt", "")),
+        "width": request.get("width", 1024),
+        "height": request.get("height", 1024),
+        "steps": request.get("steps", 24),
+        "cfg_scale": request.get("cfg_scale", 7.0),
+        "seed": request.get("seed"),
+        "checkpoint": request.get("checkpoint"),
+        "workflow_path": str(workflow_path) if workflow_path else None,
+    }
+    for field in _IMAGE_QUALITY_REQUEST_FIELDS:
+        if field in request:
+            kwargs[field] = request.get(field)
+    return kwargs
+
+
+def _image_receipt_fields(queued: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist only the reproducible, JSON-safe quality receipt fields."""
+    return {
+        "checkpoint": queued.get("checkpoint"),
+        "seed": queued.get("seed"),
+        "workflow_sha256": queued.get("workflow_sha256"),
+        "workflow_node_count": queued.get("workflow_node_count"),
+        "quality_profile": queued.get("quality_profile"),
+        "quality": queued.get("quality"),
+        "quality_applied": queued.get("quality_applied"),
+        "render_passes": queued.get("render_passes"),
+        "output_width": queued.get("output_width"),
+        "output_height": queued.get("output_height"),
+        "lora": queued.get("lora"),
+    }
+
+
 async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
     prompt = str(request["prompt"]).strip()
-    project_name = str(request.get("project_name", "gateway")).strip()[:MAX_PROJECT_CHARS] or "gateway"
     workflow_path = request.get("workflow_path")
     try:
         await STORE.update(task_id, status="running", progress=5)
         await asyncio.to_thread(ensure_comfyui, COMFYUI_ENDPOINT, wait_seconds=90.0, allow_start=True)
         backend = ComfyUIBackend(COMFYUI_ENDPOINT)
-        queued = await asyncio.to_thread(
-            backend.queue_image,
-            prompt,
-            project_name=project_name,
-            negative_prompt=str(request.get("negative_prompt", "")),
-            width=request.get("width", 1024),
-            height=request.get("height", 1024),
-            steps=request.get("steps", 24),
-            cfg_scale=request.get("cfg_scale", 7.0),
-            seed=request.get("seed"),
-            checkpoint=request.get("checkpoint"),
-            workflow_path=str(workflow_path) if workflow_path else None,
-        )
+        queue_kwargs = _image_queue_kwargs(request, workflow_path)
+        queued = await asyncio.to_thread(backend.queue_image, prompt, **queue_kwargs)
         backend_task_id = str(queued["task_id"])
-        await STORE.update(task_id, progress=25, backend_task_id=backend_task_id, backend_mode="native-comfyui", checkpoint=queued.get("checkpoint"))
+        receipt = _image_receipt_fields(queued)
+        await STORE.update(
+            task_id,
+            progress=25,
+            backend_task_id=backend_task_id,
+            backend_mode="native-comfyui",
+            **receipt,
+        )
         target = (RESULT_DIR / task_id).resolve()
         paths = await asyncio.to_thread(
             backend.wait_and_download,
@@ -494,6 +544,13 @@ async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
             backend_mode="native-comfyui",
             checkpoint=queued.get("checkpoint"),
             workflow_path=str(workflow_path) if workflow_path else None,
+            seed=queued.get("seed"),
+            workflow_sha256=queued.get("workflow_sha256"),
+            quality_profile=queued.get("quality_profile"),
+            render_passes=queued.get("render_passes"),
+            output_width=queued.get("output_width"),
+            output_height=queued.get("output_height"),
+            lora=queued.get("lora"),
         )
     except Exception as exc:
         message = str(exc)
@@ -625,7 +682,7 @@ def _configured_cors_origins() -> list[str]:
 
 app = FastAPI(
     title="EVAVO Unified Generator",
-    version="2.5.0",
+    version="2.6.0",
     description="Stable local image gateway with governed auxiliary provider delegation for ChatGPT, Claude, MCP and HTTP clients.",
     lifespan=lifespan,
 )
@@ -665,6 +722,22 @@ async def capabilities() -> Dict[str, Any]:
             "endpoint": "/generate/image",
             "backend": service_state["image"].get("backend", "ComfyUI"),
             "ready": bool(service_state["image"].get("ready")),
+            "quality_profiles": profile_names(),
+            "default_quality_profile": os.getenv("EVAVO_IMAGE_QUALITY_PROFILE", "quality"),
+            "per_request_quality": True,
+            "hero_two_pass": True,
+            "lora": True,
+            "reproducible_receipt": [
+                "seed",
+                "workflow_sha256",
+                "workflow_node_count",
+                "checkpoint",
+                "quality_profile",
+                "render_passes",
+                "output_width",
+                "output_height",
+                "lora",
+            ],
         },
         "video": {
             "endpoint": "/generate/video",
