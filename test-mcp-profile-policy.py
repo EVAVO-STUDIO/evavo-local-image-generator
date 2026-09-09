@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Static contract tests for persistent Claude/HTTP MCP policy settings."""
+"""Static contract tests for persistent Claude/HTTP MCP production policy settings."""
 
 from __future__ import annotations
 
@@ -22,13 +22,15 @@ def assert_profile_contract(test: unittest.TestCase, source: str) -> None:
         with test.subTest(name=name):
             test.assertIn(f'"{name}"', source)
     test.assertNotIn('"EVAVO_CHECKPOINT_URL",', source)
-    test.assertIn('"COMFYUI_ENDPOINT"', source)
-    test.assertIn('[Environment]::GetEnvironmentVariable("COMFYUI_ENDPOINT")', source)
-    test.assertIn('[Environment]::GetEnvironmentVariable("EVAVO_COMFYUI_ENDPOINT")', source)
+    test.assertIn('"COMFYUI_ENDPOINT" = $comfyEndpoint', source)
     test.assertNotIn('"EVAVO_COMFYUI_ENDPOINT" =', source)
+    test.assertNotIn('[Environment]::GetEnvironmentVariable("COMFYUI_ENDPOINT")', source)
+    test.assertNotIn('[Environment]::GetEnvironmentVariable("EVAVO_COMFYUI_ENDPOINT")', source)
     test.assertIn(POLICY_COMMAND, source)
-    test.assertIn("MCP filesystem policy is invalid", source)
+    test.assertIn("MCP production policy is invalid", source)
     test.assertIn('$generationOutputDir = [string]$policyResult.policy.default_output_root', source)
+    test.assertIn('$comfyEndpoint = [string]$policyResult.policy.comfyui_endpoint', source)
+    test.assertIn("validated loopback ComfyUI endpoint", source)
     test.assertIn('"EVAVO_GENERATION_OUTPUT_DIR" = $generationOutputDir', source)
     test.assertNotIn('"EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path', source)
     test.assertIn('@($policyResult.policy.additional_output_roots)', source)
@@ -39,13 +41,13 @@ def assert_profile_contract(test: unittest.TestCase, source: str) -> None:
 
 
 class McpProfilePolicyTests(unittest.TestCase):
-    def test_claude_installer_persists_non_secret_owner_path_policy_and_canonical_endpoint(self) -> None:
+    def test_claude_installer_persists_validator_owned_policy_and_endpoint(self) -> None:
         source = (ROOT / "INSTALL-CLAUDE-MCP.ps1").read_text(encoding="utf-8")
         assert_profile_contract(self, source)
         self.assertIn(VALIDATED_ENTRY, source)
         self.assertNotIn('"args" = @("-m", "evavo_local_image_generator.mcp_server"', source)
 
-    def test_http_autostart_persists_same_non_secret_policy_and_canonical_endpoint(self) -> None:
+    def test_http_autostart_persists_same_validator_owned_policy_and_endpoint(self) -> None:
         source = (ROOT / "INSTALL-AGENT-MCP-AUTOSTART.ps1").read_text(encoding="utf-8")
         assert_profile_contract(self, source)
         start = (ROOT / "START-AGENT-MCP.ps1").read_text(encoding="utf-8")
@@ -54,28 +56,34 @@ class McpProfilePolicyTests(unittest.TestCase):
     def test_claude_policy_validation_precedes_any_config_write_or_backup(self) -> None:
         source = (ROOT / "INSTALL-CLAUDE-MCP.ps1").read_text(encoding="utf-8")
         policy = source.index(POLICY_COMMAND)
-        policy_parse = source.index('$generationOutputDir = [string]$policyResult.policy.default_output_root')
+        output_parse = source.index('$generationOutputDir = [string]$policyResult.policy.default_output_root')
+        endpoint_parse = source.index('$comfyEndpoint = [string]$policyResult.policy.comfyui_endpoint')
         create_dir = source.index('New-Item -ItemType Directory -Force -Path $configDir')
         backup = source.index("Copy-Item $configPath $backup")
         write = source.index("Set-Content -Path $configPath")
-        self.assertLess(policy, policy_parse)
-        self.assertLess(policy_parse, create_dir)
+        self.assertLess(policy, output_parse)
+        self.assertLess(policy, endpoint_parse)
+        self.assertLess(output_parse, create_dir)
+        self.assertLess(endpoint_parse, create_dir)
         self.assertLess(policy, backup)
         self.assertLess(policy, write)
 
     def test_http_policy_validation_precedes_startup_directory_and_launcher_write(self) -> None:
         source = (ROOT / "INSTALL-AGENT-MCP-AUTOSTART.ps1").read_text(encoding="utf-8")
         policy = source.index(POLICY_COMMAND)
-        policy_parse = source.index('$generationOutputDir = [string]$policyResult.policy.default_output_root')
+        output_parse = source.index('$generationOutputDir = [string]$policyResult.policy.default_output_root')
+        endpoint_parse = source.index('$comfyEndpoint = [string]$policyResult.policy.comfyui_endpoint')
         create_dir = source.index('New-Item -ItemType Directory -Force -Path $startupDir')
         write = source.index("Set-Content -Path $launcher")
         start = source.index('Start-Process -FilePath "powershell.exe"')
-        self.assertLess(policy, policy_parse)
-        self.assertLess(policy_parse, create_dir)
+        self.assertLess(policy, output_parse)
+        self.assertLess(policy, endpoint_parse)
+        self.assertLess(output_parse, create_dir)
+        self.assertLess(endpoint_parse, create_dir)
         self.assertLess(policy, write)
         self.assertLess(policy, start)
 
-    def test_skip_validation_never_skips_policy_validation(self) -> None:
+    def test_skip_validation_never_skips_production_policy_validation(self) -> None:
         for name in ("INSTALL-CLAUDE-MCP.ps1", "INSTALL-AGENT-MCP-AUTOSTART.ps1"):
             source = (ROOT / name).read_text(encoding="utf-8")
             with self.subTest(name=name):
@@ -83,7 +91,7 @@ class McpProfilePolicyTests(unittest.TestCase):
                 policy = source.index(POLICY_COMMAND)
                 self.assertGreater(policy, skip_block)
 
-    def test_raw_relative_mcp_authority_is_not_re_persisted_from_environment(self) -> None:
+    def test_raw_relative_or_legacy_mcp_authority_is_not_re_persisted_from_environment(self) -> None:
         for name in ("INSTALL-CLAUDE-MCP.ps1", "INSTALL-AGENT-MCP-AUTOSTART.ps1"):
             source = (ROOT / name).read_text(encoding="utf-8")
             with self.subTest(name=name):
@@ -94,8 +102,10 @@ class McpProfilePolicyTests(unittest.TestCase):
                 self.assertNotIn('"EVAVO_MCP_OUTPUT_ROOTS"', block)
                 self.assertNotIn('"EVAVO_MCP_ALLOW_WORKFLOW_PATHS"', block)
                 self.assertNotIn('"EVAVO_MCP_WORKFLOW_ROOT"', block)
+                self.assertNotIn('"COMFYUI_ENDPOINT"', block)
+                self.assertNotIn('"EVAVO_COMFYUI_ENDPOINT"', block)
 
-    def test_root_mcp_profile_uses_validated_entry_and_canonical_endpoint(self) -> None:
+    def test_root_mcp_profile_uses_validated_entry_and_canonical_loopback_endpoint(self) -> None:
         profile = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
         server = profile["mcpServers"]["evavo-local-image-generator"]
         environment = server["env"]
