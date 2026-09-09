@@ -14,16 +14,19 @@ By default it:
 
 1. safely fast-forwards `main`;
 2. installs/upgrades repository dependencies including `mcp[cli]>=2,<3`;
-3. runs operational integration tests;
-4. runs negotiated MCP stdio + Streamable HTTP tests;
-5. bootstraps/selects the generation backend;
-6. installs/updates Claude Desktop stdio MCP configuration while preserving other servers;
-7. installs the current-user HTTP MCP login autostart;
-8. starts the HTTP MCP listener if it is not already running;
-9. runs `agent-doctor.py --repair` as a strict real-generation readiness gate;
-10. verifies final backend status.
+3. runs offline ComfyUI provisioning safety tests;
+4. runs operational integration tests;
+5. runs negotiated MCP stdio + Streamable HTTP generation/history tests;
+6. bootstraps/selects the generation backend;
+7. installs/updates Claude Desktop stdio MCP configuration while preserving other servers;
+8. installs the current-user HTTP MCP login autostart;
+9. starts the HTTP MCP listener if it is not already running;
+10. runs `agent-doctor.py --repair --provision` as a strict real-generation readiness gate;
+11. provisions official ComfyUI when no installation exists;
+12. provisions an explicitly configured checkpoint source when required;
+13. verifies final backend status.
 
-Use `-SkipAgentConfiguration` only when intentionally troubleshooting without changing local agent configuration.
+Use `-SkipAgentConfiguration` only when intentionally troubleshooting without changing local agent configuration. Use `-SkipComfyUIProvision` when the workstation must not install/update ComfyUI automatically.
 
 ## Automation contract
 
@@ -34,15 +37,17 @@ On a generation call EVAVO can:
 1. check the configured endpoint for a real native ComfyUI;
 2. reject the deterministic EVAVO mock as a renderer;
 3. discover a local source or Windows portable ComfyUI install;
-4. stop only an EVAVO-owned mock if it is occupying port 8188;
-5. start native ComfyUI in the background when installed but offline;
-6. wait for `/system_stats` readiness;
-7. discover checkpoints through `CheckpointLoaderSimple`;
-8. queue `/prompt` with the built-in or a custom API workflow;
-9. poll `/history/<prompt_id>`;
-10. download `/view` outputs atomically;
-11. persist queue/completion/failure state in the shared EVAVO task history;
-12. return concrete local file paths to the calling agent.
+4. safely provision the official ComfyUI source runtime when enabled and no install exists;
+5. reuse portable installs without modifying their embedded Python runtime;
+6. stop only an EVAVO-owned mock if it is occupying port 8188;
+7. start native ComfyUI in the background when installed but offline;
+8. wait for `/system_stats` readiness;
+9. discover checkpoints through `CheckpointLoaderSimple`;
+10. queue `/prompt` with the built-in or a custom API workflow;
+11. poll `/history/<prompt_id>`;
+12. download `/view` outputs atomically;
+13. persist queue/completion/failure state plus backend/checkpoint/output metadata in the shared EVAVO task history;
+14. return concrete local file paths to the calling agent.
 
 ## ComfyUI discovery
 
@@ -74,6 +79,90 @@ $env:EVAVO_COMFYUI_PYTHON = "D:\AI\ComfyUI\.venv\Scripts\python.exe"
 
 Additional roots can be supplied through `EVAVO_COMFYUI_SEARCH_PATHS` using the platform path separator.
 
+## Runtime provisioning
+
+Provision the official ComfyUI source runtime explicitly:
+
+```powershell
+python provision-comfyui.py
+```
+
+The provisioner:
+
+- reuses an existing standard source/portable install when found;
+- clones `https://github.com/Comfy-Org/ComfyUI.git` only when no install exists;
+- never overwrites a non-ComfyUI target;
+- never updates a dirty source checkout;
+- creates an isolated `.venv` for source installs;
+- detects NVIDIA and follows ComfyUI's documented stable CUDA PyTorch installation path;
+- installs ComfyUI's own `requirements.txt`;
+- verifies Torch/CUDA/device visibility;
+- records provisioning state in `.evavo/comfyui-provision.json`;
+- does not silently select or license a diffusion model.
+
+Agents can call the parameterless MCP tool:
+
+```text
+provision_backend
+```
+
+That tool intentionally accepts **no repository URL or model URL arguments**. It can only use the fixed EVAVO provisioner and model sources configured by the workstation owner.
+
+Local agent profiles set:
+
+```text
+EVAVO_AUTO_PROVISION_COMFYUI=1
+```
+
+so `ensure_backend`, `health_check`, `generate_image` and `generate_batch` may provision a missing runtime before starting it.
+
+## Checkpoint provisioning
+
+A real checkpoint remains a blocking requirement for real generation. EVAVO will not guess or silently choose one.
+
+Preferred local-file setup:
+
+```powershell
+$env:EVAVO_CHECKPOINT_FILE = "D:\AI\Models\your-model.safetensors"
+$env:EVAVO_CHECKPOINT_SHA256 = "<optional expected sha256>"
+$env:EVAVO_CHECKPOINT_NAME = "your-model.safetensors"
+.\UPDATE-AND-VERIFY-EVAVO.ps1
+```
+
+Explicit HTTPS source when appropriate:
+
+```powershell
+$env:EVAVO_CHECKPOINT_URL = "https://example.com/your-model.safetensors"
+$env:EVAVO_CHECKPOINT_SHA256 = "<strongly recommended expected sha256>"
+.\UPDATE-AND-VERIFY-EVAVO.ps1
+```
+
+The provisioner supports:
+
+```text
+EVAVO_CHECKPOINT_FILE
+EVAVO_CHECKPOINT_URL
+EVAVO_CHECKPOINT_SHA256
+EVAVO_CHECKPOINT_NAME
+```
+
+Safety behavior:
+
+- HTTPS is required for URL downloads unless `--allow-http-checkpoint` is explicitly passed to the provisioner;
+- model filenames are reduced to simple safe filenames and traversal is rejected;
+- downloads stream through `.part` files and only become final after verification;
+- URL downloads are capped at 32 GiB;
+- SHA-256 can be required and is verified before final placement;
+- an existing different destination file is never overwritten;
+- source and Windows-portable `models/checkpoints` layouts are both supported;
+- Claude/HTTP installers intentionally do **not** persist `EVAVO_CHECKPOINT_URL` because signed URLs may contain secrets/tokens.
+
+To provision only a configured model into an existing source/portable install:
+
+```powershell
+python provision-comfyui.py --target "D:\AI\ComfyUI" --checkpoint-only
+```
+
 ## Claude: stdio MCP
 
 The workstation updater installs this automatically. It can also be installed independently:
@@ -90,7 +179,9 @@ The installer:
 - backs up an existing `claude_desktop_config.json`;
 - preserves existing MCP servers;
 - adds/updates only `evavo-local-image-generator`;
-- configures stdio MCP and the local ComfyUI endpoint.
+- enables safe ComfyUI auto-provisioning;
+- persists local/non-secret ComfyUI/model settings;
+- deliberately does not persist potentially secret checkpoint URLs.
 
 Restart Claude Desktop after installation so it reloads its MCP configuration.
 
@@ -120,6 +211,8 @@ Default endpoint:
 http://127.0.0.1:8765/mcp
 ```
 
+The autostart installer embeds only safe local settings needed after reboot. Signed checkpoint URLs are not written into the Startup command.
+
 The HTTP transport is restricted to loopback and uses exact host/origin allowlists for the configured port with DNS-rebinding protection enabled.
 
 A cloud-hosted client cannot directly reach workstation `127.0.0.1` unless the product provides a local bridge/connector. Do not expose this listener or ComfyUI directly to the public internet just to make it reachable.
@@ -128,7 +221,8 @@ A cloud-hosted client cannot directly reach workstation `127.0.0.1` unless the p
 
 The MCP server exposes:
 
-- `ensure_backend` — verify or auto-start native ComfyUI;
+- `provision_backend` — constrained official-runtime/model provisioning using workstation configuration only;
+- `ensure_backend` — verify, auto-provision when enabled, and auto-start native ComfyUI;
 - `health_check` — backend version/device health;
 - `discover_backends` — local ComfyUI installations EVAVO can launch;
 - `list_checkpoints` — installed checkpoints;
@@ -150,7 +244,24 @@ MCP and CLI generation use the same lock-protected, atomic history file:
 task_history.json
 ```
 
-Override its location when desired:
+New records preserve:
+
+```text
+task_id
+prompt
+project_name
+status
+backend_mode
+checkpoint
+workflow_path
+output_dir
+output_uris[]
+errors/timestamps
+```
+
+Older minimal history files remain readable.
+
+Override history location:
 
 ```powershell
 $env:EVAVO_TASK_HISTORY = "D:\EVAVO\state\image-generation-history.json"
@@ -206,42 +317,45 @@ Read-only diagnosis:
 python agent-doctor.py
 ```
 
-Strict repair/readiness gate:
+Strict repair/readiness gate with provisioning:
 
 ```powershell
-python agent-doctor.py --repair
+python agent-doctor.py --repair --provision
 ```
 
-With `--repair`, native ComfyUI and at least one usable checkpoint are required. The command fails rather than reporting success on the deterministic mock fallback.
+Native ComfyUI and at least one usable checkpoint are required. The command fails rather than reporting success on the deterministic mock fallback. If no model source was configured, a missing checkpoint remains an explicit failure with instructions to configure one.
 
 Machine-readable status:
 
 ```powershell
-python agent-doctor.py --repair --json
+python agent-doctor.py --repair --provision --json
 ```
 
 ## Validation
 
-The full workstation updater runs both suites:
+The full workstation updater runs:
 
 ```powershell
+python test-provisioning.py
 python test-agent-integration.py
 python evavo.py test
 ```
+
+Provisioning tests are offline and verify traversal rejection, local checkpoint copy/hash verification, idempotency, destination-conflict safety, HTTPS enforcement and source/portable layouts.
 
 Agent tests verify:
 
 - MCP v2 in-process negotiation/tool discovery;
 - real stdio client/server negotiation;
 - real Streamable HTTP client/server negotiation;
-- exact advertised tool inventory;
+- exact advertised tool inventory including parameterless `provision_backend`;
 - ComfyUI discovery;
 - rejection of the EVAVO mock as native;
 - HTTP MCP `generate_image` end-to-end output download;
 - HTTP MCP `generate_batch` end-to-end multi-image generation;
-- shared task-history persistence and task statistics.
+- rich shared task-history persistence and task statistics.
 
-Operational tests separately verify mock/native health, native workflow submission, output history and file downloads, batch tracking, offline behavior and controller lifecycle.
+Operational tests separately verify mock/native health, native workflow submission, output history and file downloads, rich batch tracking, legacy-history compatibility, offline behavior and controller lifecycle.
 
 ## Safety/lifecycle rules
 
@@ -249,6 +363,8 @@ Operational tests separately verify mock/native health, native workflow submissi
 - EVAVO never uses broad `taskkill /IM python.exe` cleanup.
 - `stop_managed_backend` stops only a PID recorded as started by EVAVO.
 - An already-running user-managed ComfyUI is reused and is not stopped by EVAVO.
+- Existing standard source/portable installs are reused before creating a new sibling checkout.
+- Portable embedded Python is not modified by the provisioner.
 - If an EVAVO-managed mock is occupying port 8188 and a native install is available, EVAVO may stop only that recorded mock PID before starting native ComfyUI.
 - Output downloads use temporary files followed by atomic replacement.
 - Legacy launchers are compatibility shims and no longer spawn persistent `cmd /k`, `-NoExit`, Ollama/Kokoro, or surprise multimodal jobs.
