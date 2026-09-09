@@ -63,6 +63,8 @@ $environment = [ordered]@{
 $nonSecretEnvironment = @(
     "EVAVO_COMFYUI_HOME",
     "EVAVO_COMFYUI_PYTHON",
+    "EVAVO_SHARED_MODEL_ROOTS",
+    "EVAVO_COMFYUI_MODEL_ROOTS",
     "EVAVO_CHECKPOINT_FILE",
     "EVAVO_CHECKPOINT_SHA256",
     "EVAVO_CHECKPOINT_NAME",
@@ -99,6 +101,9 @@ Write-Host "Server: $ServerName" -ForegroundColor Green
 Write-Host "Python: $python" -ForegroundColor Green
 Write-Host "Repo:   $PSScriptRoot" -ForegroundColor Green
 Write-Host "Backend auto-provision: enabled (operator-controlled model sources only)" -ForegroundColor Green
+if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
+    Write-Host "Shared ComfyUI model roots: persisted into Claude MCP environment" -ForegroundColor Green
+}
 if ($env:EVAVO_CHECKPOINT_URL) {
     Write-Host "Note: EVAVO_CHECKPOINT_URL was not persisted into Claude config because URLs may contain secrets." -ForegroundColor Yellow
 }
