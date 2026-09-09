@@ -205,6 +205,39 @@ class ProvisioningSafetyTests(unittest.TestCase):
                 comfyui_runtime.configured_shared_model_roots()
             self.assertIn("SHARED_MODEL_ROOT_NOT_FOUND", str(context.exception))
 
+    def test_shared_model_configuration_hash_changes_with_effective_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shared-models"
+            (root / "models" / "checkpoints").mkdir(parents=True)
+            with patch.dict(os.environ, {"EVAVO_SHARED_MODEL_ROOTS": str(root), "EVAVO_COMFYUI_MODEL_ROOTS": ""}, clear=False):
+                first = comfyui_runtime.shared_model_configuration()
+                (root / "models" / "loras").mkdir(parents=True)
+                second = comfyui_runtime.shared_model_configuration()
+            self.assertTrue(first["sha256"])
+            self.assertTrue(second["sha256"])
+            self.assertNotEqual(first["sha256"], second["sha256"])
+            self.assertNotEqual(first["yaml"], second["yaml"])
+
+    def test_process_identity_path_matching_rejects_unrelated_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            expected = Path(directory) / "ComfyUI" / "main.py"
+            expected.parent.mkdir(parents=True)
+            expected.write_text("# fixture\n", encoding="utf-8")
+            matching = f'python "{expected}" --listen 127.0.0.1 --port 8188'
+            unrelated = f'python "{Path(directory) / "other" / "main.py"}" --port 8188'
+            self.assertTrue(comfyui_runtime._command_contains_path(matching, expected))
+            self.assertFalse(comfyui_runtime._command_contains_path(unrelated, expected))
+
+    def test_native_state_identity_uses_recorded_main_py(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            main_py = Path(directory) / "main.py"
+            main_py.write_text("# fixture\n", encoding="utf-8")
+            state = {"pid": 424242, "install": {"main_py": str(main_py)}}
+            with patch.object(comfyui_runtime, "_process_command_line", return_value=f'python "{main_py}" --port 8188'):
+                self.assertTrue(comfyui_runtime._native_state_identity_matches(state))
+            with patch.object(comfyui_runtime, "_process_command_line", return_value="python unrelated.py"):
+                self.assertFalse(comfyui_runtime._native_state_identity_matches(state))
+
     def test_comfyui_command_includes_evavo_extra_model_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
