@@ -1,9 +1,9 @@
 @echo off
 setlocal EnableExtensions
 
-REM EVAVO Local Image Generator - Windows launcher
-REM The Python controller is the single source of truth for process lifecycle,
-REM health validation, state files, logs and exit codes.
+REM EVAVO Local Image Generator - strict native Windows launcher.
+REM This filename no longer starts the deterministic mock fallback; real service
+REM readiness means native ComfyUI plus the active workflow/model contract.
 
 set "ROOT=%~dp0"
 set "PYTHON=%ROOT%.venv\Scripts\python.exe"
@@ -27,26 +27,28 @@ pushd "%ROOT%" >nul
 
 echo.
 echo ============================================================
-echo EVAVO Local Image Generator - Service Startup
+echo EVAVO Local Image Generator - Native Service Startup
 echo ============================================================
 echo Python: %PYTHON%
 echo.
 
 "%PYTHON%" "%ROOT%evavo.py" doctor
 if errorlevel 2 (
-    echo.
-    echo ERROR: EVAVO doctor found a blocking environment problem.
+    set "CODE=%errorlevel%"
+    echo ERROR: EVAVO doctor found a blocking repository/environment problem.
     popd >nul
-    exit /b 2
+    exit /b %CODE%
 )
 
-"%PYTHON%" "%ROOT%evavo.py" start
-set "EXIT_CODE=%ERRORLEVEL%"
-
-if "%EXIT_CODE%"=="0" (
-    echo.
-    "%PYTHON%" "%ROOT%evavo.py" status
+"%PYTHON%" "%ROOT%agent-doctor.py" --repair --provision --skip-tests
+if errorlevel 1 (
+    set "CODE=%errorlevel%"
+    echo ERROR: Real native image-generation readiness could not be established.
+    popd >nul
+    exit /b %CODE%
 )
 
+"%PYTHON%" "%ROOT%evavo.py" status
+set "CODE=%errorlevel%"
 popd >nul
-exit /b %EXIT_CODE%
+exit /b %CODE%
