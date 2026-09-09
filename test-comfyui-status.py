@@ -15,15 +15,12 @@ class ComfyUIStatusTests(unittest.TestCase):
     def setUp(self) -> None:
         self.backend = ComfyUIBackend("http://127.0.0.1:18199")
 
-    @staticmethod
-    def legacy_request(queue_payload):
-        def request(path: str, **_: object):
-            if path.startswith("/api/jobs/"):
-                raise RuntimeError("COMFYUI_HTTP_ERROR:404:legacy server")
-            if path == "/queue":
-                return queue_payload
-            raise AssertionError(path)
-        return request
+    def legacy(self, history: dict, queue: dict):
+        return (
+            patch.object(self.backend, "job_detail", return_value=None),
+            patch.object(self.backend, "history", return_value=history),
+            patch.object(self.backend, "queue_state", return_value=queue),
+        )
 
     def test_completed_history_with_output_legacy_fallback(self) -> None:
         history = {
@@ -32,9 +29,8 @@ class ComfyUIStatusTests(unittest.TestCase):
                 "status": {"status_str": "success", "completed": True, "messages": []},
             }
         }
-        with patch.object(self.backend, "history", return_value=history), patch.object(
-            self.backend, "_request", side_effect=self.legacy_request({"queue_running": [], "queue_pending": []})
-        ):
+        job, hist, queue = self.legacy(history, {"queue_running": [], "queue_pending": []})
+        with job, hist, queue:
             state = prompt_status(self.backend, "prompt-1")
         self.assertEqual(state["status"], "completed")
         self.assertFalse(state["job_api"])
@@ -43,46 +39,35 @@ class ComfyUIStatusTests(unittest.TestCase):
     def test_failed_history_is_not_reported_as_queued_legacy_fallback(self) -> None:
         messages = [["execution_error", {"exception_message": "CUDA out of memory"}]]
         history = {"prompt-2": {"outputs": {}, "status": {"status_str": "error", "completed": False, "messages": messages}}}
-        with patch.object(self.backend, "history", return_value=history), patch.object(
-            self.backend, "_request", side_effect=self.legacy_request({"queue_running": [], "queue_pending": []})
-        ):
+        job, hist, queue = self.legacy(history, {"queue_running": [], "queue_pending": []})
+        with job, hist, queue:
             state = prompt_status(self.backend, "prompt-2")
         self.assertEqual(state["status"], "failed")
         self.assertEqual(state["messages"], messages)
 
     def test_running_queue_is_reported_running_on_legacy_server(self) -> None:
-        with patch.object(self.backend, "history", return_value={}), patch.object(
-            self.backend,
-            "_request",
-            side_effect=self.legacy_request({"queue_running": [[1, "prompt-3", {}, {}, []]], "queue_pending": []}),
-        ):
+        job, hist, queue = self.legacy({}, {"queue_running": [[1, "prompt-3", {}, {}, []]], "queue_pending": []})
+        with job, hist, queue:
             state = prompt_status(self.backend, "prompt-3")
         self.assertEqual(state["status"], "running")
         self.assertFalse(state["history_present"])
 
     def test_pending_queue_is_reported_queued_on_legacy_server(self) -> None:
-        with patch.object(self.backend, "history", return_value={}), patch.object(
-            self.backend,
-            "_request",
-            side_effect=self.legacy_request({"queue_running": [], "queue_pending": [[2, "prompt-4", {}, {}, []]]}),
-        ):
+        job, hist, queue = self.legacy({}, {"queue_running": [], "queue_pending": [[2, "prompt-4", {}, {}, []]]})
+        with job, hist, queue:
             state = prompt_status(self.backend, "prompt-4")
         self.assertEqual(state["status"], "queued")
 
     def test_unknown_prompt_is_not_invented_as_queued(self) -> None:
-        with patch.object(self.backend, "history", return_value={}), patch.object(
-            self.backend,
-            "_request",
-            side_effect=self.legacy_request({"queue_running": [], "queue_pending": []}),
-        ):
+        job, hist, queue = self.legacy({}, {"queue_running": [], "queue_pending": []})
+        with job, hist, queue:
             state = prompt_status(self.backend, "missing")
         self.assertEqual(state["status"], "unknown")
 
     def test_terminal_success_without_image_is_completed_for_status_layer(self) -> None:
         history = {"prompt-5": {"outputs": {}, "status": {"status_str": "success", "completed": True, "messages": []}}}
-        with patch.object(self.backend, "history", return_value=history), patch.object(
-            self.backend, "_request", side_effect=self.legacy_request({"queue_running": [], "queue_pending": []})
-        ):
+        job, hist, queue = self.legacy(history, {"queue_running": [], "queue_pending": []})
+        with job, hist, queue:
             state = prompt_status(self.backend, "prompt-5")
         self.assertEqual(state["status"], "completed")
         self.assertEqual(state["outputs"], [])
@@ -90,29 +75,31 @@ class ComfyUIStatusTests(unittest.TestCase):
     def test_current_jobs_api_reports_cancelled(self) -> None:
         with patch.object(
             self.backend,
-            "_request",
+            "job_detail",
             return_value={"id": "job-1", "status": "cancelled", "error_message": None},
-        ), patch.object(self.backend, "history") as history:
+        ), patch.object(self.backend, "history") as history, patch.object(self.backend, "queue_state") as queue:
             state = prompt_status(self.backend, "job-1")
         self.assertEqual(state["status"], "cancelled")
         self.assertTrue(state["job_api"])
         history.assert_not_called()
+        queue.assert_not_called()
 
     def test_current_jobs_api_reports_running_without_legacy_queue_lookup(self) -> None:
         with patch.object(
             self.backend,
-            "_request",
+            "job_detail",
             return_value={"id": "job-2", "status": "in_progress", "error_message": None},
-        ), patch.object(self.backend, "history") as history:
+        ), patch.object(self.backend, "history") as history, patch.object(self.backend, "queue_state") as queue:
             state = prompt_status(self.backend, "job-2")
         self.assertEqual(state["status"], "running")
         self.assertTrue(state["job_api"])
         history.assert_not_called()
+        queue.assert_not_called()
 
     def test_current_jobs_api_reports_error_and_preserves_message(self) -> None:
         with patch.object(
             self.backend,
-            "_request",
+            "job_detail",
             return_value={"id": "job-3", "status": "error", "error_message": "CUDA out of memory"},
         ), patch.object(self.backend, "history", return_value={}):
             state = prompt_status(self.backend, "job-3")
