@@ -90,6 +90,18 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("image", source)
         self.assertIn("not added to the mcp", source)
 
+    def test_gateway_runbook_documents_request_and_state_safety(self) -> None:
+        source = (ROOT / "GATEWAY-INTEGRATION-GUIDE.md").read_text(encoding="utf-8", errors="replace").lower()
+        self.assertIn("evavo_gateway_max_request_bytes", source)
+        self.assertIn("chunked", source)
+        self.assertIn("evavo_gateway_max_project_chars", source)
+        self.assertIn("evavo_gateway_allow_request_workflow_paths", source)
+        self.assertIn("denied by default", source)
+        self.assertIn("tasks.json.lock", source)
+        self.assertIn("interprocess", source)
+        self.assertIn("gateway_task_state_corrupt", source)
+        self.assertIn("leaves the original file untouched", source)
+
     def test_historical_reports_are_visibly_superseded(self) -> None:
         for name in HISTORICAL_DOCS:
             path = ROOT / name
