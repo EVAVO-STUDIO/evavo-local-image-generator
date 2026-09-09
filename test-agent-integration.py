@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import os
 import socket
@@ -22,6 +23,7 @@ HTTP_PORT = 18192
 MOCK_PORT = 18193
 NATIVE_MCP_PORT = 18195
 EXPECTED_TOOLS = {
+    "provision_backend",
     "ensure_backend",
     "health_check",
     "discover_backends",
@@ -66,6 +68,7 @@ class AgentIntegrationTests(unittest.TestCase):
         module = importlib.import_module("evavo_local_image_generator.mcp_server")
         self.assertTrue(hasattr(module, "mcp"))
         self.assertTrue(callable(module.main))
+        self.assertEqual(list(inspect.signature(module.provision_backend).parameters), [])
 
         async def exercise() -> None:
             async with Client(module.mcp) as client:
@@ -134,7 +137,7 @@ class AgentIntegrationTests(unittest.TestCase):
         params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "evavo_local_image_generator.mcp_server", "--transport", "stdio"],
-            env={"PYTHONPATH": str(ROOT), "PYTHONUNBUFFERED": "1"},
+            env={"PYTHONPATH": str(ROOT), "PYTHONUNBUFFERED": "1", "EVAVO_AUTO_PROVISION_COMFYUI": "0"},
         )
 
         async def exercise() -> None:
@@ -161,6 +164,7 @@ class AgentIntegrationTests(unittest.TestCase):
             env["PYTHONUNBUFFERED"] = "1"
             env["EVAVO_COMFYUI_ENDPOINT"] = native_endpoint
             env["EVAVO_TASK_HISTORY"] = str(history_file)
+            env["EVAVO_AUTO_PROVISION_COMFYUI"] = "0"
 
             process = subprocess.Popen(
                 [
@@ -242,7 +246,11 @@ class AgentIntegrationTests(unittest.TestCase):
                         self.assertIsInstance(history_payload, list)
                         assert isinstance(history_payload, list)
                         self.assertGreaterEqual(len(history_payload), 3)
-                        self.assertTrue(all(item.get("status") == "completed" for item in history_payload[-3:]))
+                        for item in history_payload[-3:]:
+                            self.assertEqual(item.get("status"), "completed")
+                            self.assertEqual(item.get("backend_mode"), "native-comfyui")
+                            self.assertEqual(item.get("checkpoint"), "evavo-test-model.safetensors")
+                            self.assertTrue(item.get("output_uris"))
 
                         stats = await client.call_tool("task_statistics", {})
                         stats_payload = stats.structured_content
@@ -254,7 +262,10 @@ class AgentIntegrationTests(unittest.TestCase):
 
                 persisted = json.loads(history_file.read_text(encoding="utf-8"))
                 self.assertGreaterEqual(len(persisted), 3)
-                self.assertTrue(all(item.get("status") == "completed" for item in persisted[-3:]))
+                for item in persisted[-3:]:
+                    self.assertEqual(item.get("status"), "completed")
+                    self.assertEqual(item.get("backend_mode"), "native-comfyui")
+                    self.assertTrue(item.get("output_uris"))
             finally:
                 stop_process(process)
                 stop_process(native)
