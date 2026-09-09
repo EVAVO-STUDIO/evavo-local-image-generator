@@ -1,6 +1,6 @@
 # Claude operating notes — EVAVO Local Image Generator
 
-This repository is the verified **native ComfyUI image-generation control plane**. Claude should use the MCP v2 tools or the canonical `evavo.py` controller. Do not revive historical BeeStation, Ollama/Kokoro, fake multimodal, source-regeneration, blanket-process-kill or destructive Git-repair paths.
+Read `AGENTS.md` first. This repository is the verified **native ComfyUI image-generation control plane**. Claude must use the same lifecycle, diagnostics, repair and evidence semantics as ChatGPT and other EVAVO agents. Do not revive historical BeeStation, Ollama/Kokoro, fake multimodal, source-regeneration, blanket-process-kill or destructive Git-repair paths.
 
 ## Preferred interface
 
@@ -31,6 +31,7 @@ provision_backend
 ensure_backend
 diagnose_backend
 last_startup_failure
+repair_backend_dependencies
 health_check
 discover_backends
 list_checkpoints
@@ -49,7 +50,18 @@ stop_managed_backend
 
 Use `generate_image` / `generate_batch` for normal work. They auto-start native ComfyUI and wait for completed files by default.
 
-Use `diagnose_backend` for a bounded startup probe and `last_startup_failure` to inspect the last structured startup failure without mutating process state.
+For startup trouble use this exact shared recovery order:
+
+```text
+last_startup_failure
+diagnose_backend(seconds=60, cpu=true)
+repair_backend_dependencies()  # only when category == missing_dependency
+diagnose_backend(seconds=60, cpu=true)
+ensure_backend
+real generation proof
+```
+
+`repair_backend_dependencies` is agent-safe: normal mutation requires structured core missing-dependency evidence, it uses the selected ComfyUI checkout's own requirements and Python runtime, it does not accept arbitrary package/Python/path authority, it never invokes a shell, and it returns a structured receipt. If the category is `custom_node_dependency`, do not sync core requirements; isolate with `disable_all_custom_nodes=true` and repair the reviewed custom node separately.
 
 `generation_status` normalizes current ComfyUI jobs plus legacy history/queue state into:
 
@@ -97,7 +109,7 @@ The Claude installer persists approved **non-secret** MCP roots/policy. It does 
 
 ## Runtime behavior
 
-EVAVO can discover/provision/start native ComfyUI, reject the deterministic mock as production rendering, reuse user-managed ComfyUI without killing it, inject EVAVO-owned shared model paths, repair only owner-configured checkpoint sources, preflight workflows, submit `/prompt`, normalize job/history/queue state, download `/view` images atomically, validate image signatures and persist shared CLI/MCP history.
+EVAVO can discover/provision/start native ComfyUI, reject the deterministic mock as production rendering, reuse user-managed ComfyUI without killing it, inject EVAVO-owned shared model paths, repair proven core dependency drift from the checkout's own requirements, repair only owner-configured checkpoint sources, preflight workflows, submit `/prompt`, normalize job/history/queue state, download `/view` images atomically, validate image signatures and persist shared CLI/MCP history.
 
 A user-managed ComfyUI is never killed. Managed shutdown requires process-identity proof.
 
@@ -130,7 +142,7 @@ python evavo.py status
 .\AGENT-STATUS.ps1
 ```
 
-For ComfyUI startup trouble, prefer MCP `diagnose_backend` / `last_startup_failure` or the current recovery runbook instead of broad process cleanup.
+For ComfyUI startup trouble, prefer MCP `diagnose_backend`, `last_startup_failure` and `repair_backend_dependencies` over broad process cleanup or manual double-click instructions. If MCP lacks a needed local execution primitive, use EVAVO Local Compute's structured workstation bridge/operator and require terminal receipt evidence.
 
 ## Security rules
 
@@ -140,6 +152,7 @@ For ComfyUI startup trouble, prefer MCP `diagnose_backend` / `last_startup_failu
 - never invent/download a model source when the owner has not configured one;
 - do not persist signed checkpoint URLs or OpenAI tunnel runtime keys into repo/startup plaintext;
 - use current-user DPAPI for optional persistent tunnel key storage;
-- use per-job cancellation; never broad-interrupt a legacy running queue on behalf of one task.
+- use per-job cancellation; never broad-interrupt a legacy running queue on behalf of one task;
+- never claim a repair, process start or generation succeeded without the corresponding structured receipt/output evidence.
 
-Current sources of truth: `README.md`, `AGENT-INTEGRATION.md`, `OPERATIONS-GUIDE.md`, `CHATGPT-TUNNEL.md`, `GATEWAY-INTEGRATION-GUIDE.md`, and `QUICK-REFERENCE.md`.
+Current sources of truth: `AGENTS.md`, `README.md`, `AGENT-INTEGRATION.md`, `COMFYUI-STARTUP-DIAGNOSTICS.md`, `OPERATIONS-GUIDE.md`, `CHATGPT-TUNNEL.md`, `GATEWAY-INTEGRATION-GUIDE.md`, and `QUICK-REFERENCE.md`.
