@@ -1,260 +1,234 @@
-# EVAVO Unified Gateway Integration Guide
+# EVAVO HTTP Gateway Integration Guide
 
-The EVAVO Unified Gateway is a stable local HTTP compatibility layer for ChatGPT, Claude, MCP adapters, scripts, and other agents. It deliberately keeps the public API small and fixed while allowing the internal generation backends to evolve.
+The EVAVO Gateway is an **optional loopback HTTP compatibility layer for the verified native image-generation runtime**. MCP remains the preferred agent integration for Claude and ChatGPT.
 
-## Fixed compatibility contract
+The gateway does not expose the deterministic EVAVO mock as a production renderer and does not pretend unsupported modalities are queued.
 
-Do not rename or remove these routes:
+## Network contract
 
-| Method | Path | Purpose |
+Default addresses:
+
+```text
+Gateway:  http://127.0.0.1:8000
+ComfyUI:  http://127.0.0.1:8188
+```
+
+`EVAVO_GATEWAY_HOST` is restricted to `127.0.0.1`, `localhost`, or `::1`. `0.0.0.0`/public binds are rejected.
+
+The gateway should remain private. Cloud ChatGPT reaches EVAVO through the OpenAI Secure MCP Tunnel described in `CHATGPT-TUNNEL.md`, not by exposing port 8000.
+
+## Current routes
+
+| Method | Path | Contract |
 |---|---|---|
-| `GET` | `/health` | Gateway + ComfyUI readiness |
-| `POST` | `/generate/image` | Queue image generation |
-| `POST` | `/generate/video` | Queue video generation |
-| `POST` | `/generate/audio` | Queue audio generation |
-| `POST` | `/generate/3d` | Queue 3D generation |
-| `GET` | `/tasks` | List tasks |
+| `GET` | `/health` | Gateway + **native ComfyUI** readiness |
+| `GET` | `/capabilities` | Truthful supported/unsupported capability report |
+| `POST` | `/generate/image` | Queue real native-ComfyUI image generation |
+| `POST` | `/generate/video` | Compatibility route; returns HTTP `501` |
+| `POST` | `/generate/audio` | Compatibility route; returns HTTP `501` |
+| `POST` | `/generate/3d` | Compatibility route; returns HTTP `501` |
+| `GET` | `/tasks` | List gateway tasks |
 | `GET` | `/tasks/{task_id}/status` | Read one task |
-| `GET` | `/results/{task_id}` | Download the primary result |
-| `WS` | `/ws/progress/{task_id}` | Receive task progress events |
+| `GET` | `/results/{task_id}` | Download primary completed image |
+| `WS` | `/ws/progress/{task_id}` | Task progress/status changes |
 
-Ports that are part of the compatibility contract:
-
-- EVAVO Gateway: `127.0.0.1:8000`
-- ComfyUI: `127.0.0.1:8188`
-- Ollama: `127.0.0.1:11434`
-
-A healthy gateway returns exactly:
+A fully ready health response is:
 
 ```json
 {"status":"healthy","gateway":"ok","comfyui":"ok"}
 ```
 
-Image task IDs retain the `img_<timestamp>` form. Other additive modalities use `vid_<timestamp>`, `aud_<timestamp>`, and `3d_<timestamp>`.
+When the gateway process is alive but native ComfyUI is unavailable, `/health` returns a degraded payload rather than treating the test mock as ready.
 
-## Important port note: Kokoro
+## Start / monitor / stop
 
-Older EVAVO audio code used port `8000` for Kokoro. That conflicts with the fixed Gateway port and two processes cannot bind the same host/port. The Gateway remains on `8000`. Use `EVAVO_KOKORO_ENDPOINT=http://127.0.0.1:8880` for Kokoro (or another free port). `START-GATEWAY.ps1` sets `8880` as the safe default without changing the Gateway contract.
-
-## Installation
-
-From the repository root on Windows:
-
-```powershell
-Set-Location C:\Gitrepos\evavo-local-image-generator
-python --version
-python -m pip install -r requirements.txt
-python -c "import fastapi, uvicorn, pydantic, aiohttp, websockets; print('All imports OK')"
-```
-
-Python 3.10 or newer is required.
-
-## Start and stop
-
-Recommended monitored mode:
-
-```powershell
-python EVAVO-SERVICE-MANAGER.py monitor --interval 5
-```
-
-Start once in the background:
-
-```powershell
-python EVAVO-SERVICE-MANAGER.py start
-```
-
-Stop only EVAVO-managed processes:
-
-```powershell
-python EVAVO-SERVICE-MANAGER.py stop
-```
-
-Health/status:
-
-```powershell
-python EVAVO-SERVICE-MANAGER.py health
-curl.exe http://127.0.0.1:8000/health
-```
-
-Or use the convenience launcher:
+Preferred convenience launcher:
 
 ```powershell
 .\START-GATEWAY.ps1
+```
+
+Continuous compatibility monitoring:
+
+```powershell
 .\START-GATEWAY.ps1 -Monitor -Interval 5
 ```
 
-The service manager first reuses a healthy existing ComfyUI. If ComfyUI is offline it asks the repository's hardened native ComfyUI runtime to discover/start a real installation. If that is unavailable, the deterministic repository mock is allowed as a validation fallback by default. Set `EVAVO_GATEWAY_ALLOW_MOCK_COMFYUI=0` to require a real ComfyUI installation.
+Direct manager commands:
+
+```powershell
+python EVAVO-SERVICE-MANAGER.py start
+python EVAVO-SERVICE-MANAGER.py health
+python EVAVO-SERVICE-MANAGER.py monitor --interval 5
+python EVAVO-SERVICE-MANAGER.py stop
+```
+
+The service manager shares the same native lifecycle used by CLI/MCP:
+
+- reuse healthy user-managed native ComfyUI;
+- discover/start an installed source or portable runtime;
+- never accept the deterministic mock as production gateway health;
+- never kill an unknown process occupying a port;
+- stop only identity-verified EVAVO-managed gateway/native processes.
+
+For fresh-machine provisioning use the canonical workstation updater or agent doctor first:
+
+```powershell
+.\UPDATE-AND-VERIFY-EVAVO.ps1
+# or
+python agent-doctor.py --repair --provision
+```
 
 ## Image generation
 
-Queue a task:
+Queue:
 
 ```powershell
 curl.exe -X POST http://127.0.0.1:8000/generate/image `
   -H "Content-Type: application/json" `
-  -d '{"prompt":"a beautiful sunset over mountains"}'
+  -d '{"prompt":"a beautiful sunset over mountains","project_name":"gateway_demo"}'
 ```
 
-Stable queue response:
+Response:
 
 ```json
-{"task_id":"img_1694208847","status":"queued","progress":0}
+{"task_id":"img_<unique-id>","status":"queued","progress":0}
 ```
 
-Optional image fields are additive and include the existing ComfyUI adapter controls such as `project_name`, `negative_prompt`, `width`, `height`, `steps`, `cfg_scale`, `seed`, `checkpoint`, `workflow_path`, and `wait_timeout`.
+Optional fields are additive and include:
 
-Check status:
+```text
+project_name
+negative_prompt
+width
+height
+steps
+cfg_scale
+seed
+checkpoint
+workflow_path
+wait_timeout
+```
+
+The worker uses the same `ComfyUIBackend` as CLI/MCP:
+
+```text
+ensure native backend
+→ POST /prompt
+→ GET /history/<prompt_id>
+→ GET /view
+→ atomic local download
+→ persisted gateway/shared task history
+```
+
+Status:
 
 ```powershell
-curl.exe http://127.0.0.1:8000/tasks/img_1694208847/status
+curl.exe http://127.0.0.1:8000/tasks/<task_id>/status
 ```
 
-Download when complete:
+Result:
 
 ```powershell
-curl.exe http://127.0.0.1:8000/results/img_1694208847 --output result.png
+curl.exe http://127.0.0.1:8000/results/<task_id> --output result.png
 ```
 
-If the task is still running, `/results/{task_id}` returns HTTP `202` with JSON status. A failed task returns HTTP `409` with its error code and message.
+`/results/{task_id}` returns:
+
+- HTTP `200` + image when completed;
+- HTTP `202` while queued/running;
+- HTTP `409` for a failed task;
+- HTTP `404` for an unknown task;
+- HTTP `410` if a recorded output is missing or fails the gateway result-path authorization boundary.
+
+## Unsupported compatibility routes
+
+Historical clients may still know these endpoints:
+
+```text
+/generate/video
+/generate/audio
+/generate/3d
+```
+
+They intentionally return HTTP `501`. They do **not** create fake tasks or report fake completion.
+
+Use the dedicated EVAVO repositories/tools for non-image media.
+
+## Capabilities
+
+```powershell
+curl.exe http://127.0.0.1:8000/capabilities
+```
+
+The response marks `image.ready` from native ComfyUI health and reports video/audio/3D as unavailable with an explicit reason.
 
 ## Real-time progress
 
-Connect to:
+```text
+ws://127.0.0.1:8000/ws/progress/<task_id>
+```
+
+The socket emits the public task record when it changes and closes on terminal status.
+
+## Persistence
+
+Gateway-local state defaults to:
 
 ```text
-ws://127.0.0.1:8000/ws/progress/{task_id}
+.evavo/gateway/tasks.json
+.evavo/gateway/results/<task_id>/
+.evavo/gateway/logs/gateway.log
+.evavo/gateway/service-manager.json
 ```
 
-The socket emits the public task record whenever it changes and closes after `completed`, `failed`, or `cancelled`.
+The gateway also mirrors status/output metadata into the shared `TaskTracker` on a best-effort basis. Interrupted queued/running gateway tasks are marked failed with `GATEWAY_RESTARTED` after a gateway restart rather than remaining falsely active.
 
-## API documentation
+## CORS
 
-FastAPI serves interactive docs at:
+CORS is **off by default**. To opt in for specific local origins, set a comma-separated allowlist:
 
-```text
-http://127.0.0.1:8000/docs
+```powershell
+$env:EVAVO_GATEWAY_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 ```
 
-OpenAPI JSON is available at:
+The gateway does not enable wildcard public CORS as part of its default contract.
 
-```text
-http://127.0.0.1:8000/openapi.json
+## Validation
+
+The isolated gateway integration suite is part of the authoritative verifier:
+
+```powershell
+python test-gateway.py
+python evavo.py verify --full --require-powershell
 ```
 
-## ChatGPT compatibility
+It verifies:
 
-Any ChatGPT integration capable of reaching the local/tunneled gateway can use the OpenAPI document. The gateway keeps CORS enabled and does not require a ChatGPT-specific request format.
+- native-only health;
+- truthful capabilities;
+- `501` for unsupported modalities;
+- image queue/completion/download through the native simulator;
+- service-manager health agreement;
+- rejection of public gateway binds.
 
-Conceptual plugin metadata:
-
-```json
-{
-  "schema_version": "1.0.0",
-  "name_for_human": "EVAVO Unified Generator",
-  "name_for_model": "evavo_generator",
-  "description_for_human": "Generate media through the EVAVO local gateway",
-  "description_for_model": "Use the EVAVO Gateway API for local generation tasks",
-  "auth": {"type": "none"},
-  "api": {"type": "openapi", "url": "http://127.0.0.1:8000/openapi.json"}
-}
-```
-
-For remote ChatGPT access, use the repository's secure ChatGPT MCP/tunnel tooling rather than exposing port 8000 directly to the public Internet.
-
-## Claude compatibility
-
-Claude-side code can call the same stable REST API:
-
-```python
-import aiohttp
-
-async def generate_image(prompt: str, **kwargs):
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            "http://127.0.0.1:8000/generate/image",
-            json={"prompt": prompt, **kwargs},
-        ) as response:
-            response.raise_for_status()
-            return await response.json()
-```
-
-The existing EVAVO MCP server remains independent and is not removed or renamed by the gateway.
-
-## Persistence and restart behaviour
-
-Gateway task state is atomically persisted at:
-
-```text
-evavo-state/gateway_tasks.json
-```
-
-Generated files are stored under:
-
-```text
-evavo-state/results/<task_id>/
-```
-
-The shared `TaskTracker` is updated on a best-effort basis as a compatibility mirror. After a Gateway process restart, any task that was only `queued` or `running` is marked failed with `GATEWAY_RESTARTED` rather than being falsely reported as still active.
-
-## Automated verification
-
-Run the end-to-end smoke test after startup:
+For an already-running real gateway, the additional live smoke helper remains:
 
 ```powershell
 python gateway-smoke-test.py
 ```
 
-It verifies:
+## API documentation
 
-- exact `/health` contract
-- required OpenAPI paths
-- image task queue response and ID format
-- WebSocket progress
-- task status polling
-- result download
-- HTTP latency measurements
-
-The test exits non-zero on failure and prints a machine-readable JSON report, making it suitable for ChatGPT, Claude, Codex, or local automation.
-
-## Troubleshooting
-
-### Port 8000 already in use
-
-```powershell
-netstat -ano | findstr :8000
-```
-
-Do not move the Gateway. Move the conflicting service. For Kokoro, port `8880` is recommended.
-
-### ComfyUI not responding
-
-```powershell
-curl.exe http://127.0.0.1:8188/system_stats
-python EVAVO-SERVICE-MANAGER.py health
-```
-
-The service manager will not kill an unknown process occupying 8188.
-
-### Dependencies missing
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-### Task history unavailable
-
-Check write permissions for `evavo-state/` and the existing shared task history. Gateway state writes use an atomic temporary-file replacement to reduce corruption risk.
-
-### Gateway logs
-
-EVAVO-managed process logs are written under:
+When running:
 
 ```text
-evavo-state/logs/
+http://127.0.0.1:8000/docs
+http://127.0.0.1:8000/openapi.json
 ```
 
-## Cross-AI change rules
+## Agent guidance
 
-Safe changes include internal refactoring, additional endpoints, better logging, stronger persistence, improved backend adapters, and performance improvements.
+For Claude and ChatGPT, prefer MCP because it exposes lifecycle repair, model inventory, workflow preflight, shared task history and native image-content return. The HTTP gateway exists for compatibility with scripts/clients that specifically need REST/WebSocket behavior.
 
-Do not change existing endpoint paths/methods, request field names, the image queue response field names, Gateway/ComfyUI/Ollama ports, the `img_<timestamp>` task ID form, the healthy `/health` payload, the WebSocket path, or CORS availability without a coordinated API version migration.
+See `AGENT-INTEGRATION.md` and `CHATGPT-TUNNEL.md` for the current agent architecture.
