@@ -26,11 +26,13 @@ class VerifierDiscoveryTests(unittest.TestCase):
         tests = set(verifier.discover_tests())
         required = {
             "test-capability-manifest.py",
+            "test-comfyui-cancel.py",
             "test-comfyui-status.py",
             "test-gateway.py",
             "test-gateway-config-safety.py",
             "test-gateway-config-security.py",
             "test-service-manager-config-safety.py",
+            "test-mcp-cancel-integration.py",
             "test-mcp-output-security.py",
             "test-mcp-profile-policy.py",
             "test-mcp-request-validation.py",
