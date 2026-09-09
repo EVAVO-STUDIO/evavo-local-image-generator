@@ -44,6 +44,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "test-mcp-recovery-parity.py",
             "test-mcp-request-validation.py",
             "test-mcp-status-integration.py",
+            "test-real-generation-contract.py",
             "test-real-generation-smoke.py",
             "test-task-cancellation-history.py",
             "test-updater-dependency-recovery.py",
