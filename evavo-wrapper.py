@@ -99,6 +99,9 @@ def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             second_pass_scheduler=payload.get("second_pass_scheduler"),
             second_pass_denoise=payload.get("second_pass_denoise"),
             latent_upscale_method=payload.get("latent_upscale_method"),
+            lora_name=payload.get("lora_name"),
+            lora_model_strength=payload.get("lora_model_strength"),
+            lora_clip_strength=payload.get("lora_clip_strength"),
         )
         response.update({"ok": True, "endpoint": endpoint, "timestamp": now_iso()})
         if bool(payload.get("wait")):
