@@ -38,10 +38,14 @@ class McpEntryManifestTests(unittest.TestCase):
         self.assertIn("evavo_local_image_generator.mcp_policy --json", claude)
         self.assertIn("evavo_local_image_generator.mcp_policy --json", autostart)
 
-    def test_root_and_generated_profiles_use_validated_entry(self) -> None:
+    def test_project_profile_bootstraps_to_validated_entry_and_generated_profiles_use_it_directly(self) -> None:
         profile = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
-        args = profile["mcpServers"]["evavo-local-image-generator"]["args"]
-        self.assertEqual(args[:2], ["-m", "evavo_local_image_generator.mcp_entry"])
+        server = profile["mcpServers"]["evavo-local-image-generator"]
+        self.assertEqual(server["command"], "python")
+        self.assertEqual(server["args"][:2], ["mcp-bootstrap.py", "--transport"])
+        bootstrap = (ROOT / "mcp-bootstrap.py").read_text(encoding="utf-8")
+        self.assertIn('"evavo_local_image_generator.mcp_entry"', bootstrap)
+
         claude = (ROOT / "INSTALL-CLAUDE-MCP.ps1").read_text(encoding="utf-8")
         start = (ROOT / "START-AGENT-MCP.ps1").read_text(encoding="utf-8")
         self.assertIn('"evavo_local_image_generator.mcp_entry"', claude)
