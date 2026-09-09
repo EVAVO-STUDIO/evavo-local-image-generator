@@ -14,7 +14,6 @@ import time
 import unittest
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -103,6 +102,7 @@ class GatewayIntegrationTests(unittest.TestCase):
         for name in (
             "EVAVO_GATEWAY_CORS_ORIGINS",
             "EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS",
+            "EVAVO_GATEWAY_WORKFLOW_ROOT",
             "EVAVO_COMFYUI_WORKFLOW",
             "EVAVO_VIDEO_PROVIDER_ARGV",
             "EVAVO_VIDEO_STUDIO_DIR",
@@ -343,47 +343,50 @@ class GatewayIntegrationTests(unittest.TestCase):
         finally:
             stop_process(process)
 
-    def test_shared_task_file_allocates_unique_ids_across_gateway_processes(self) -> None:
-        ports = (18215, 18216)
+    def test_shared_task_file_refuses_second_live_gateway(self) -> None:
         state_dir = Path(self.temp.name) / "shared-state"
         state_dir.mkdir(parents=True, exist_ok=True)
-        processes: list[subprocess.Popen[Any]] = []
-        bases: list[str] = []
+        first_port = 18215
+        second_port = 18216
+        first_env = self.env.copy()
+        first_env["EVAVO_GATEWAY_PORT"] = str(first_port)
+        first_env["EVAVO_GATEWAY_STATE_DIR"] = str(state_dir)
+        first_env["EVAVO_TASK_HISTORY"] = str(Path(self.temp.name) / "shared-history-first.json")
+        first = subprocess.Popen(
+            [sys.executable, str(ROOT / "EVAVO-GATEWAY.py")],
+            cwd=str(ROOT),
+            env=first_env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
         try:
-            for index, port in enumerate(ports):
-                env = self.env.copy()
-                env["EVAVO_GATEWAY_PORT"] = str(port)
-                env["EVAVO_GATEWAY_STATE_DIR"] = str(state_dir)
-                env["EVAVO_TASK_HISTORY"] = str(Path(self.temp.name) / f"shared-history-{index}.json")
-                process = subprocess.Popen(
-                    [sys.executable, str(ROOT / "EVAVO-GATEWAY.py")],
-                    cwd=str(ROOT),
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
-                processes.append(process)
-                wait_port(port)
-                bases.append(f"http://127.0.0.1:{port}")
+            wait_port(first_port)
+            second_env = self.env.copy()
+            second_env["EVAVO_GATEWAY_PORT"] = str(second_port)
+            second_env["EVAVO_GATEWAY_STATE_DIR"] = str(state_dir)
+            second_env["EVAVO_TASK_HISTORY"] = str(Path(self.temp.name) / "shared-history-second.json")
+            second = subprocess.Popen(
+                [sys.executable, str(ROOT / "EVAVO-GATEWAY.py")],
+                cwd=str(ROOT),
+                env=second_env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                stdout, stderr = second.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stop_process(second)
+                self.fail("second gateway unexpectedly remained live on the same task state")
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("GATEWAY_STATE_IN_USE", stdout + stderr)
 
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                futures = [
-                    pool.submit(request_json, base + "/generate/audio", method="POST", payload={"prompt": f"shared {index}"})
-                    for index, base in enumerate(bases)
-                ]
-                results = [future.result(timeout=15) for future in futures]
-            self.assertTrue(all(status == 202 for status, _ in results), results)
-            ids = [str(payload.get("task_id", "")) for _, payload in results]
-            self.assertEqual(len(set(ids)), 2, ids)
-            self.assertTrue(all(task_id.startswith("aud_") for task_id in ids), ids)
-
-            status, listing = request_json(bases[0] + "/tasks")
-            self.assertEqual(status, 200)
-            listed = {str(item.get("task_id")) for item in listing.get("tasks", [])}
-            self.assertTrue(set(ids).issubset(listed), (ids, listed))
+            base = f"http://127.0.0.1:{first_port}"
+            status, queued = request_json(base + "/generate/audio", method="POST", payload={"prompt": "first remains authoritative"})
+            self.assertEqual(status, 202, queued)
+            self.assertTrue(str(queued.get("task_id", "")).startswith("aud_"), queued)
         finally:
-            for process in processes:
-                stop_process(process)
+            stop_process(first)
 
     def test_corrupt_task_state_fails_closed_without_overwrite(self) -> None:
         port = 18217
