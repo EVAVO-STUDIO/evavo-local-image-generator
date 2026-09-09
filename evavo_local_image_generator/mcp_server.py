@@ -159,8 +159,18 @@ def _validated_workflow_path(workflow_path: Optional[str]) -> Optional[str]:
     return str(candidate)
 
 
+def _effective_workflow_path(workflow_path: Optional[str]) -> Optional[str]:
+    """Resolve tool input or the owner's default workflow into one trusted path."""
+    if workflow_path is not None and str(workflow_path).strip():
+        return _validated_workflow_path(workflow_path)
+    owner_default = os.getenv("EVAVO_COMFYUI_WORKFLOW", "").strip()
+    if not owner_default:
+        return None
+    _, configured = _resolve_ordinary_file(owner_default, label="EVAVO_COMFYUI_WORKFLOW")
+    return str(configured)
+
+
 def _provision_backend_sync() -> Dict[str, Any]:
-    """Run the fixed EVAVO provisioner using operator-controlled environment only."""
     provisioner = ROOT / "provision-comfyui.py"
     if not provisioner.is_file():
         raise RuntimeError(f"PROVISIONER_MISSING:{provisioner}")
@@ -342,12 +352,20 @@ async def _generate_image_impl(
 
     prompt = prompt.strip()
     project_name = project_name.strip()
-    local_failure_id = f"mcp_failed_{uuid.uuid4().hex}"
-
     try:
-        wait_timeout = _positive_seconds(wait_timeout, name="wait_timeout")
-        workflow_path = _validated_workflow_path(workflow_path)
+        wait_timeout_value = _positive_seconds(wait_timeout, name="wait_timeout")
+        workflow_value = _effective_workflow_path(workflow_path)
         target = _output_dir(project_name, output_dir) if wait or output_dir else None
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "failed",
+            "error_code": "INVALID_FILE_OR_WAIT_POLICY",
+            "message": str(exc),
+        }
+
+    local_failure_id = f"mcp_failed_{uuid.uuid4().hex}"
+    try:
         await _ensure(auto_start=auto_start)
         backend = _backend()
         result = await asyncio.to_thread(
@@ -361,7 +379,7 @@ async def _generate_image_impl(
             cfg_scale=cfg_scale,
             seed=seed,
             checkpoint=checkpoint,
-            workflow_path=workflow_path,
+            workflow_path=workflow_value,
         )
     except Exception as exc:
         try:
@@ -373,8 +391,8 @@ async def _generate_image_impl(
                 project_name=project_name,
                 backend_mode="native-comfyui",
                 checkpoint=checkpoint,
-                workflow_path=workflow_path,
-                output_dir=output_dir,
+                workflow_path=workflow_value,
+                output_dir=str(target) if target else None,
                 error_code="GENERATION_START_FAILED",
                 error_message=str(exc),
             )
@@ -397,12 +415,12 @@ async def _generate_image_impl(
         project_name,
         backend_mode=effective_backend,
         checkpoint=str(effective_checkpoint) if effective_checkpoint else None,
-        workflow_path=workflow_path,
-        output_dir=str(target) if target else output_dir,
+        workflow_path=workflow_value,
+        output_dir=str(target) if target else None,
     )
     result.update({"ok": True, "prompt": prompt, "project_name": project_name})
-    if workflow_path:
-        result["workflow_path"] = workflow_path
+    if workflow_value:
+        result["workflow_path"] = workflow_value
     if tracking_warning:
         result["tracking_warning"] = tracking_warning
 
@@ -411,7 +429,7 @@ async def _generate_image_impl(
 
     assert target is not None
     try:
-        downloaded = await asyncio.to_thread(backend.wait_and_download, task_id, target, timeout=wait_timeout)
+        downloaded = await asyncio.to_thread(backend.wait_and_download, task_id, target, timeout=wait_timeout_value)
     except Exception as exc:
         warning = await _track_update(
             task_id,
@@ -419,7 +437,7 @@ async def _generate_image_impl(
             output_dir=str(target),
             backend_mode=effective_backend,
             checkpoint=str(effective_checkpoint) if effective_checkpoint else None,
-            workflow_path=workflow_path,
+            workflow_path=workflow_value,
             error_code="GENERATION_WAIT_FAILED",
             error_message=str(exc),
         )
@@ -435,7 +453,7 @@ async def _generate_image_impl(
         output_dir=str(target),
         backend_mode=effective_backend,
         checkpoint=str(effective_checkpoint) if effective_checkpoint else None,
-        workflow_path=workflow_path,
+        workflow_path=workflow_value,
     )
     result.update({"status": "completed", "downloaded_files": downloaded, "output_dir": str(target)})
     if warning:
@@ -445,25 +463,16 @@ async def _generate_image_impl(
 
 @mcp.tool()
 async def provision_backend() -> Dict[str, Any]:
-    """Provision official ComfyUI using only workstation-configured environment/model sources, then ensure it is running."""
     provisioned = await _provision_backend()
     ensured = await asyncio.to_thread(ensure_comfyui, _endpoint(), wait_seconds=180.0, allow_start=True)
     backend = _backend()
     checkpoints = await asyncio.to_thread(backend.checkpoints)
     inventory = await asyncio.to_thread(backend.model_inventory, 100)
-    return {
-        "ok": bool(checkpoints),
-        "status": "ready" if checkpoints else "model_required",
-        "provision": provisioned,
-        "backend": ensured,
-        "checkpoints": checkpoints,
-        "model_inventory": inventory,
-    }
+    return {"ok": bool(checkpoints), "status": "ready" if checkpoints else "model_required", "provision": provisioned, "backend": ensured, "checkpoints": checkpoints, "model_inventory": inventory}
 
 
 @mcp.tool()
 async def ensure_backend(auto_start: bool = True, wait_seconds: float = 90.0) -> Dict[str, Any]:
-    """Ensure native ComfyUI is healthy. It may be provisioned first when EVAVO_AUTO_PROVISION_COMFYUI=1."""
     try:
         return await _ensure(auto_start=auto_start, wait_seconds=wait_seconds)
     except ValueError as exc:
@@ -472,28 +481,24 @@ async def ensure_backend(auto_start: bool = True, wait_seconds: float = 90.0) ->
 
 @mcp.tool()
 async def health_check(auto_start: bool = True) -> Dict[str, Any]:
-    """Return ComfyUI health/device/version details, starting/provisioning the local backend when configured."""
     ensured = await _ensure(auto_start=auto_start)
     return ensured["health"]
 
 
 @mcp.tool()
 async def discover_backends() -> List[Dict[str, Any]]:
-    """List local ComfyUI installations EVAVO can automatically launch."""
     installs = await asyncio.to_thread(discover_comfyui)
     return [install.to_dict() for install in installs]
 
 
 @mcp.tool()
 async def list_checkpoints(auto_start: bool = True) -> List[str]:
-    """List checkpoints exposed by ComfyUI, starting/provisioning the backend when configured."""
     await _ensure(auto_start=auto_start)
     return await asyncio.to_thread(_backend().checkpoints)
 
 
 @mcp.tool()
 async def model_inventory(auto_start: bool = True, limit_per_category: int = 200) -> Dict[str, Any]:
-    """List models exposed by common ComfyUI loader nodes."""
     await _ensure(auto_start=auto_start)
     try:
         limit = int(limit_per_category)
@@ -516,7 +521,6 @@ async def workflow_preflight(
     checkpoint: Optional[str] = None,
     auto_start: bool = True,
 ) -> Dict[str, Any]:
-    """Validate an owner-authorized custom ComfyUI API workflow without queueing work."""
     if not isinstance(workflow_path, str) or not workflow_path.strip():
         return {"ok": False, "status": "failed", "error_code": "INVALID_WORKFLOW_PATH", "message": "workflow_path must be a non-empty string"}
     try:
@@ -574,23 +578,7 @@ async def generate_image(
     output_dir: Optional[str] = None,
     auto_start: bool = True,
 ) -> Dict[str, Any]:
-    """Generate one image, wait/download by default, and persist the task in shared EVAVO history."""
-    return await _generate_image_impl(
-        prompt,
-        project_name=project_name,
-        negative_prompt=negative_prompt,
-        width=width,
-        height=height,
-        steps=steps,
-        cfg_scale=cfg_scale,
-        seed=seed,
-        checkpoint=checkpoint,
-        workflow_path=workflow_path,
-        wait=wait,
-        wait_timeout=wait_timeout,
-        output_dir=output_dir,
-        auto_start=auto_start,
-    )
+    return await _generate_image_impl(prompt, project_name=project_name, negative_prompt=negative_prompt, width=width, height=height, steps=steps, cfg_scale=cfg_scale, seed=seed, checkpoint=checkpoint, workflow_path=workflow_path, wait=wait, wait_timeout=wait_timeout, output_dir=output_dir, auto_start=auto_start)
 
 
 @mcp.tool()
@@ -610,19 +598,13 @@ async def generate_batch(
     concurrency: int = 2,
     auto_start: bool = True,
 ) -> Dict[str, Any]:
-    """Generate multiple prompts with bounded concurrency and shared persistent history."""
     if not isinstance(prompts, list) or not prompts:
         return {"ok": False, "status": "failed", "error_code": "INVALID_PROMPTS", "message": "prompts must be a non-empty list"}
     if len(prompts) > 100:
         return {"ok": False, "status": "failed", "error_code": "TOO_MANY_PROMPTS", "message": "a batch may contain at most 100 prompts"}
     invalid = [index for index, prompt in enumerate(prompts) if not isinstance(prompt, str) or not prompt.strip()]
     if invalid:
-        return {
-            "ok": False,
-            "status": "failed",
-            "error_code": "INVALID_PROMPT_ITEMS",
-            "message": f"prompts at indices {invalid[:20]} must be non-empty strings",
-        }
+        return {"ok": False, "status": "failed", "error_code": "INVALID_PROMPT_ITEMS", "message": f"prompts at indices {invalid[:20]} must be non-empty strings"}
     if not isinstance(project_name, str) or not project_name.strip():
         return {"ok": False, "status": "failed", "error_code": "INVALID_PROJECT", "message": "project_name must be a non-empty string"}
     try:
@@ -632,7 +614,7 @@ async def generate_batch(
     concurrency_value = max(1, min(16, concurrency_value))
     try:
         wait_timeout_value = _positive_seconds(wait_timeout, name="wait_timeout")
-        workflow_value = _validated_workflow_path(workflow_path)
+        workflow_value = _effective_workflow_path(workflow_path)
         output_value = str(_output_dir(project_name.strip(), output_dir)) if wait or output_dir else None
     except Exception as exc:
         return {"ok": False, "status": "failed", "error_code": "INVALID_FILE_OR_WAIT_POLICY", "message": str(exc)}
@@ -642,38 +624,15 @@ async def generate_batch(
 
     async def one(prompt: str) -> Dict[str, Any]:
         async with semaphore:
-            return await _generate_image_impl(
-                prompt,
-                project_name=project_name.strip(),
-                negative_prompt=negative_prompt,
-                width=width,
-                height=height,
-                steps=steps,
-                cfg_scale=cfg_scale,
-                checkpoint=checkpoint,
-                workflow_path=workflow_value,
-                wait=wait,
-                wait_timeout=wait_timeout_value,
-                output_dir=output_value,
-                auto_start=False,
-            )
+            return await _generate_image_impl(prompt, project_name=project_name.strip(), negative_prompt=negative_prompt, width=width, height=height, steps=steps, cfg_scale=cfg_scale, checkpoint=checkpoint, workflow_path=workflow_value, wait=wait, wait_timeout=wait_timeout_value, output_dir=output_value, auto_start=False)
 
     results = await asyncio.gather(*(one(prompt) for prompt in prompts))
     successful = sum(1 for item in results if item.get("ok") and item.get("status") in {"queued", "completed"})
-    return {
-        "ok": successful == len(results),
-        "status": "completed" if wait and successful == len(results) else ("queued" if successful == len(results) else "partial_failure"),
-        "project_name": project_name.strip(),
-        "total": len(results),
-        "successful": successful,
-        "failed": len(results) - successful,
-        "results": results,
-    }
+    return {"ok": successful == len(results), "status": "completed" if wait and successful == len(results) else ("queued" if successful == len(results) else "partial_failure"), "project_name": project_name.strip(), "total": len(results), "successful": successful, "failed": len(results) - successful, "results": results}
 
 
 @mcp.tool()
 async def generation_status(task_id: str, auto_start: bool = False) -> Dict[str, Any]:
-    """Check a ComfyUI prompt ID, return outputs, and reconcile local task history."""
     await _ensure(auto_start=auto_start)
     backend = _backend()
     history = await asyncio.to_thread(backend.history, task_id)
@@ -687,13 +646,7 @@ async def generation_status(task_id: str, auto_start: bool = False) -> Dict[str,
 
 
 @mcp.tool()
-async def collect_generation(
-    task_id: str,
-    output_dir: Optional[str] = None,
-    timeout: float = 600.0,
-    auto_start: bool = False,
-) -> Dict[str, Any]:
-    """Wait for an existing prompt, download its images, and reconcile local task history."""
+async def collect_generation(task_id: str, output_dir: Optional[str] = None, timeout: float = 600.0, auto_start: bool = False) -> Dict[str, Any]:
     try:
         timeout_value = _positive_seconds(timeout, name="timeout")
         target = _output_dir("collected", output_dir)
@@ -718,13 +671,11 @@ async def collect_generation(
 
 @mcp.tool(structured_output=False)
 def read_output_image(path: str) -> Image:
-    """Return an authorized ordinary generated image as native MCP image content."""
     return Image(path=_validated_output_image(path))
 
 
 @mcp.tool()
 async def task_history(limit: int = 20, project_name: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return recent generation history shared by MCP and CLI workflows."""
     try:
         limit_value = int(limit)
     except (TypeError, ValueError):
@@ -735,13 +686,11 @@ async def task_history(limit: int = 20, project_name: Optional[str] = None) -> L
 
 @mcp.tool()
 async def task_statistics() -> Dict[str, int]:
-    """Return shared EVAVO generation task counts by status."""
     return await asyncio.to_thread(_tracker().get_statistics)
 
 
 @mcp.tool()
 async def stop_managed_backend() -> Dict[str, Any]:
-    """Stop ComfyUI only when EVAVO itself started that native process."""
     return await asyncio.to_thread(stop_managed_comfyui)
 
 
@@ -752,11 +701,7 @@ def _transport_security(host: str, port: int) -> TransportSecuritySettings:
     else:
         allowed_hosts = [f"127.0.0.1:{port}", f"localhost:{port}"]
         allowed_origins = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
-    return TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
-        allowed_hosts=allowed_hosts,
-        allowed_origins=allowed_origins,
-    )
+    return TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
 
 
 def main() -> None:
@@ -777,14 +722,7 @@ def main() -> None:
         parser.error("--port must be between 1 and 65535")
     if not isinstance(args.path, str) or not args.path.startswith("/") or len(args.path) > 256 or any(ch in args.path for ch in ("?", "#", "\x00")):
         parser.error("--path must be an absolute path up to 256 characters and must not contain ?, #, or NUL")
-    mcp.run(
-        transport="streamable-http",
-        host=args.host,
-        port=args.port,
-        streamable_http_path=args.path,
-        json_response=args.json_response,
-        transport_security=_transport_security(args.host, args.port),
-    )
+    mcp.run(transport="streamable-http", host=args.host, port=args.port, streamable_http_path=args.path, json_response=args.json_response, transport_security=_transport_security(args.host, args.port))
 
 
 if __name__ == "__main__":
