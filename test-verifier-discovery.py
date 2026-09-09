@@ -38,6 +38,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "test-mcp-profile-policy.py",
             "test-mcp-request-validation.py",
             "test-mcp-status-integration.py",
+            "test-verifier-timeout.py",
             "test-legacy-compatibility.py",
             "test-package-direct-execution.py",
             "test-agent-stop-safety.py",
