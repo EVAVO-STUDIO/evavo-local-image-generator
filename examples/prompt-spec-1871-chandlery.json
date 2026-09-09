@@ -1,0 +1,39 @@
+{
+  "subject": "1871 riverfront ship chandlery interior",
+  "composition": [
+    "shop counter and merchant as the main midground silhouette",
+    "readable shelves, repair bench and exit zones",
+    "broad clear gameplay lane across the lower third"
+  ],
+  "camera": "fixed front-on side-stage camera",
+  "environment": "humid rain-darkened riverfront interior",
+  "lighting": "overcast daylight with restrained period lamp glow",
+  "materials": [
+    "worn timber",
+    "aged brass",
+    "canvas",
+    "iron fittings"
+  ],
+  "period": "historically coherent Reconstruction-era 1871 details",
+  "style": [
+    "black-and-white DOS-era engraved game art",
+    "dense hatching",
+    "hard readable silhouettes"
+  ],
+  "constraints": [
+    "uncluttered lower-third gameplay lane",
+    "straight readable room geometry",
+    "no readable brands or modern signage"
+  ],
+  "negative": [
+    "electric lights",
+    "plastic",
+    "modern packaging",
+    "photorealism",
+    "fantasy decoration",
+    "isometric view",
+    "extreme perspective",
+    "watermark",
+    "text"
+  ]
+}
