@@ -1,97 +1,31 @@
-"""
-Comprehensive setup validation for EVAVO infrastructure.
+"""Compatibility entry point for EVAVO repository/setup validation.
 
-Validates:
-- Package structure and imports
-- Service endpoints
-- Storage configuration
-- Environmental variables
+The authoritative validation implementation lives at ``verify-evavo.py``. This
+wrapper exists so older package-oriented commands continue to work without
+maintaining a second, stale definition of production readiness.
 """
 
+from __future__ import annotations
+
+import subprocess
 import sys
-import os
+from pathlib import Path
 
-def validate_package_structure():
-    """Validate Python package structure."""
-    print("=== Package Structure Validation ===")
-    
-    required_modules = [
-        'evavo_local_image_generator',
-        'evavo_local_image_generator.scripts',
-        'evavo_local_image_generator.generators',
-        'evavo_local_image_generator.backends',
-        'evavo_local_image_generator.scripts.legacy_automation',
-    ]
-    
-    all_valid = True
-    for module_name in required_modules:
-        try:
-            __import__(module_name)
-            print(f"✓ {module_name}")
-        except ImportError as e:
-            print(f"✗ {module_name}: {e}")
-            all_valid = False
-    
-    return all_valid
+ROOT = Path(__file__).resolve().parents[2]
+VERIFIER = ROOT / "verify-evavo.py"
 
-def validate_environment():
-    """Validate required environment variables."""
-    print("\n=== Environment Variables ===")
-    
-    env_vars = {
-        'EVAVO_LOCAL_IMAGE_GENERATOR_MODE': 'production',
-        'EVAVO_LOCAL_IMAGE_GENERATOR_STORAGE': 'bee://primary/EVAVO/ImageGeneration',
-        'EVAVO_COMFYUI_ENDPOINT': 'http://127.0.0.1:8188',
-    }
-    
-    all_valid = True
-    for var, default in env_vars.items():
-        value = os.getenv(var, default)
-        status = "✓" if value else "✗"
-        print(f"{status} {var}: {value}")
-    
-    return all_valid
 
-def validate_files():
-    """Validate critical files exist."""
-    print("\n=== Critical Files ===")
-    
-    required_files = [
-        '.mcp.json',
-        'README.md',
-        'CLAUDE.md',
-        'requirements.txt',
-        'evavo-repository-task-manifest.json',
-    ]
-    
-    all_valid = True
-    for filename in required_files:
-        exists = os.path.isfile(filename)
-        status = "✓" if exists else "✗"
-        print(f"{status} {filename}")
-        all_valid = all_valid and exists
-    
-    return all_valid
+def main() -> int:
+    if not VERIFIER.is_file():
+        print(f"ERROR: authoritative verifier is missing: {VERIFIER}", file=sys.stderr)
+        return 2
+    arguments = sys.argv[1:]
+    if not arguments:
+        arguments = ["--full"]
+        if sys.platform.startswith("win"):
+            arguments.append("--require-powershell")
+    return subprocess.run([sys.executable, str(VERIFIER), *arguments], cwd=str(ROOT)).returncode
 
-def main():
-    """Run all validations."""
-    print("EVAVO Setup Validation\n")
-    
-    results = {
-        'package': validate_package_structure(),
-        'environment': validate_environment(),
-        'files': validate_files(),
-    }
-    
-    print("\n=== Summary ===")
-    all_passed = all(results.values())
-    
-    for check, passed in results.items():
-        status = "✓ PASS" if passed else "✗ FAIL"
-        print(f"{check.capitalize()}: {status}")
-    
-    print(f"\nOverall: {'✓ READY' if all_passed else '✗ INCOMPLETE'}")
-    return 0 if all_passed else 1
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == "__main__":
+    raise SystemExit(main())
