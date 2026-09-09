@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "project": "mixed-quality-demo",
+  "endpoint": "http://127.0.0.1:8188",
+  "concurrency": 1,
+  "wait": true,
+  "wait_timeout": 900,
+  "output_dir": ".evavo/batch-plan-example-output",
+  "defaults": {
+    "checkpoint": "sd_xl_base_1.0.safetensors",
+    "negative_prompt": "text, watermark, duplicate object, malformed geometry",
+    "quality_profile": "quality"
+  },
+  "items": [
+    {
+      "id": "product-standard",
+      "prompt_spec": {
+        "subject": "minimal black anodized aluminium desk speaker",
+        "composition": "single product on a matte charcoal surface",
+        "camera": "three-quarter front angle",
+        "lighting": "large diffused key light with a narrow edge light",
+        "materials": "precise machined aluminium edges with fine metal grain",
+        "style": "clean commercial product photography",
+        "constraints": "natural contact shadow, no branding"
+      },
+      "options": {
+        "seed": 1337
+      }
+    },
+    {
+      "id": "product-hero",
+      "prompt_spec": {
+        "subject": "minimal black anodized aluminium desk speaker",
+        "composition": "single product on a matte charcoal surface",
+        "camera": "three-quarter front angle",
+        "lighting": "large diffused key light with a narrow edge light",
+        "materials": "precise machined aluminium edges with fine metal grain",
+        "style": "clean commercial product photography",
+        "constraints": "natural contact shadow, no branding"
+      },
+      "options": {
+        "quality_profile": "hero",
+        "seed": 1337
+      }
+    },
+    {
+      "id": "period-game-art",
+      "prompt_spec": {
+        "subject": "1871 riverfront ship chandlery interior",
+        "composition": [
+          "shop counter and merchant as the main midground silhouette",
+          "broad clear gameplay lane across the lower third"
+        ],
+        "camera": "fixed front-on side-stage camera",
+        "environment": "humid rain-darkened riverfront interior",
+        "lighting": "overcast daylight with restrained period lamp glow",
+        "materials": "worn timber, aged brass, canvas and iron fittings",
+        "period": "historically coherent Reconstruction-era 1871 details",
+        "style": "black-and-white DOS-era engraved game art with dense hatching and hard silhouettes",
+        "constraints": "no modern signage, no electric lights, no plastic"
+      },
+      "options": {
+        "negative_prompt": "isometric view, extreme perspective, photorealism, fantasy decoration, watermark, text",
+        "quality_profile": "hero",
+        "seed": 424242
+      }
+    }
+  ]
+}
