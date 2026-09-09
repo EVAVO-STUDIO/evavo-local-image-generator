@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from evavo_local_image_generator.backends import ComfyUIBackend
-from evavo_local_image_generator.comfyui_runtime import discover_comfyui, ensure_comfyui, native_health
+from evavo_local_image_generator.comfyui_runtime import (
+    configured_shared_model_roots,
+    discover_comfyui,
+    ensure_comfyui,
+    native_health,
+    render_extra_model_paths_yaml,
+)
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_ENDPOINT = (os.getenv("EVAVO_COMFYUI_ENDPOINT") or os.getenv("COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
@@ -73,13 +79,26 @@ def _agent_tests() -> tuple[bool, str]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     if result.returncode == 0:
-        return True, "MCP stdio + Streamable HTTP generation/history tests passed"
+        return True, "MCP stdio + Streamable HTTP generation/history/image-content tests passed"
     detail = (result.stderr or result.stdout).strip()[-1600:]
     return False, detail or f"exit {result.returncode}"
 
 
 def _checkpoint_source_configured() -> bool:
     return bool(os.getenv("EVAVO_CHECKPOINT_FILE") or os.getenv("EVAVO_CHECKPOINT_URL"))
+
+
+def _shared_model_configuration() -> tuple[bool, bool, str]:
+    configured = bool(os.getenv("EVAVO_SHARED_MODEL_ROOTS") or os.getenv("EVAVO_COMFYUI_MODEL_ROOTS"))
+    if not configured:
+        return False, True, "not configured; ComfyUI's own model directories will be used"
+    try:
+        roots = configured_shared_model_roots()
+        rendered = render_extra_model_paths_yaml(roots)
+    except RuntimeError as exc:
+        return True, False, str(exc)
+    blocks = sum(1 for line in rendered.splitlines() if line.startswith("evavo_shared_"))
+    return True, True, f"{len(roots)} configured root(s); {blocks} usable ComfyUI model layout(s)"
 
 
 def _install_app_root(install: Any) -> Path:
@@ -125,7 +144,7 @@ def _provision_comfyui(*, target: Optional[Path] = None, checkpoint_only: bool =
     if result.returncode == 0 and isinstance(payload, dict) and payload.get("ok"):
         provisioned_target = payload.get("target", "unknown")
         models = payload.get("verification", {}).get("checkpoint_files", []) if isinstance(payload.get("verification"), dict) else []
-        return True, f"{payload.get('status', 'provisioned')} {provisioned_target}; checkpoints={len(models)}"
+        return True, f"{payload.get('status', 'provisioned')} {provisioned_target}; local checkpoints={len(models)}"
     detail = ""
     if isinstance(payload, dict):
         detail = str(payload.get("message", ""))
@@ -146,6 +165,13 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
     add("mcp_sdk", mcp_spec is not None, str(mcp_spec.origin) if mcp_spec else 'missing; install mcp[cli]>=2,<3')
 
     renderer_severity = "error" if repair else "warning"
+    shared_configured, shared_ok, shared_detail = _shared_model_configuration()
+    add(
+        "shared_model_roots",
+        shared_ok,
+        shared_detail,
+        severity=renderer_severity if shared_configured else "info",
+    )
 
     installs = discover_comfyui()
     provision_attempted = False
@@ -192,9 +218,13 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
     if health:
         try:
             checkpoints = ComfyUIBackend(endpoint).checkpoints()
-            checkpoint_detail = f"{len(checkpoints)} available" if checkpoints else "none reported"
-            if not checkpoints and repair and not _checkpoint_source_configured():
-                checkpoint_detail += "; configure EVAVO_CHECKPOINT_FILE or EVAVO_CHECKPOINT_URL for automated model provisioning"
+            checkpoint_detail = f"{len(checkpoints)} available"
+            if not checkpoints:
+                checkpoint_detail = "none reported"
+                if shared_configured:
+                    checkpoint_detail += "; shared roots are configured, so restart ComfyUI through EVAVO if it was started externally without the EVAVO extra-model config"
+                elif repair and not _checkpoint_source_configured():
+                    checkpoint_detail += "; configure EVAVO_CHECKPOINT_FILE, EVAVO_CHECKPOINT_URL, or EVAVO_SHARED_MODEL_ROOTS"
             add(
                 "checkpoints",
                 bool(checkpoints),
