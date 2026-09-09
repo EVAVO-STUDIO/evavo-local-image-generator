@@ -25,6 +25,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
         verifier = load_verifier()
         tests = set(verifier.discover_tests())
         required = {
+            "test-agent-doctor-config.py",
             "test-capability-manifest.py",
             "test-comfyui-cancel.py",
             "test-comfyui-repair-safety.py",
