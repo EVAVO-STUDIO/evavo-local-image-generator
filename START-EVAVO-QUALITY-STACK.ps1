@@ -2,7 +2,12 @@ param(
     [string]$ComfyRoot = "C:\AI\ComfyUI",
     [string]$KokoroRoot = "C:\AI\Kokoro-FastAPI",
     [string]$AtmosphereRoot = "C:\GitRepos\atmosphere-studio",
+    [string]$ThreeDRoot = "C:\GitRepos\evavo-3d-studio",
     [switch]$UseNextComfy,
+    [switch]$Start3DWorker,
+    [string]$ThreeDWorkspaceRoot = "C:\EVAVO-3D-WORK",
+    [ValidateRange(1024, 65535)]
+    [int]$ThreeDWorkerPort = 4314,
     [ValidateSet("dev", "start")]
     [string]$AtmosphereMode = "dev",
     [string]$OutputRoot = "C:\AI\evavo-generation-results"
@@ -21,6 +26,7 @@ if ($UseNextComfy) {
 $ComfyEndpoint = "http://127.0.0.1:$ComfyPort"
 $KokoroEndpoint = "http://127.0.0.1:8880"
 $AtmosphereEndpoint = "http://127.0.0.1:3000"
+$ThreeDWorkerEndpoint = "http://127.0.0.1:$ThreeDWorkerPort"
 $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $LogRoot = Join-Path $OutputRoot "service-logs\$Stamp"
 New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
@@ -50,6 +56,25 @@ function Wait-Endpoint {
     throw "Service did not become healthy within $TimeoutSeconds seconds. Tried: $($Urls -join ', ')"
 }
 
+function Wait-JsonEndpoint {
+    param(
+        [string]$Url,
+        [scriptblock]$Predicate,
+        [int]$TimeoutSeconds
+    )
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        try {
+            $payload = Invoke-RestMethod -Uri $Url -Method Get -TimeoutSec 4 -ErrorAction Stop
+            if (& $Predicate $payload) { return $payload }
+        } catch {
+            # Readiness polling intentionally retries bounded connection/startup failures.
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+    throw "JSON service did not satisfy its readiness contract within $TimeoutSeconds seconds: $Url"
+}
+
 function Find-ComfyPython {
     param([string]$Root)
     $candidates = @(
@@ -64,6 +89,19 @@ function Find-ComfyPython {
     $python = Get-Command python.exe -ErrorAction SilentlyContinue
     if ($python) { return $python.Source }
     throw "Could not find the Python runtime for ComfyUI under $Root"
+}
+
+function Find-PythonForRepo {
+    param([string]$Root)
+    foreach ($candidate in @(
+        (Join-Path $Root ".venv\Scripts\python.exe"),
+        (Join-Path $Root "venv\Scripts\python.exe")
+    )) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($python) { return $python.Source }
+    throw "Python 3 was not found for repository $Root"
 }
 
 function Start-LoggedProcess {
@@ -126,6 +164,81 @@ if (Test-Endpoint "$KokoroEndpoint/v1/audio/voices") {
     Write-Host "[OK] Kokoro healthy at $KokoroEndpoint" -ForegroundColor Green
 }
 
+# Optional bounded EVAVO 3D Studio execution worker.
+# This is opt-in because the default Studio MCP/API intentionally remain non-executing.
+if ($Start3DWorker) {
+    if (-not (Test-Path (Join-Path $ThreeDRoot "pyproject.toml"))) {
+        throw "EVAVO 3D Studio not found at $ThreeDRoot"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:EVAVO_3D_AGENT_EXECUTION_TOKEN) -or $env:EVAVO_3D_AGENT_EXECUTION_TOKEN.Length -lt 32) {
+        throw "Start3DWorker requires EVAVO_3D_AGENT_EXECUTION_TOKEN with at least 32 characters. The launcher will not generate or log this token."
+    }
+
+    $sourceRoot = [System.IO.Path]::GetFullPath($ThreeDRoot).TrimEnd('\')
+    $workspaceRoot = [System.IO.Path]::GetFullPath($ThreeDWorkspaceRoot).TrimEnd('\')
+    if ($workspaceRoot -eq $sourceRoot -or $workspaceRoot.StartsWith($sourceRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "ThreeDWorkspaceRoot must be outside the 3D Studio source repository."
+    }
+    New-Item -ItemType Directory -Force -Path $workspaceRoot | Out-Null
+
+    $env:EVAVO_3D_AGENT_EXECUTION_ENABLED = "1"
+    $env:EVAVO_3D_AGENT_WORKSPACE_ROOT = $workspaceRoot
+
+    $healthUrl = "$ThreeDWorkerEndpoint/api/v1/health"
+    $healthPredicate = {
+        param($payload)
+        return (
+            $payload.ok -eq $true -and
+            $payload.service -eq "evavo-3d-agent-worker" -and
+            $payload.executionEnabled -eq $true -and
+            $payload.authority -eq "token-gated-candidate-production-only"
+        )
+    }
+
+    $alreadyReady = $false
+    try {
+        $existing = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 4 -ErrorAction Stop
+        $alreadyReady = (& $healthPredicate $existing)
+    } catch {
+        $alreadyReady = $false
+    }
+
+    if ($alreadyReady) {
+        Write-Host "[OK] 3D execution worker already healthy at $ThreeDWorkerEndpoint" -ForegroundColor Green
+    } else {
+        $threeDPython = Find-PythonForRepo $ThreeDRoot
+        Start-LoggedProcess "evavo-3d-agent-worker" $threeDPython @(
+            "-m", "evavo_3d_studio.agent_worker",
+            "serve", "--host", "127.0.0.1", "--port", "$ThreeDWorkerPort"
+        ) $ThreeDRoot | Out-Null
+        Wait-JsonEndpoint $healthUrl $healthPredicate 120 | Out-Null
+        Write-Host "[OK] 3D execution worker healthy at $ThreeDWorkerEndpoint" -ForegroundColor Green
+    }
+
+    $capabilities = Invoke-RestMethod -Uri "$ThreeDWorkerEndpoint/api/v1/capabilities" -Method Get -TimeoutSec 5 -ErrorAction Stop
+    $requiredOperations = @(
+        "pipeline.generate-candidates",
+        "pipeline.finish-selected",
+        "pipeline.full-candidate",
+        "web-delivery.execute"
+    )
+    foreach ($operation in $requiredOperations) {
+        if ($capabilities.operations -notcontains $operation) {
+            throw "3D worker is missing required bounded operation: $operation"
+        }
+    }
+    if (
+        $capabilities.automaticApproval -ne $false -or
+        $capabilities.canonicalPromotion -ne $false -or
+        $capabilities.gitMutation -ne $false -or
+        $capabilities.deployment -ne $false -or
+        $capabilities.publication -ne $false -or
+        $capabilities.clientRelease -ne $false
+    ) {
+        throw "3D worker authority exceeds the approved candidate-production boundary."
+    }
+}
+
 # Atmosphere Studio
 if (Test-Endpoint $AtmosphereEndpoint) {
     Write-Host "[OK] Atmosphere Studio already healthy at $AtmosphereEndpoint" -ForegroundColor Green
@@ -150,7 +263,7 @@ if (Test-Endpoint $AtmosphereEndpoint) {
 }
 
 $summary = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     startedAt = (Get-Date).ToString("o")
     useNextComfy = [bool]$UseNextComfy
     comfyRoot = $ComfyRoot
@@ -160,6 +273,10 @@ $summary = [ordered]@{
     atmosphereRoot = $AtmosphereRoot
     atmosphereEndpoint = $AtmosphereEndpoint
     atmosphereMode = $AtmosphereMode
+    threeDRoot = $ThreeDRoot
+    threeDWorkerRequested = [bool]$Start3DWorker
+    threeDWorkerEndpoint = if ($Start3DWorker) { $ThreeDWorkerEndpoint } else { $null }
+    threeDWorkspaceRoot = if ($Start3DWorker) { $ThreeDWorkspaceRoot } else { $null }
     logRoot = $LogRoot
 }
 $summary | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $LogRoot "stack.json") -Encoding UTF8
@@ -167,8 +284,11 @@ $summary | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $LogRoot "stac
 Write-Host ""
 Write-Host "EVAVO quality stack is healthy." -ForegroundColor Green
 Write-Host "Run the quality gate from the generator repo:"
+$qualityArgs = @(".\RUN-PRODUCTION-QUALITY.ps1", "-Mode", "standard")
 if ($UseNextComfy) {
-    Write-Host "  .\RUN-PRODUCTION-QUALITY.ps1 -Mode standard -ComfyEndpoint http://127.0.0.1:8189"
-} else {
-    Write-Host "  .\RUN-PRODUCTION-QUALITY.ps1 -Mode standard"
+    $qualityArgs += @("-ComfyEndpoint", "http://127.0.0.1:8189")
 }
+if ($Start3DWorker) {
+    $qualityArgs += @("-Require3DExecution", "-ThreeDWorkerEndpoint", $ThreeDWorkerEndpoint)
+}
+Write-Host ("  " + ($qualityArgs -join " "))
