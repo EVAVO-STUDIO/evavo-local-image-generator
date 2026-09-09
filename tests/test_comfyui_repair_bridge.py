@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,24 @@ def _isolate_evidence(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
     monkeypatch.setattr(repair, "DIAGNOSTIC_OUTPUT_FILE", diagnostic)
     monkeypatch.setattr(repair, "LAST_FAILURE_FILE", failure)
     return diagnostic, failure
+
+
+def _runtime_target(tmp_path: Path) -> tuple[Path, Path]:
+    home = tmp_path / "ComfyUI"
+    home.mkdir(exist_ok=True)
+    (home / "main.py").write_text("", encoding="utf-8")
+    (home / "requirements.txt").write_text("comfy-aimdo==0.5.3\n", encoding="utf-8")
+    python_exe = tmp_path / "python.exe"
+    python_exe.touch()
+    return home, python_exe
+
+
+def _discover_target(monkeypatch, home: Path, python_exe: Path) -> None:
+    monkeypatch.setattr(
+        repair,
+        "discover_comfyui",
+        lambda: [SimpleNamespace(workdir=home, python=python_exe)],
+    )
 
 
 def test_no_repair_evidence_does_not_mutate(monkeypatch, tmp_path: Path) -> None:
@@ -53,18 +72,20 @@ def test_custom_node_dependency_refuses_core_requirements_mutation(monkeypatch, 
     assert result["repair_performed"] is False
 
 
-def test_missing_core_dependency_uses_structured_failure_module(monkeypatch, tmp_path: Path) -> None:
+def test_missing_core_dependency_uses_exact_diagnosed_runtime(monkeypatch, tmp_path: Path) -> None:
     _isolate_evidence(monkeypatch, tmp_path)
     script = tmp_path / "repair-comfyui-dependencies.py"
     script.write_text("# test repair entrypoint\n", encoding="utf-8")
     monkeypatch.setattr(repair, "ROOT", tmp_path)
     monkeypatch.setattr(repair, "REPAIR_SCRIPT", script)
+    home, python_exe = _runtime_target(tmp_path)
     monkeypatch.setattr(
         repair,
         "load_last_failure",
         lambda: {
             "category": "missing_dependency",
             "missing_modules": ["comfy_aimdo"],
+            "install": {"workdir": str(home), "python": str(python_exe)},
         },
     )
 
@@ -92,17 +113,23 @@ def test_missing_core_dependency_uses_structured_failure_module(monkeypatch, tmp
     assert command[1] == str(script)
     assert command[command.index("--module") + 1] == "comfy_aimdo"
     assert command[command.index("--timeout") + 1] == "120"
+    assert command[command.index("--comfy-home") + 1] == str(home.resolve())
+    assert command[command.index("--python") + 1] == str(python_exe.resolve())
     assert "--force-sync" not in command
     assert captured["kwargs"]["shell"] is False
     assert result["ok"] is True
     assert result["status"] == "repaired"
     assert result["source_failure_category"] == "missing_dependency"
+    assert result["target_source"] == "startup_failure"
+    assert result["selected_comfy_home"] == str(home.resolve())
+    assert result["selected_python"] == str(python_exe.resolve())
     assert result["agent_safe"] is True
     assert result["used_checkout_requirements"] is True
+    assert result["used_selected_runtime"] is True
     assert result["used_shell"] is False
 
 
-def test_newer_bounded_diagnostic_log_admits_repair(monkeypatch, tmp_path: Path) -> None:
+def test_newer_bounded_diagnostic_log_admits_repair_via_discovery(monkeypatch, tmp_path: Path) -> None:
     diagnostic, failure = _isolate_evidence(monkeypatch, tmp_path)
     failure.write_text(
         json.dumps({"category": "startup_exception", "missing_modules": []}),
@@ -123,6 +150,8 @@ def test_newer_bounded_diagnostic_log_admits_repair(monkeypatch, tmp_path: Path)
     script.touch()
     monkeypatch.setattr(repair, "ROOT", tmp_path)
     monkeypatch.setattr(repair, "REPAIR_SCRIPT", script)
+    home, python_exe = _runtime_target(tmp_path)
+    _discover_target(monkeypatch, home, python_exe)
 
     captured: dict[str, object] = {}
 
@@ -145,9 +174,12 @@ def test_newer_bounded_diagnostic_log_admits_repair(monkeypatch, tmp_path: Path)
     command = captured["command"]
     assert isinstance(command, list)
     assert command[command.index("--module") + 1] == "comfy_aimdo"
+    assert command[command.index("--comfy-home") + 1] == str(home.resolve())
+    assert command[command.index("--python") + 1] == str(python_exe.resolve())
     assert result["source_failure_category"] == "missing_dependency"
     assert result["evidence_source"] == "bounded_diagnostic_log"
     assert result["evidence_path"] == str(diagnostic)
+    assert result["target_source"] == "discovery"
     assert result["ok"] is True
 
 
@@ -173,13 +205,15 @@ def test_newer_custom_node_diagnostic_still_refuses_core_sync(monkeypatch, tmp_p
     assert result["repair_performed"] is False
 
 
-def test_force_sync_is_explicit_and_uses_default_core_probe(monkeypatch, tmp_path: Path) -> None:
+def test_force_sync_is_explicit_and_uses_discovered_runtime(monkeypatch, tmp_path: Path) -> None:
     _isolate_evidence(monkeypatch, tmp_path)
     script = tmp_path / "repair-comfyui-dependencies.py"
     script.touch()
     monkeypatch.setattr(repair, "ROOT", tmp_path)
     monkeypatch.setattr(repair, "REPAIR_SCRIPT", script)
     monkeypatch.setattr(repair, "load_last_failure", lambda: {})
+    home, python_exe = _runtime_target(tmp_path)
+    _discover_target(monkeypatch, home, python_exe)
 
     captured: dict[str, object] = {}
 
@@ -203,7 +237,30 @@ def test_force_sync_is_explicit_and_uses_default_core_probe(monkeypatch, tmp_pat
     assert isinstance(command, list)
     assert "--force-sync" in command
     assert command[command.index("--module") + 1] == repair.DEFAULT_CORE_MODULE
+    assert command[command.index("--comfy-home") + 1] == str(home.resolve())
+    assert command[command.index("--python") + 1] == str(python_exe.resolve())
+    assert result["target_source"] == "discovery"
     assert result["ok"] is True
+
+
+def test_repair_target_missing_does_not_mutate(monkeypatch, tmp_path: Path) -> None:
+    _isolate_evidence(monkeypatch, tmp_path)
+    script = tmp_path / "repair-comfyui-dependencies.py"
+    script.touch()
+    monkeypatch.setattr(repair, "REPAIR_SCRIPT", script)
+    monkeypatch.setattr(
+        repair,
+        "load_last_failure",
+        lambda: {"category": "missing_dependency", "missing_modules": ["comfy_aimdo"]},
+    )
+    monkeypatch.setattr(repair, "discover_comfyui", lambda: [])
+    monkeypatch.setattr(repair.subprocess, "run", _must_not_run)
+
+    result = repair.repair_backend_dependencies()
+
+    assert result["ok"] is False
+    assert result["error_code"] == "REPAIR_TARGET_MISSING"
+    assert result["repair_performed"] is False
 
 
 def test_repair_timeout_validation_is_bounded() -> None:
