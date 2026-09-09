@@ -47,10 +47,7 @@ def _ordinary_resolved(path: Path, *, label: str, directory: bool | None = None)
 
 
 def _python_candidates(venv_root: Path) -> tuple[Path, ...]:
-    return (
-        venv_root / "Scripts" / "python.exe",
-        venv_root / "bin" / "python",
-    )
+    return (venv_root / "Scripts" / "python.exe", venv_root / "bin" / "python")
 
 
 def inspect_venv(root: Path = VENV_ROOT, *, probe: bool = True) -> dict[str, Any]:
@@ -152,24 +149,52 @@ def ensure_venv(*, bootstrap_python: str | Path = sys.executable, root: Path = V
     if current.get("status") != "missing":
         return {**current, "created": False}
 
-    bootstrap = Path(str(bootstrap_python)).expanduser()
+    lexical_bootstrap = Path(str(bootstrap_python)).expanduser().absolute()
+    if lexical_bootstrap.is_symlink():
+        return {
+            "ok": False,
+            "status": "bootstrap_invalid",
+            "venv": str(root.absolute()),
+            "message": f"VENV_BOOTSTRAP_INVALID:bootstrap Python must not be a symlink: {lexical_bootstrap}",
+        }
     try:
-        bootstrap = bootstrap.resolve(strict=True)
+        bootstrap = lexical_bootstrap.resolve(strict=True)
     except OSError as exc:
         return {"ok": False, "status": "bootstrap_missing", "venv": str(root.absolute()), "message": f"VENV_BOOTSTRAP_MISSING:{exc}"}
-    if not bootstrap.is_file() or bootstrap.is_symlink():
-        return {"ok": False, "status": "bootstrap_invalid", "venv": str(root.absolute()), "message": "VENV_BOOTSTRAP_INVALID"}
+    if not _same_path(lexical_bootstrap, bootstrap) or not bootstrap.is_file():
+        return {
+            "ok": False,
+            "status": "bootstrap_invalid",
+            "venv": str(root.absolute()),
+            "message": f"VENV_BOOTSTRAP_INVALID:bootstrap Python traverses a redirected path or is not a file: {lexical_bootstrap}",
+        }
 
-    version_check = subprocess.run(
-        [str(bootstrap), "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 2)"],
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
+    try:
+        version_check = subprocess.run(
+            [str(bootstrap), "-c", "import sys; raise SystemExit(0 if sys.version_info >= (3,10) else 2)"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "ok": False,
+            "status": "bootstrap_probe_failed",
+            "venv": str(root.absolute()),
+            "message": f"VENV_BOOTSTRAP_PROBE_FAILED:{exc}",
+        }
     if version_check.returncode != 0:
-        return {"ok": False, "status": "bootstrap_unsupported", "venv": str(root.absolute()), "message": "VENV_BOOTSTRAP_PYTHON_TOO_OLD"}
+        detail = (version_check.stderr or version_check.stdout).strip()[-1200:]
+        return {
+            "ok": False,
+            "status": "bootstrap_unsupported",
+            "venv": str(root.absolute()),
+            "message": f"VENV_BOOTSTRAP_PYTHON_TOO_OLD:{detail or version_check.returncode}",
+        }
 
     try:
         created = subprocess.run(
