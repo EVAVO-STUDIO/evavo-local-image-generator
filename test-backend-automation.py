@@ -44,6 +44,14 @@ class BackendAutomationTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             self.assertFalse(backend._provision_configured_checkpoint())
 
+    def test_missing_checkpoint_loader_is_empty_inventory_but_connection_errors_propagate(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with patch.object(backend, "node_input_choices", side_effect=RuntimeError("COMFYUI_HTTP_ERROR:404:unknown node")):
+            self.assertEqual(backend.checkpoints(), [])
+        with patch.object(backend, "node_input_choices", side_effect=RuntimeError("COMFYUI_CONNECTION_ERROR:offline")):
+            with self.assertRaisesRegex(RuntimeError, "COMFYUI_CONNECTION_ERROR"):
+                backend.checkpoints()
+
     def test_custom_workflow_does_not_trigger_checkpoint_provisioning(self) -> None:
         backend = ComfyUIBackend("http://127.0.0.1:18199")
         with tempfile.TemporaryDirectory() as directory:
