@@ -49,12 +49,14 @@ The first command:
 4. downloads the package from the official OpenAI GitHub release;
 5. verifies the downloaded ZIP against the published digest before extraction;
 6. installs `tunnel-client.exe` under `.evavo/tools/`;
-7. ensures the private EVAVO MCP listener is configured;
-8. initializes an `evavo-chatgpt` profile using the HTTP/DCR sample contract;
-9. binds the profile to the supplied tunnel ID and `http://127.0.0.1:8765/mcp` private target;
-10. writes only non-secret profile metadata under `.evavo/chatgpt-tunnel.json`;
-11. stores the runtime key with Windows DPAPI when `-PersistRuntimeKey` is explicitly requested;
-12. runs `tunnel-client doctor --profile evavo-chatgpt --explain` when a runtime key is available.
+7. calculates and records the SHA-256 of the executable extracted from that verified archive;
+8. rechecks that recorded executable digest whenever an existing installation is reused;
+9. ensures the private EVAVO MCP listener is configured;
+10. initializes an `evavo-chatgpt` profile using the HTTP/DCR sample contract;
+11. binds the profile to the supplied tunnel ID and `http://127.0.0.1:8765/mcp` private target;
+12. writes only non-secret profile metadata under `.evavo/chatgpt-tunnel.json`;
+13. stores the runtime key with Windows DPAPI when `-PersistRuntimeKey` is explicitly requested;
+14. runs `tunnel-client doctor --profile evavo-chatgpt --explain` when a runtime key is available.
 
 The second command installs a lightweight current-user Windows Startup launcher and starts the tunnel now. Login autostart **requires** the DPAPI-encrypted key store; an ephemeral process environment variable is intentionally not treated as reboot-persistent.
 
@@ -103,12 +105,16 @@ Skip the local tunnel-client preflight only when it has already passed and a lig
 The script:
 
 - loads the configured profile from `.evavo/chatgpt-tunnel.json`;
-- obtains `CONTROL_PLANE_API_KEY` from the current process or decrypts the DPAPI blob;
+- verifies `tunnel-client.exe` still matches the executable SHA-256 recorded immediately after extraction from the verified official archive;
+- refuses to run when executable integrity metadata is missing/invalid or the hash differs;
+- obtains `CONTROL_PLANE_API_KEY` from the current process or decrypts the DPAPI blob only after the executable integrity check passes;
 - verifies the private EVAVO MCP port is either free or owned by the EVAVO MCP server;
 - starts EVAVO MCP privately when required;
 - runs `tunnel-client doctor` unless skipped;
 - runs `tunnel-client run --profile <profile>` in the foreground;
 - clears a DPAPI-loaded runtime key from the PowerShell environment when the runtime exits.
+
+Because the login autostart calls this same launcher, the executable hash is also rechecked on every Windows-login tunnel start.
 
 ## Diagnose
 
@@ -133,7 +139,9 @@ The doctor checks separately:
 - non-secret EVAVO tunnel state;
 - tunnel ID format;
 - profile name;
-- tunnel-client binary/smoke execution;
+- tunnel-client file presence;
+- tunnel-client executable SHA-256 against verified-install metadata;
+- hash-verified executable smoke execution;
 - private localhost MCP target;
 - actual local MCP listener ownership;
 - runtime-key availability without printing it;
@@ -190,6 +198,7 @@ If no tunnel ID exists, the updater does not fail the rest of EVAVO/Claude setup
 - Do not bind EVAVO MCP to `0.0.0.0`; it remains loopback-only.
 - The OpenAI tunnel is the external bridge and originates outbound from the workstation.
 - The tunnel-client archive is SHA-256 verified against the official GitHub release asset digest before installation.
+- The executable extracted from that verified archive is separately SHA-256 fingerprinted and checked before every tunnel run.
 - `CONTROL_PLANE_API_KEY` is never stored in repository state.
 - Windows login autostart requires a current-user DPAPI blob and contains no plaintext key.
 - `EVAVO_CHECKPOINT_URL` is also not persisted by EVAVO agent installers because signed model URLs can contain credentials.
@@ -217,6 +226,8 @@ Generated/non-secret repository-local state (ignored by Git):
 .evavo\tools\tunnel-client.exe
 .evavo\tools\tunnel-client-install.json
 ```
+
+`tunnel-client-install.json` records release metadata plus the SHA-256 of the extracted executable. It contains no runtime API key.
 
 Secret Windows-user state (outside the repo):
 
