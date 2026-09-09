@@ -190,6 +190,9 @@ class AgentIntegrationTests(unittest.TestCase):
             env["EVAVO_COMFYUI_ENDPOINT"] = native_endpoint
             env["EVAVO_TASK_HISTORY"] = str(history_file)
             env["EVAVO_AUTO_PROVISION_COMFYUI"] = "0"
+            env["EVAVO_MCP_ALLOW_WORKFLOW_PATHS"] = "1"
+            env["EVAVO_MCP_WORKFLOW_ROOT"] = str(state_directory)
+            env["EVAVO_MCP_OUTPUT_ROOTS"] = str(output_directory)
 
             process = subprocess.Popen(
                 [
