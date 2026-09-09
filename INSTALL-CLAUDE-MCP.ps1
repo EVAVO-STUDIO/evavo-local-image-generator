@@ -75,7 +75,10 @@ $nonSecretEnvironment = @(
     "EVAVO_COMFYUI_WORKFLOW",
     "EVAVO_COMFYUI_CHECKPOINT",
     "EVAVO_TASK_HISTORY",
-    "EVAVO_TORCH_INDEX_URL"
+    "EVAVO_TORCH_INDEX_URL",
+    "EVAVO_MCP_OUTPUT_ROOTS",
+    "EVAVO_MCP_ALLOW_WORKFLOW_PATHS",
+    "EVAVO_MCP_WORKFLOW_ROOT"
 )
 foreach ($name in $nonSecretEnvironment) {
     $value = [Environment]::GetEnvironmentVariable($name)
@@ -105,6 +108,7 @@ Write-Host "Server: $ServerName" -ForegroundColor Green
 Write-Host "Python: $python" -ForegroundColor Green
 Write-Host "Repo:   $PSScriptRoot" -ForegroundColor Green
 Write-Host "Backend/checkpoint auto-provision: enabled (operator-controlled model sources only)" -ForegroundColor Green
+Write-Host "MCP file policy: output/workflow paths remain owner-confined; configured non-secret roots are persisted." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
     Write-Host "Shared ComfyUI model roots: persisted into Claude MCP environment" -ForegroundColor Green
 }
