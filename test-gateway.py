@@ -96,10 +96,23 @@ class GatewayIntegrationTests(unittest.TestCase):
         env["EVAVO_GATEWAY_PORT"] = str(GATEWAY_PORT)
         env["EVAVO_GATEWAY_STATE_DIR"] = str(cls.state_dir)
         env["EVAVO_TASK_HISTORY"] = str(cls.task_history)
-        env.pop("EVAVO_GATEWAY_CORS_ORIGINS", None)
-        env.pop("EVAVO_VIDEO_PROVIDER_ARGV", None)
-        env.pop("EVAVO_AUDIO_PROVIDER_ARGV", None)
-        env.pop("EVAVO_3D_AGENT_EXECUTION_TOKEN", None)
+        for name in (
+            "EVAVO_GATEWAY_CORS_ORIGINS",
+            "EVAVO_VIDEO_PROVIDER_ARGV",
+            "EVAVO_VIDEO_STUDIO_DIR",
+            "EVAVO_VIDEO_PYTHON",
+            "EVAVO_VIDEO_PROVIDER_TIMEOUT",
+            "EVAVO_WAN21_MODEL_DIR",
+            "EVAVO_WAN21_MODEL_MANIFEST_SHA256",
+            "EVAVO_AUDIO_PROVIDER_ARGV",
+            "EVAVO_AUDIO_PROVIDER_TIMEOUT",
+            "EVAVO_3D_AGENT_EXECUTION_ENABLED",
+            "EVAVO_3D_AGENT_EXECUTION_TOKEN",
+            "EVAVO_3D_AGENT_WORKSPACE_ROOT",
+            "EVAVO_3D_ENDPOINT",
+            "EVAVO_3D_PROVIDER_TIMEOUT",
+        ):
+            env.pop(name, None)
         cls.env = env
         cls.gateway = subprocess.Popen(
             [sys.executable, str(ROOT / "EVAVO-GATEWAY.py")],
