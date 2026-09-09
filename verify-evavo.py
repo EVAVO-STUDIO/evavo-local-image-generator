@@ -3,7 +3,7 @@
 
 This verifier is intentionally read-only. It checks the critical repository
 contract, compiles Python sources in memory, optionally asks PowerShell to parse
-the canonical Windows scripts, and can run the full Python test suite.
+the canonical Windows scripts, and can run every root ``test-*.py`` suite.
 """
 
 from __future__ import annotations
@@ -68,19 +68,14 @@ POWERSHELL_SCRIPTS: Sequence[str] = (
     "CHATGPT-TUNNEL-DOCTOR.ps1",
 )
 
-FULL_TESTS: Sequence[str] = (
-    "test-provisioning.py",
-    "test-backend-automation.py",
-    "test-batch-workflow-preflight.py",
-    "test-chatgpt-tunnel.py",
-    "test-agent-integration.py",
-    "test-agent-doctor-workflows.py",
-    "test-operations.py",
-)
-
 
 def _result(name: str, ok: bool, detail: str, *, severity: str = "error", skipped: bool = False) -> Dict[str, Any]:
     return {"name": name, "ok": ok, "severity": severity, "skipped": skipped, "detail": detail}
+
+
+def discover_tests() -> List[str]:
+    """Discover every root integration/safety suite by repository naming contract."""
+    return sorted(path.name for path in ROOT.glob("test-*.py") if path.is_file())
 
 
 def _critical_python_files() -> List[Path]:
@@ -136,7 +131,7 @@ def verify_powershell_syntax(require: bool) -> Dict[str, Any]:
         return _result(
             "powershell_syntax",
             not require,
-            "PowerShell not available in this environment; the canonical Windows updater performs this parse before configuration writes",
+            "PowerShell not available in this environment; the canonical Windows updater requires this check before configuration writes",
             severity=severity,
             skipped=not require,
         )
@@ -205,9 +200,17 @@ def run_tests(tests: Iterable[str]) -> List[Dict[str, Any]]:
 
 
 def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
+    tests = discover_tests()
     checks = [verify_files(), verify_python_compile(), verify_powershell_syntax(require_powershell)]
     if full:
-        checks.extend(run_tests(FULL_TESTS))
+        checks.append(
+            _result(
+                "test_inventory",
+                bool(tests),
+                f"discovered {len(tests)} root suites: {', '.join(tests)}" if tests else "no root test-*.py suites found",
+            )
+        )
+        checks.extend(run_tests(tests))
     hard_failures = [item for item in checks if not item["ok"] and item["severity"] == "error"]
     warnings = [item for item in checks if not item["ok"] and item["severity"] == "warning"]
     return {
@@ -216,13 +219,14 @@ def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
         "root": str(ROOT),
         "python": sys.executable,
         "full": full,
+        "discovered_tests": tests,
         "checks": checks,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify EVAVO repository/runtime contracts without mutating workstation configuration")
-    parser.add_argument("--full", action="store_true", help="Run all Python integration/safety suites after structural checks")
+    parser.add_argument("--full", action="store_true", help="Run every discovered root test-*.py suite after structural checks")
     parser.add_argument("--require-powershell", action="store_true", help="Fail when PowerShell is unavailable instead of reporting a skipped warning")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     args = parser.parse_args()
