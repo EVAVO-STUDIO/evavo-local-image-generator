@@ -16,6 +16,8 @@ GATEWAY_PATH = ROOT / "EVAVO-GATEWAY.py"
 MANAGER_PATH = ROOT / "EVAVO-SERVICE-MANAGER.py"
 OPERATIONS_PATH = ROOT / "evavo_operations.py"
 PROVIDER_PATH = ROOT / "evavo_local_image_generator" / "provider_runner.py"
+CLAUDE_INSTALLER = ROOT / "INSTALL-CLAUDE-MCP.ps1"
+HTTP_AUTOSTART_INSTALLER = ROOT / "INSTALL-AGENT-MCP-AUTOSTART.ps1"
 
 
 def registered_mcp_tools() -> set[str]:
@@ -57,6 +59,27 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertNotIn("generate_audio", actual_tools)
         self.assertNotIn("generate_3d", actual_tools)
 
+    def test_mcp_file_policy_matches_server_and_persistent_profiles(self) -> None:
+        policy = self.manifest["interfaces"]["mcp"]["file_policy"]
+        self.assertFalse(policy["arbitrary_output_directories_allowed"])
+        self.assertFalse(policy["tool_workflow_paths_default_allowed"])
+        self.assertTrue(policy["ordinary_file_identity_required"])
+        self.assertTrue(policy["image_signature_validation"])
+        self.assertTrue(policy["persistent_profiles_keep_non_secret_policy"])
+        source = MCP_PATH.read_text(encoding="utf-8")
+        self.assertIn("EVAVO_MCP_OUTPUT_ROOTS", source)
+        self.assertIn("EVAVO_MCP_ALLOW_WORKFLOW_PATHS", source)
+        self.assertIn("EVAVO_MCP_WORKFLOW_ROOT", source)
+        self.assertIn("_resolve_ordinary_file", source)
+        self.assertIn("_has_valid_image_signature", source)
+        self.assertIn("INVALID_FILE_OR_WAIT_POLICY", source)
+        for script in (CLAUDE_INSTALLER, HTTP_AUTOSTART_INSTALLER):
+            text = script.read_text(encoding="utf-8")
+            self.assertIn('"EVAVO_MCP_OUTPUT_ROOTS"', text)
+            self.assertIn('"EVAVO_MCP_ALLOW_WORKFLOW_PATHS"', text)
+            self.assertIn('"EVAVO_MCP_WORKFLOW_ROOT"', text)
+            self.assertNotIn('"EVAVO_CHECKPOINT_URL",', text)
+
     def test_chatgpt_contract_uses_secure_tunnel_not_direct_localhost(self) -> None:
         chatgpt = self.manifest["interfaces"]["chatgpt"]
         self.assertEqual(chatgpt["transport"], "openai-secure-mcp-tunnel")
@@ -85,6 +108,7 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertEqual(gateway["max_project_chars_default"], 128)
         self.assertFalse(gateway["request_workflow_path_default_allowed"])
         self.assertTrue(gateway["request_workflow_path_requires_root"])
+        self.assertTrue(gateway["result_file_identity_required"])
         source = GATEWAY_PATH.read_text(encoding="utf-8")
         self.assertIn("class RequestBodyLimitMiddleware", source)
         self.assertIn("GATEWAY_CONFIG_INVALID", source)
@@ -95,6 +119,8 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertIn("EVAVO_GATEWAY_WORKFLOW_ROOT", source)
         self.assertIn("outside EVAVO_GATEWAY_WORKFLOW_ROOT", source)
         self.assertIn("per-request workflow_path is disabled", source)
+        self.assertIn("_validated_result_path", source)
+        self.assertIn("must not be a symlink", source)
 
     def test_gateway_task_state_safety_matches_manifest_and_public_lock_api(self) -> None:
         gateway = self.manifest["interfaces"]["http_gateway"]
@@ -145,16 +171,23 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertTrue(security["provider_receipt_required"])
         self.assertTrue(security["provider_output_confinement"])
         self.assertTrue(security["provider_receipt_digest_verification_when_supplied"])
-        self.assertIn("PROVIDER_OUTPUT_INVALID", source)
-        self.assertIn("sha256", source.lower())
+        self.assertTrue(security["provider_source_and_destination_symlink_rejection"])
+        self.assertIn("provider artifact must not be a symlink", source)
+        self.assertIn("provider destination must not be a symlink", source)
+        self.assertIn("os.replace(temp_name, destination_lexical)", source)
 
-    def test_service_manager_state_and_secret_contract_is_fail_closed(self) -> None:
+    def test_service_manager_state_and_secret_contract_is_fail_closed_and_serialized(self) -> None:
         security = self.manifest["security"]
         self.assertTrue(security["service_manager_state_corruption_fail_closed"])
+        self.assertTrue(security["service_manager_state_interprocess_lock"])
+        self.assertTrue(security["service_manager_lifecycle_interprocess_lock"])
         self.assertFalse(security["service_manager_provider_secret_plaintext_in_state"])
         source = MANAGER_PATH.read_text(encoding="utf-8")
         self.assertIn("SERVICE_MANAGER_STATE_CORRUPT", source)
         self.assertIn("manager_state_health", source)
+        self.assertIn("STATE_IO_LOCK", source)
+        self.assertIn("LIFECYCLE_LOCK", source)
+        self.assertIn("SERVICE_MANAGER_BUSY", source)
         self.assertIn("3d_token_sha256", source)
         self.assertNotIn('"3d_token": token', source)
         self.assertIn("state file must not be a symlink", source)
@@ -181,12 +214,21 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertTrue(security["gateway_chunked_request_limit"])
         self.assertFalse(security["gateway_request_workflow_path_default_allowed"])
         self.assertTrue(security["gateway_request_workflow_root_confinement"])
+        self.assertTrue(security["gateway_result_symlink_or_parent_redirection_rejected"])
         self.assertTrue(security["gateway_structured_config_errors"])
         self.assertTrue(security["gateway_task_state_corruption_fail_closed"])
         self.assertTrue(security["gateway_task_id_interprocess_atomic"])
         self.assertTrue(security["gateway_task_state_single_live_owner"])
         self.assertTrue(security["service_manager_state_corruption_fail_closed"])
+        self.assertTrue(security["service_manager_state_interprocess_lock"])
+        self.assertTrue(security["service_manager_lifecycle_interprocess_lock"])
         self.assertFalse(security["service_manager_provider_secret_plaintext_in_state"])
+        self.assertFalse(security["mcp_tool_workflow_path_default_allowed"])
+        self.assertTrue(security["mcp_tool_workflow_root_confinement"])
+        self.assertTrue(security["mcp_output_directory_root_confinement"])
+        self.assertTrue(security["mcp_output_symlink_or_parent_redirection_rejected"])
+        self.assertTrue(security["mcp_image_signature_validation"])
+        self.assertTrue(security["mcp_invalid_file_or_wait_policy_preflight"])
         self.assertFalse(security["broad_python_process_kill"])
         self.assertTrue(security["managed_process_identity_verification"])
         self.assertTrue(security["chatgpt_tunnel_executable_sha256_verification"])
