@@ -20,6 +20,7 @@ from .comfyui_runtime import (
     LAST_FAILURE_FILE,
     STATE_DIR,
     classify_startup_output,
+    discover_comfyui,
     load_last_failure,
 )
 
@@ -92,13 +93,7 @@ def _diagnostic_log_evidence(path: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def _latest_repair_evidence() -> Dict[str, Any]:
-    """Choose the newest EVAVO-owned structured/log startup evidence.
-
-    ``diagnose_backend`` returns evidence directly to its caller and writes the
-    bounded diagnostic log. ``ensure_backend`` persists the structured last
-    failure document. Repair must accept either path while refusing stale data
-    when a newer diagnostic exists.
-    """
+    """Choose the newest EVAVO-owned structured/log startup evidence."""
     persisted = load_last_failure()
     persisted = dict(persisted) if isinstance(persisted, dict) else {}
     if persisted:
@@ -116,12 +111,48 @@ def _latest_repair_evidence() -> Dict[str, Any]:
     return diagnostic
 
 
+def _validated_target(workdir: Any, python: Any) -> Optional[tuple[Path, Path]]:
+    """Require an ordinary ComfyUI workdir + exact interpreter pair."""
+    if not isinstance(workdir, str) or not workdir.strip() or not isinstance(python, str) or not python.strip():
+        return None
+    try:
+        home = Path(workdir).expanduser().resolve(strict=True)
+        interpreter = Path(python).expanduser().resolve(strict=True)
+    except OSError:
+        return None
+    if not home.is_dir() or not (home / "main.py").is_file() or not (home / "requirements.txt").is_file():
+        return None
+    if not interpreter.is_file():
+        return None
+    return home, interpreter
+
+
+def _repair_target(evidence: Dict[str, Any]) -> Optional[tuple[Path, Path, str]]:
+    """Resolve the exact diagnosed runtime first, then the canonical discovery winner."""
+    install = evidence.get("install")
+    if isinstance(install, dict):
+        selected = _validated_target(install.get("workdir"), install.get("python"))
+        if selected is not None:
+            return selected[0], selected[1], "startup_failure"
+
+    installs = discover_comfyui()
+    if not installs:
+        return None
+    selected_install = installs[0]
+    selected = _validated_target(str(selected_install.workdir), str(selected_install.python))
+    if selected is None:
+        return None
+    return selected[0], selected[1], "discovery"
+
+
 def build_repair_command(
     *,
     module: str,
     timeout_seconds: float,
     force_sync: bool = False,
     verify_only: bool = False,
+    comfy_home: Optional[Path] = None,
+    python_exe: Optional[Path] = None,
 ) -> list[str]:
     """Build the bounded repair command without invoking a shell."""
     if not _MODULE_PATTERN.fullmatch(module):
@@ -135,6 +166,10 @@ def build_repair_command(
         "--timeout",
         f"{timeout:g}",
     ]
+    if comfy_home is not None:
+        command.extend(["--comfy-home", str(comfy_home)])
+    if python_exe is not None:
+        command.extend(["--python", str(python_exe)])
     if force_sync:
         command.append("--force-sync")
     if verify_only:
@@ -159,13 +194,13 @@ def repair_backend_dependencies(
     force_sync: bool = False,
     verify_only: bool = False,
 ) -> Dict[str, Any]:
-    """Repair the discovered native ComfyUI from its own requirements file.
+    """Repair the exact diagnosed/discovered native ComfyUI runtime.
 
     Normal mutation is admitted only when the newest EVAVO-owned startup
     evidence is a core ``missing_dependency`` failure. Custom-node dependency
     failures are deliberately not repaired through core ComfyUI requirements.
     ``force_sync`` is an explicit operator/agent override that still uses only
-    the checkout's own requirements and selected ComfyUI interpreter.
+    the selected checkout's own requirements and selected ComfyUI interpreter.
     """
     timeout = _validated_timeout(timeout_seconds)
     failure = _latest_repair_evidence()
@@ -217,11 +252,28 @@ def repair_backend_dependencies(
             "repair_performed": False,
         }
 
+    target = _repair_target(failure)
+    if target is None:
+        return {
+            "ok": False,
+            "status": "repair_target_missing",
+            "error_code": "REPAIR_TARGET_MISSING",
+            "message": "EVAVO could not resolve the diagnosed or discovered ComfyUI workdir and interpreter; no dependency mutation was attempted.",
+            "source_failure_category": category,
+            "missing_modules": missing_modules,
+            "evidence_source": evidence_source,
+            "evidence_path": evidence_path,
+            "repair_performed": False,
+        }
+    comfy_home, python_exe, target_source = target
+
     command = build_repair_command(
         module=module,
         timeout_seconds=timeout,
         force_sync=force_sync,
         verify_only=verify_only,
+        comfy_home=comfy_home,
+        python_exe=python_exe,
     )
     try:
         completed = subprocess.run(
@@ -246,6 +298,9 @@ def repair_backend_dependencies(
             "evidence_source": evidence_source,
             "evidence_path": evidence_path,
             "target_module": module,
+            "target_source": target_source,
+            "comfy_home": str(comfy_home),
+            "python": str(python_exe),
             "repair_performed": False,
             "stdout": exc.stdout if isinstance(exc.stdout, str) else "",
             "stderr": exc.stderr if isinstance(exc.stderr, str) else "",
@@ -261,6 +316,9 @@ def repair_backend_dependencies(
             "evidence_source": evidence_source,
             "evidence_path": evidence_path,
             "target_module": module,
+            "target_source": target_source,
+            "comfy_home": str(comfy_home),
+            "python": str(python_exe),
             "repair_performed": False,
         }
 
@@ -276,6 +334,9 @@ def repair_backend_dependencies(
             "evidence_source": evidence_source,
             "evidence_path": evidence_path,
             "target_module": module,
+            "target_source": target_source,
+            "comfy_home": str(comfy_home),
+            "python": str(python_exe),
             "returncode": completed.returncode,
             "stdout": completed.stdout[-12000:],
             "stderr": completed.stderr[-12000:],
@@ -288,9 +349,13 @@ def repair_backend_dependencies(
     result["evidence_source"] = evidence_source
     result["evidence_path"] = evidence_path
     result["target_module"] = module
+    result["target_source"] = target_source
+    result["selected_comfy_home"] = str(comfy_home)
+    result["selected_python"] = str(python_exe)
     result["returncode"] = completed.returncode
     result["agent_safe"] = True
     result["used_checkout_requirements"] = True
+    result["used_selected_runtime"] = True
     result["used_shell"] = False
     if completed.returncode != 0:
         result["ok"] = False
