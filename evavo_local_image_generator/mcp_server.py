@@ -23,6 +23,7 @@ except ImportError as exc:  # pragma: no cover
 from evavo_operations import ROOT, TaskTracker
 from .backends import ComfyUIBackend
 from .comfyui_cancel import cancel_prompt
+from .comfyui_repair import repair_backend_dependencies as repair_comfyui_dependencies
 from .comfyui_runtime import (
     diagnose_comfyui_startup,
     discover_comfyui,
@@ -382,6 +383,21 @@ async def last_startup_failure() -> Dict[str, Any]:
     if not failure:
         return {"ok": True, "status": "none", "failure": None}
     return {"ok": True, "status": "available", "failure": failure}
+
+
+@mcp.tool()
+async def repair_backend_dependencies(force_sync: bool = False, verify_only: bool = False, timeout_seconds: float = 900.0) -> Dict[str, Any]:
+    """Repair a proven core missing dependency using the selected ComfyUI checkout's own requirements."""
+    try:
+        timeout = _positive_seconds(timeout_seconds, name="timeout_seconds", maximum=3600.0)
+    except ValueError as exc:
+        return {"ok": False, "status": "failed", "error_code": "INVALID_REPAIR_TIMEOUT", "message": str(exc)}
+    return await asyncio.to_thread(
+        repair_comfyui_dependencies,
+        timeout_seconds=timeout,
+        force_sync=bool(force_sync),
+        verify_only=bool(verify_only),
+    )
 
 
 @mcp.tool()
