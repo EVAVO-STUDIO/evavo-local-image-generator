@@ -3,7 +3,7 @@
   "capability_id": "evavo.local.image-generation",
   "repository": "EVAVO-STUDIO/evavo-local-image-generator",
   "production_contract": {
-    "modality": "image",
+    "owned_modality": "image",
     "backend": "native-comfyui",
     "mock_is_renderer": false,
     "default_comfyui_endpoint": "http://127.0.0.1:8188",
@@ -21,7 +21,8 @@
     },
     "python": {
       "backend": "evavo_local_image_generator.backends.ComfyUIBackend",
-      "wrapper": "evavo-wrapper.py"
+      "wrapper": "evavo-wrapper.py",
+      "owned_generation_modalities": ["image"]
     },
     "mcp": {
       "sdk": "mcp[cli]>=2,<3",
@@ -35,6 +36,7 @@
           "private target for OpenAI Secure MCP Tunnel"
         ]
       },
+      "owned_generation_modalities": ["image"],
       "tools": [
         "provision_backend",
         "ensure_backend",
@@ -67,11 +69,30 @@
       "optional": true,
       "default_url": "http://127.0.0.1:8000",
       "loopback_only": true,
+      "cors_default": "disabled",
+      "cors_wildcard_allowed": false,
       "image_endpoint": "/generate/image",
-      "unsupported_compatibility_routes": {
-        "/generate/video": 501,
-        "/generate/audio": 501,
-        "/generate/3d": 501
+      "owned_generation_modalities": ["image"],
+      "auxiliary_delegation": {
+        "readiness_endpoint": "/services",
+        "fail_closed": true,
+        "routes": {
+          "/generate/video": {
+            "accepted_status": 202,
+            "ownership": "delegated",
+            "provider": "EVAVO Video Studio or explicitly configured reviewed provider"
+          },
+          "/generate/audio": {
+            "accepted_status": 202,
+            "ownership": "delegated",
+            "provider": "explicitly configured reviewed Audio Studio provider"
+          },
+          "/generate/3d": {
+            "accepted_status": 202,
+            "ownership": "delegated",
+            "provider": "token-gated EVAVO 3D Studio worker"
+          }
+        }
       }
     }
   },
@@ -102,22 +123,27 @@
     "custom_workflow_preflight": true,
     "wait_and_download": true,
     "shared_task_history": true,
-    "native_mcp_image_content": true
+    "native_mcp_image_content": true,
+    "gateway_auxiliary_provider_readiness": true
   },
   "security": {
     "public_bind_by_default": false,
+    "gateway_wildcard_cors_by_default": false,
     "broad_python_process_kill": false,
     "managed_process_identity_verification": true,
     "user_managed_comfyui_never_killed": true,
     "atomic_output_downloads": true,
     "authorized_mcp_image_reads": true,
+    "provider_shell_execution": false,
+    "provider_receipt_required": true,
+    "provider_output_confinement": true,
     "chatgpt_tunnel_release_sha256_verification": true,
     "chatgpt_tunnel_executable_sha256_verification": true,
     "chatgpt_tunnel_dpapi_key_storage": true,
     "plaintext_tunnel_key_in_repo_or_startup": false,
     "arbitrary_model_url_from_mcp_tool": false
   },
-  "unsupported_production_modalities": [
+  "not_owned_production_modalities": [
     "video",
     "audio",
     "3d",
@@ -125,15 +151,20 @@
     "general-text",
     "dedicated-pbr-textures"
   ],
+  "delegated_gateway_modalities": ["video", "audio", "3d"],
   "source_of_truth": [
     "README.md",
     "CLAUDE.md",
     "AGENT-INTEGRATION.md",
+    "AGENT-RECOVERY.md",
     "AUTOMATION-GUIDE.md",
     "OPERATIONS-GUIDE.md",
     "DEPLOYMENT-CHECKLIST.md",
     "GATEWAY-INTEGRATION-GUIDE.md",
+    "GATEWAY-AUX-PROVIDERS.md",
+    "PROVIDER-INTEGRATION-GUIDE.md",
     "CHATGPT-TUNNEL.md",
-    "QUICK-REFERENCE.md"
+    "QUICK-REFERENCE.md",
+    ".evavo/capabilities.json"
   ]
 }
