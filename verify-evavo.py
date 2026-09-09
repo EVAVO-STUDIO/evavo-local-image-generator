@@ -2,8 +2,8 @@
 """Cross-platform structural and test verifier for EVAVO local image generation.
 
 This verifier is intentionally read-only. It checks the critical repository
-contract, compiles Python sources, optionally asks PowerShell to parse the
-canonical Windows scripts, and can run the full Python test suite.
+contract, compiles Python sources in memory, optionally asks PowerShell to parse
+the canonical Windows scripts, and can run the full Python test suite.
 """
 
 from __future__ import annotations
@@ -11,10 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import py_compile
 import shutil
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
 
@@ -101,6 +101,7 @@ def verify_files() -> Dict[str, Any]:
 
 
 def verify_python_compile() -> Dict[str, Any]:
+    """Parse/compile Python sources in memory without creating __pycache__."""
     failures: List[str] = []
     checked = 0
     for path in _critical_python_files():
@@ -108,12 +109,12 @@ def verify_python_compile() -> Dict[str, Any]:
             continue
         checked += 1
         try:
-            py_compile.compile(str(path), doraise=True)
-        except py_compile.PyCompileError as exc:
-            failures.append(f"{path.relative_to(ROOT)}: {exc.msg}")
-        except OSError as exc:
+            with tokenize.open(path) as handle:
+                source = handle.read()
+            compile(source, str(path), "exec", dont_inherit=True)
+        except (OSError, SyntaxError, UnicodeError, tokenize.TokenError) as exc:
             failures.append(f"{path.relative_to(ROOT)}: {exc}")
-    detail = f"compiled {checked} Python files"
+    detail = f"compiled {checked} Python files in memory"
     if failures:
         detail += "; failures: " + " | ".join(failures[:20])
     return _result("python_compile", not failures, detail)
