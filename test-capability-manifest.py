@@ -13,6 +13,7 @@ MANIFEST_PATH = ROOT / "EVAVO-CAPABILITIES.json"
 REPOSITORY_CAPABILITIES_PATH = ROOT / ".evavo" / "capabilities.json"
 MCP_PATH = ROOT / "evavo_local_image_generator" / "mcp_server.py"
 STATUS_PATH = ROOT / "evavo_local_image_generator" / "comfyui_status.py"
+CANCEL_PATH = ROOT / "evavo_local_image_generator" / "comfyui_cancel.py"
 GATEWAY_PATH = ROOT / "EVAVO-GATEWAY.py"
 MANAGER_PATH = ROOT / "EVAVO-SERVICE-MANAGER.py"
 OPERATIONS_PATH = ROOT / "evavo_operations.py"
@@ -56,6 +57,8 @@ class CapabilityManifestTests(unittest.TestCase):
         actual_tools = registered_mcp_tools()
         self.assertEqual(manifest_tools, actual_tools)
         self.assertEqual(self.manifest["interfaces"]["mcp"]["owned_generation_modalities"], ["image"])
+        for tool in ("diagnose_backend", "last_startup_failure", "cancel_generation"):
+            self.assertIn(tool, actual_tools)
         self.assertNotIn("generate_video", actual_tools)
         self.assertNotIn("generate_audio", actual_tools)
         self.assertNotIn("generate_3d", actual_tools)
@@ -81,19 +84,38 @@ class CapabilityManifestTests(unittest.TestCase):
             self.assertIn('"EVAVO_MCP_WORKFLOW_ROOT"', text)
             self.assertNotIn('"EVAVO_CHECKPOINT_URL",', text)
 
-    def test_mcp_generation_status_uses_history_and_queue_truthfully(self) -> None:
+    def test_mcp_generation_status_uses_jobs_history_and_queue_truthfully(self) -> None:
         status_contract = self.manifest["interfaces"]["mcp"]["generation_status"]
-        self.assertEqual(set(status_contract["normalized_states"]), {"queued", "running", "completed", "failed", "unknown"})
+        self.assertEqual(set(status_contract["normalized_states"]), {"queued", "running", "completed", "failed", "cancelled", "unknown"})
         self.assertTrue(status_contract["failed_history_updates_shared_task_history"])
         self.assertTrue(status_contract["missing_prompt_is_unknown_not_queued"])
+        self.assertIn("GET /api/jobs/<job_id>", self.manifest["native_comfyui_api"])
         self.assertIn("GET /queue", self.manifest["native_comfyui_api"])
         mcp_source = MCP_PATH.read_text(encoding="utf-8")
         status_source = STATUS_PATH.read_text(encoding="utf-8")
         self.assertIn("from .comfyui_status import prompt_status", mcp_source)
         self.assertIn("prompt_status", mcp_source)
         self.assertIn('error_code="COMFYUI_EXECUTION_FAILED"', mcp_source)
+        self.assertIn("/api/jobs/", status_source)
         self.assertIn('backend._request("/queue"', status_source)
+        self.assertIn('"cancelled": "cancelled"', status_source)
         self.assertIn('status = "unknown"', status_source)
+
+    def test_mcp_cancellation_is_targeted_and_legacy_running_interrupt_is_forbidden(self) -> None:
+        contract = self.manifest["interfaces"]["mcp"]["generation_cancellation"]
+        self.assertEqual(contract["tool"], "cancel_generation")
+        self.assertEqual(contract["preferred_endpoint"], "POST /api/jobs/<job_id>/cancel")
+        self.assertTrue(contract["idempotent_terminal_or_unknown_noop"])
+        self.assertTrue(contract["legacy_pending_queue_delete"])
+        self.assertFalse(contract["legacy_running_broad_interrupt_allowed"])
+        self.assertIn("POST /api/jobs/<job_id>/cancel", self.manifest["native_comfyui_api"])
+        mcp_source = MCP_PATH.read_text(encoding="utf-8")
+        cancel_source = CANCEL_PATH.read_text(encoding="utf-8")
+        self.assertIn("from .comfyui_cancel import cancel_prompt", mcp_source)
+        self.assertIn("async def cancel_generation", mcp_source)
+        self.assertIn("/api/jobs/", cancel_source)
+        self.assertIn("legacy_pending_queue_delete", cancel_source)
+        self.assertNotIn('"/interrupt"', cancel_source)
 
     def test_chatgpt_contract_uses_secure_tunnel_not_direct_localhost(self) -> None:
         chatgpt = self.manifest["interfaces"]["chatgpt"]
@@ -245,6 +267,8 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertTrue(security["mcp_image_signature_validation"])
         self.assertTrue(security["mcp_invalid_file_or_wait_policy_preflight"])
         self.assertTrue(security["mcp_failed_prompt_not_reported_as_queued"])
+        self.assertTrue(security["mcp_targeted_cancel_preferred"])
+        self.assertFalse(security["mcp_legacy_running_broad_interrupt_allowed"])
         self.assertFalse(security["broad_python_process_kill"])
         self.assertTrue(security["managed_process_identity_verification"])
         self.assertTrue(security["chatgpt_tunnel_executable_sha256_verification"])
