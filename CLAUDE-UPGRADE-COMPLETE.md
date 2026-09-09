@@ -1,3 +1,9 @@
+# HISTORICAL MILESTONE — SUPERSEDED
+
+> This file records an earlier automation milestone. **Do not use it as current setup, capability, or Claude/ChatGPT guidance.** The multimodal/Ollama/Kokoro/BeeStation workflow described below has been retired from this repository's verified production contract. Current production behavior is native ComfyUI **image generation**, MCP v2 for agents, Claude stdio MCP, and OpenAI Secure MCP Tunnel for ChatGPT. Use `README.md`, `CLAUDE.md`, `AGENT-INTEGRATION.md`, `AUTOMATION-GUIDE.md`, `OPERATIONS-GUIDE.md`, `CHATGPT-TUNNEL.md`, and `QUICK-REFERENCE.md`.
+
+---
+
 # EVAVO Platform Upgrade Complete
 
 **Status:** Production Ready ✓
