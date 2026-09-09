@@ -33,7 +33,13 @@ For a current checkout, just run:
 .\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-The updater safely fast-forwards `main`, installs dependencies, runs the authoritative verifier, configures Claude/private HTTP MCP, repairs/provisions native ComfyUI when allowed, validates the active workflow/model contract, and conditionally configures the ChatGPT Secure MCP Tunnel.
+The updater safely fast-forwards `main`, installs dependencies, runs the authoritative verifier, prepares/provisions native ComfyUI when allowed, and runs strict agent-doctor readiness. If strict doctor fails, it may make **one** evidence-gated core dependency repair attempt through the constrained shared repair bridge, unless `-SkipComfyUIDependencyRepair` is supplied. It then re-proves strict readiness, bootstraps native ComfyUI, installs/reloads Claude/private HTTP MCP, runs final doctor, and finally executes one **real native generation smoke proof**. Setup does not report success unless the active workflow actually renders and EVAVO downloads a signature-validated image. ChatGPT Secure MCP Tunnel configuration is then completed when its external tunnel identity/key are available.
+
+The updater never enables `force_sync` dependency repair. That override requires explicit workstation-owner authorization through:
+
+```powershell
+$env:EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR = "1"
+```
 
 ## Verification
 
@@ -43,7 +49,13 @@ python evavo.py verify --full
 python evavo.py verify --full --require-powershell
 ```
 
-`verify-evavo.py` auto-discovers maintained root, `tests/`, and package suites. Python syntax is compiled in memory and PowerShell setup scripts are AST-parsed on Windows.
+`verify-evavo.py` auto-discovers maintained root, `tests/`, and package suites. Python syntax is compiled in memory and PowerShell setup scripts are AST-parsed on Windows. Simulator tests prove repository contracts but do **not** substitute for the real post-bootstrap render required by the canonical workstation updater.
+
+Direct real-render proof:
+
+```powershell
+python real-generation-smoke.py --json
+```
 
 ## CLI image generation
 
@@ -103,7 +115,7 @@ stop_managed_backend
 
 `diagnose_backend` runs a bounded startup diagnostic. `last_startup_failure` returns the last structured startup failure without changing process state.
 
-When a structured startup failure is `missing_dependency`, `repair_backend_dependencies` can synchronize the **selected ComfyUI checkout's own requirements** with its selected Python runtime. The MCP tool does not accept arbitrary package names, Python paths, ComfyUI paths or URLs, does not use a shell, and does not treat custom-node dependency failures as permission to mutate core ComfyUI. Normal recovery is:
+When a structured startup failure is `missing_dependency`, `repair_backend_dependencies` can synchronize the **exact diagnosed ComfyUI workdir's own requirements** with its recorded Python runtime; if exact runtime evidence is absent it falls back to the canonical discovered runtime. The MCP tool does not accept arbitrary package names, Python paths, ComfyUI paths or URLs, does not use a shell, and does not treat custom-node dependency failures as permission to mutate core ComfyUI. Normal recovery is:
 
 ```text
 last_startup_failure
@@ -113,6 +125,8 @@ last_startup_failure
 -> ensure_backend
 -> real generation proof
 ```
+
+`force_sync=true` is separately owner-gated by `EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR=1` and is never enabled by the canonical updater.
 
 `generation_status` prefers current ComfyUI jobs and falls back to legacy history/queue, normalizing:
 
@@ -214,7 +228,7 @@ EVAVO writes its own `.evavo\extra-model-paths.yaml`; it does not overwrite Comf
 
 ## Task history
 
-CLI and MCP share lock-protected atomic history including backend/checkpoint/workflow/output/error/status metadata. Failed and cancelled prompt states are reconciled into the same history.
+CLI and MCP share lock-protected atomic history including backend/checkpoint/workflow/output/error/status metadata. Failed and cancelled prompt states are reconciled into the same history. The real setup smoke proof also records its real prompt ID and validated output in that shared history.
 
 ```powershell
 python evavo.py tasks --limit 20
