@@ -8,6 +8,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent
 PROVISIONER = ROOT / "provision-comfyui.py"
@@ -62,6 +63,40 @@ class ProvisioningSafetyTests(unittest.TestCase):
             )
             self.assertEqual(repeated["status"], "already_present")
             self.assertEqual(repeated["sha256"], expected)
+
+    def test_portable_root_resolves_and_receives_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "ComfyUI_windows_portable"
+            app_root = root / "ComfyUI"
+            app_root.mkdir(parents=True)
+            (app_root / "main.py").write_text("# portable fixture\n", encoding="utf-8")
+            source = Path(directory) / "portable-source.safetensors"
+            source.write_bytes(b"portable model fixture")
+            expected = hashlib.sha256(source.read_bytes()).hexdigest()
+
+            resolved = self.module.resolve_app_root(root)
+            self.assertEqual(resolved, app_root.resolve())
+            args = SimpleNamespace(
+                checkpoint_file=str(source),
+                checkpoint_url=None,
+                checkpoint_sha256=expected,
+                checkpoint_name="portable-model.safetensors",
+                allow_http_checkpoint=False,
+            )
+            installed = self.module.provision_checkpoint(resolved, args)
+            self.assertIsNotNone(installed)
+            assert installed is not None
+            target = Path(installed["path"])
+            self.assertEqual(target.parent, app_root.resolve() / "models" / "checkpoints")
+            self.assertTrue(target.is_file())
+            self.assertEqual(installed["sha256"], expected)
+
+    def test_source_root_resolves_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "ComfyUI"
+            root.mkdir()
+            (root / "main.py").write_text("# source fixture\n", encoding="utf-8")
+            self.assertEqual(self.module.resolve_app_root(root), root.resolve())
 
     def test_local_checkpoint_hash_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
