@@ -237,12 +237,18 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
     shared_configured, shared_ok, shared_detail = _shared_model_configuration()
     add("shared_model_roots", shared_ok, shared_detail, severity=renderer_severity if shared_configured else "info")
 
+    # Probe the configured native endpoint before deciding whether any runtime
+    # installation/provisioning work is necessary. A healthy externally started
+    # ComfyUI is already a valid renderer even when its filesystem path is not
+    # discoverable by EVAVO.
+    health = native_health(endpoint)
     installs = discover_comfyui()
     provision_attempted = False
     if repair and provision:
-        missing_runtime = not installs
+        missing_runtime = not health and not installs
         configured_model_missing = (
-            not custom_workflow_configured
+            not health
+            and not custom_workflow_configured
             and bool(installs)
             and _checkpoint_source_configured()
             and not _filesystem_checkpoints(installs)
@@ -259,15 +265,19 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
             provision_ok, provision_detail = _provision_comfyui(target=target, checkpoint_only=True)
             add("checkpoint_provision", provision_ok, provision_detail, severity="error", repaired=provision_ok)
 
-    add(
-        "comfyui_install",
-        bool(installs),
-        "; ".join(str(item.root) for item in installs) if installs else "no local install discovered; use --provision or set EVAVO_COMFYUI_HOME",
-        severity=renderer_severity,
-        repaired=provision_attempted and bool(installs),
-    )
+    install_visible = bool(installs)
+    install_ok = install_visible or bool(health)
+    if install_visible:
+        install_detail = "; ".join(str(item.root) for item in installs)
+        install_severity = renderer_severity
+    elif health:
+        install_detail = f"native ComfyUI is already healthy at {endpoint}; filesystem install is not discoverable, so EVAVO will reuse it without cloning another runtime"
+        install_severity = "info"
+    else:
+        install_detail = "no local install discovered; use --provision or set EVAVO_COMFYUI_HOME"
+        install_severity = renderer_severity
+    add("comfyui_install", install_ok, install_detail, severity=install_severity, repaired=provision_attempted and bool(installs))
 
-    health = native_health(endpoint)
     repaired_backend = False
     if not health and repair and installs:
         try:
@@ -308,6 +318,22 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
 
         try:
             checkpoints = backend.checkpoints()
+            repaired_checkpoint = False
+            if (
+                not custom_workflow_configured
+                and not checkpoints
+                and repair
+                and provision
+                and installs
+                and _checkpoint_source_configured()
+            ):
+                target = Path(installs[0].root)
+                provision_ok, provision_detail = _provision_comfyui(target=target, checkpoint_only=True)
+                add("checkpoint_repair", provision_ok, provision_detail, severity="error", repaired=provision_ok)
+                if provision_ok:
+                    checkpoints = backend.checkpoints()
+                    repaired_checkpoint = bool(checkpoints)
+
             if custom_workflow_configured:
                 checkpoint_detail = f"{len(checkpoints)} available; non-blocking because custom workflow readiness is checked separately"
                 add("checkpoints", True, checkpoint_detail, severity="info")
@@ -315,11 +341,13 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
                 checkpoint_detail = f"{len(checkpoints)} available"
                 if not checkpoints:
                     checkpoint_detail = "none reported"
-                    if shared_configured:
+                    if health and not installs and _checkpoint_source_configured():
+                        checkpoint_detail += "; owner configured a checkpoint source, but EVAVO needs EVAVO_COMFYUI_HOME to identify the filesystem target for repair"
+                    elif shared_configured:
                         checkpoint_detail += "; shared roots are configured, so restart ComfyUI through EVAVO if it was started externally without the EVAVO extra-model config"
                     elif repair and not _checkpoint_source_configured():
                         checkpoint_detail += "; configure EVAVO_CHECKPOINT_FILE, EVAVO_CHECKPOINT_URL, or EVAVO_SHARED_MODEL_ROOTS"
-                add("checkpoints", bool(checkpoints), checkpoint_detail, severity="error" if repair else "warning")
+                add("checkpoints", bool(checkpoints), checkpoint_detail, severity="error" if repair else "warning", repaired=repaired_checkpoint)
         except RuntimeError as exc:
             if custom_workflow_configured:
                 add("checkpoints", True, f"not available ({exc}); non-blocking custom workflow contract", severity="info")
