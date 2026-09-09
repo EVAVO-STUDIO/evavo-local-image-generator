@@ -24,6 +24,16 @@ if (-not $SkipValidation) {
     }
 }
 
+# Always validate owner-granted filesystem authority before mutating Claude's
+# configuration. This is intentionally independent of -SkipValidation: the
+# integration suite may be skipped after the canonical updater already ran it,
+# but invalid output/workflow roots must never be persisted across restarts.
+Write-Host "Validating MCP filesystem authority before changing Claude configuration..." -ForegroundColor Cyan
+& $python -m evavo_local_image_generator.mcp_policy --json
+if ($LASTEXITCODE -ne 0) {
+    throw "MCP filesystem policy is invalid. Claude configuration was not changed."
+}
+
 $configDir = Join-Path $env:APPDATA "Claude"
 $configPath = Join-Path $configDir "claude_desktop_config.json"
 New-Item -ItemType Directory -Force -Path $configDir | Out-Null
@@ -120,7 +130,7 @@ Write-Host "Python: $python" -ForegroundColor Green
 Write-Host "Repo:   $PSScriptRoot" -ForegroundColor Green
 Write-Host "ComfyUI endpoint: $comfyEndpoint (persisted as canonical COMFYUI_ENDPOINT)" -ForegroundColor Green
 Write-Host "Backend/checkpoint auto-provision: enabled (operator-controlled model sources only)" -ForegroundColor Green
-Write-Host "MCP file policy: output/workflow paths remain owner-confined; configured non-secret roots are persisted." -ForegroundColor Green
+Write-Host "MCP file policy: validated before write; output/workflow paths remain owner-confined." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
     Write-Host "Shared ComfyUI model roots: persisted into Claude MCP environment" -ForegroundColor Green
 }
