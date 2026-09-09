@@ -56,6 +56,7 @@ provision_backend
 ensure_backend
 diagnose_backend
 last_startup_failure
+repair_backend_dependencies
 health_check
 discover_backends
 list_checkpoints
@@ -72,9 +73,20 @@ task_statistics
 stop_managed_backend
 ```
 
-### Startup diagnosis
+### Startup diagnosis / dependency repair
 
-`diagnose_backend` performs a bounded ComfyUI startup diagnostic. `last_startup_failure` returns the last structured failure without changing process state.
+Normal recovery order:
+
+```text
+last_startup_failure
+-> diagnose_backend(seconds=60, cpu=true)
+-> repair_backend_dependencies()   # only for structured core missing_dependency
+-> diagnose_backend(seconds=60, cpu=true)
+-> ensure_backend
+-> real generation proof
+```
+
+`repair_backend_dependencies` uses only the selected ComfyUI checkout's own requirements + selected interpreter. MCP does not accept arbitrary package/module/Python/ComfyUI path arguments for repair, does not use a shell, and refuses to treat a `custom_node_dependency` failure as permission to sync core requirements.
 
 ### Generation status
 
