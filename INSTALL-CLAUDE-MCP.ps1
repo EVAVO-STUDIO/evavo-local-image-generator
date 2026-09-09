@@ -52,10 +52,21 @@ elseif ($null -eq $config.mcpServers) {
     $config.mcpServers = [pscustomobject]@{}
 }
 
+# COMFYUI_ENDPOINT is canonical. The legacy EVAVO_COMFYUI_ENDPOINT value is
+# accepted only as migration input so generated agent profiles cannot target a
+# different renderer from CLI/gateway when both variables exist.
+$comfyEndpoint = [Environment]::GetEnvironmentVariable("COMFYUI_ENDPOINT")
+if (-not $comfyEndpoint) {
+    $comfyEndpoint = [Environment]::GetEnvironmentVariable("EVAVO_COMFYUI_ENDPOINT")
+}
+if (-not $comfyEndpoint) {
+    $comfyEndpoint = "http://127.0.0.1:8188"
+}
+
 $environment = [ordered]@{
     "PYTHONPATH" = $PSScriptRoot
     "PYTHONUNBUFFERED" = "1"
-    "EVAVO_COMFYUI_ENDPOINT" = "http://127.0.0.1:8188"
+    "COMFYUI_ENDPOINT" = $comfyEndpoint
     "EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path $PSScriptRoot ".evavo\outputs")
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
     "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
@@ -107,6 +118,7 @@ Write-Host "  $configPath" -ForegroundColor Green
 Write-Host "Server: $ServerName" -ForegroundColor Green
 Write-Host "Python: $python" -ForegroundColor Green
 Write-Host "Repo:   $PSScriptRoot" -ForegroundColor Green
+Write-Host "ComfyUI endpoint: $comfyEndpoint (persisted as canonical COMFYUI_ENDPOINT)" -ForegroundColor Green
 Write-Host "Backend/checkpoint auto-provision: enabled (operator-controlled model sources only)" -ForegroundColor Green
 Write-Host "MCP file policy: output/workflow paths remain owner-confined; configured non-secret roots are persisted." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
