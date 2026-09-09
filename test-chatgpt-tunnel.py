@@ -14,6 +14,7 @@ FILES = {
     "start": ROOT / "START-CHATGPT-MCP-TUNNEL.ps1",
     "autostart": ROOT / "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
     "doctor": ROOT / "CHATGPT-TUNNEL-DOCTOR.ps1",
+    "mcp_server": ROOT / "evavo_local_image_generator" / "mcp_server.py",
 }
 
 
@@ -139,6 +140,31 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
         body = state_block.group("body")
         self.assertNotIn("CONTROL_PLANE_API_KEY", body)
         self.assertNotRegex(body, r"(?i)api[_-]?key\s*=")
+
+    def test_secure_tunnel_mcp_exposes_same_comfyui_recovery_tools_as_claude(self) -> None:
+        source = text("mcp_server")
+        required = (
+            "last_startup_failure",
+            "diagnose_backend",
+            "repair_backend_dependencies",
+            "ensure_backend",
+            "health_check",
+            "model_inventory",
+            "generate_image",
+            "generate_batch",
+            "read_output_image",
+            "task_history",
+            "task_statistics",
+        )
+        for tool in required:
+            self.assertRegex(source, rf"(?s)@mcp\.tool\([^\n]*\)\s+(?:async\s+)?def\s+{re.escape(tool)}\b")
+
+    def test_repair_tool_is_checkout_requirements_based_and_not_arbitrary_package_install(self) -> None:
+        source = text("mcp_server")
+        self.assertIn("repair_comfyui_dependencies", source)
+        self.assertIn("force_sync=bool(force_sync)", source)
+        self.assertIn("verify_only=bool(verify_only)", source)
+        self.assertNotRegex(source, r"async def repair_backend_dependencies\([^)]*(?:package|module|requirements_path|python_path)")
 
 
 if __name__ == "__main__":
