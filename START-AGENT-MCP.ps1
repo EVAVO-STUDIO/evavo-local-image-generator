@@ -51,7 +51,7 @@ function Test-EvavoMcpListenerIdentity($Listener) {
 
     # Strong identity path 1: the listener is using the Python runtime this
     # checkout would use now.
-    if ($executable -and [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($executable), [IO.Path]::GetFullPath($python))) {
+    if ($executable -and [System.StringComparer]::OrdinalIgnoreCase.Equals([System.IO.Path]::GetFullPath($executable), [System.IO.Path]::GetFullPath($python))) {
         return $true
     }
 
