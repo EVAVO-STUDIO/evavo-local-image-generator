@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parent
 QUALITY_PYTHON = (
     "quality-benchmark.py",
     "quality-report.py",
+    "quality-review-summary.py",
+    "runtime-snapshot.py",
     "lora-sweep.py",
     "kokoro-quality-test.py",
     "kokoro-provider.py",
@@ -25,6 +27,7 @@ QUALITY_POWERSHELL = (
     "RUN-HERO-QUALITY.ps1",
     "RUN-LORA-SWEEP.ps1",
     "RUN-FULL-QUALITY-RELEASE.ps1",
+    "FINALIZE-QUALITY-REVIEW.ps1",
     "START-EVAVO-QUALITY-STACK.ps1",
     "SETUP-COMFYUI-NEXT.ps1",
 )
@@ -141,22 +144,33 @@ class QualityOperationsContractTests(unittest.TestCase):
         self.assertEqual(forwarded["prompt"], payload["prompt"])
         self.assertEqual(forwarded["project_name"], payload["project_name"])
 
-    def test_hero_runner_builds_review_package(self):
+    def test_hero_runner_builds_attested_review_package(self):
         source = (ROOT / "RUN-HERO-QUALITY.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("quality,hero,detail,euler_reference,legacy_768_reference", source)
         self.assertIn("1337,424242", source)
         self.assertIn("test_quality_profiles.py", source)
         self.assertIn("quality-benchmark.py", source)
+        self.assertIn("runtime-snapshot.py", source)
+        self.assertIn("--require-complete", source)
         self.assertIn("quality-report.py", source)
         self.assertIn("human_review.csv", source)
+        self.assertIn("runtime-evidence.json", source)
 
-    def test_lora_runner_keeps_base_and_fixed_strengths(self):
+    def test_lora_runner_keeps_base_fixed_strengths_and_attestation(self):
         source = (ROOT / "RUN-LORA-SWEEP.ps1").read_text(encoding="utf-8-sig")
         self.assertIn('"0,0.5,0.7,0.9"', source)
         self.assertIn("lora-sweep.py", source)
+        self.assertIn("runtime-snapshot.py", source)
+        self.assertIn("--require-complete", source)
         self.assertIn("quality-report.py", source)
         self.assertIn("human_review.csv", source)
         self.assertIn("test_quality_profiles.py", source)
+
+    def test_review_finalizer_never_mutates_defaults(self):
+        source = (ROOT / "FINALIZE-QUALITY-REVIEW.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("quality-review-summary.py", source)
+        self.assertIn("Human quality review is incomplete or invalid", source)
+        self.assertIn("No production default was changed automatically", source)
 
     def test_full_release_runs_system_gate_before_expensive_hero_review(self):
         source = (ROOT / "RUN-FULL-QUALITY-RELEASE.ps1").read_text(encoding="utf-8-sig")
@@ -165,6 +179,7 @@ class QualityOperationsContractTests(unittest.TestCase):
         self.assertLess(production_index, hero_index)
         self.assertIn('"-Mode", "full"', source)
         self.assertIn("Require3DExecution", source)
+        self.assertIn("model/runtime attestation", source)
         self.assertIn("human_review.csv", source)
 
     def test_3d_startup_is_opt_in_and_token_gated(self):
