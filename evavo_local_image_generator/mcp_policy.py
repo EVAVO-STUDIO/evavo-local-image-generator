@@ -1,4 +1,4 @@
-"""Read-only validation for EVAVO MCP filesystem authority configuration.
+"""Read-only validation for EVAVO MCP authority configuration.
 
 This module intentionally performs no repair and creates no directories. It is
 safe for the repository verifier, installers and agent diagnostics to call
@@ -11,12 +11,15 @@ import argparse
 import json
 import os
 import re
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TRUE_VALUES = {"1", "true", "yes", "on"}
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+DEFAULT_COMFYUI_ENDPOINT = "http://127.0.0.1:8188"
 
 
 def _truthy(name: str) -> bool:
@@ -109,11 +112,59 @@ def _creatable_output_root(value: str | Path, *, label: str) -> Path:
     return lexical
 
 
+def _validated_comfyui_endpoint() -> tuple[str, list[str]]:
+    """Return the canonical local ComfyUI endpoint allowed for production MCP.
+
+    Production Claude/ChatGPT MCP is a local image-generation service. Prompt
+    traffic must not silently leave the workstation because an inherited env var
+    points at a remote host. Library/testing code may instantiate backends
+    directly when a different network contract is intentionally required.
+    """
+    warnings: list[str] = []
+    canonical = os.getenv("COMFYUI_ENDPOINT", "").strip()
+    legacy = os.getenv("EVAVO_COMFYUI_ENDPOINT", "").strip()
+    raw = canonical or legacy or DEFAULT_COMFYUI_ENDPOINT
+    if canonical and legacy and canonical.rstrip("/") != legacy.rstrip("/"):
+        warnings.append("EVAVO_COMFYUI_ENDPOINT differs from canonical COMFYUI_ENDPOINT and is ignored")
+    elif not canonical and legacy:
+        warnings.append("legacy EVAVO_COMFYUI_ENDPOINT is accepted as migration input; persist COMFYUI_ENDPOINT instead")
+
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"COMFYUI_ENDPOINT is invalid: {raw}") from exc
+
+    if parsed.scheme != "http":
+        raise ValueError("COMFYUI_ENDPOINT must use http for the local native ComfyUI service")
+    if parsed.username or parsed.password:
+        raise ValueError("COMFYUI_ENDPOINT must not contain credentials")
+    if not parsed.hostname or parsed.hostname.lower() not in _LOOPBACK_HOSTS:
+        raise ValueError("COMFYUI_ENDPOINT must target loopback (127.0.0.1, localhost, or ::1) for production MCP")
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        raise ValueError("COMFYUI_ENDPOINT must contain only scheme, loopback host and optional port")
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("COMFYUI_ENDPOINT port must be between 1 and 65535")
+
+    host = parsed.hostname.lower()
+    rendered_host = f"[{host}]" if host == "::1" else host
+    rendered_port = f":{port}" if port is not None else ""
+    return f"http://{rendered_host}{rendered_port}", warnings
+
+
 def validate_environment() -> dict[str, Any]:
-    """Validate explicitly configured MCP filesystem authority, read-only."""
+    """Validate explicitly configured production MCP authority, read-only."""
     errors: list[str] = []
     warnings: list[str] = []
     details: dict[str, Any] = {}
+
+    try:
+        comfyui_endpoint, endpoint_warnings = _validated_comfyui_endpoint()
+        details["comfyui_endpoint"] = comfyui_endpoint
+        warnings.extend(endpoint_warnings)
+    except ValueError as exc:
+        errors.append(str(exc))
+        details["comfyui_endpoint"] = None
 
     default_output_raw = os.getenv("EVAVO_GENERATION_OUTPUT_DIR", "").strip()
     default_output = default_output_raw or str(REPO_ROOT / ".evavo" / "outputs")
@@ -178,14 +229,14 @@ def validate_environment() -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate EVAVO MCP filesystem policy without mutating the workstation")
+    parser = argparse.ArgumentParser(description="Validate EVAVO MCP production authority without mutating the workstation")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     result = validate_environment()
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        print("EVAVO MCP filesystem policy:", result["status"])
+        print("EVAVO MCP production policy:", result["status"])
         for error in result["errors"]:
             print("ERROR:", error)
         for warning in result["warnings"]:
