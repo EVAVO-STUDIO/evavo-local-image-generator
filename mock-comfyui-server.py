@@ -45,11 +45,20 @@ NATIVE_NODES: Dict[str, Dict[str, Any]] = {
 
 
 class EvavoMockHandler(BaseHTTPRequestHandler):
-    server_version = "EVAVOMockComfyUI/2.2"
+    server_version = "EVAVOMockComfyUI/2.3"
 
     @property
     def native_only(self) -> bool:
         return bool(getattr(self.server, "native_only", False))
+
+    @property
+    def no_checkpoint_loader(self) -> bool:
+        return bool(getattr(self.server, "no_checkpoint_loader", False))
+
+    def _native_nodes(self) -> Dict[str, Dict[str, Any]]:
+        if not self.no_checkpoint_loader:
+            return NATIVE_NODES
+        return {name: value for name, value in NATIVE_NODES.items() if name != "CheckpointLoaderSimple"}
 
     def log_message(self, fmt: str, *args: Any) -> None:
         print(f"[{datetime.now().astimezone().isoformat()}] {self.client_address[0]} {fmt % args}")
@@ -96,11 +105,11 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"system": {"comfyui_version": "test-native-1.0", "python_version": "test"}, "devices": [{"name": "EVAVO Test GPU", "vram_total": 8589934592, "vram_free": 6442450944}]})
             return
         if path == "/object_info":
-            self._send_json(200, NATIVE_NODES)
+            self._send_json(200, self._native_nodes())
             return
         if path.startswith("/object_info/"):
             node_name = unquote(path[len("/object_info/"):])
-            node = NATIVE_NODES.get(node_name)
+            node = self._native_nodes().get(node_name)
             if node is None:
                 self._send_json(404, {"error": "unknown_node", "node": node_name})
             else:
@@ -162,6 +171,7 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8188)
     parser.add_argument("--native-only", action="store_true", help="Expose only native ComfyUI routes")
+    parser.add_argument("--no-checkpoint-loader", action="store_true", help="Simulate a native workflow environment without CheckpointLoaderSimple")
     args = parser.parse_args()
     if args.host not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("mock service is restricted to loopback; use 127.0.0.1")
@@ -169,7 +179,8 @@ def main() -> int:
         parser.error("port must be between 1 and 65535")
     server = ThreadingHTTPServer((args.host, args.port), EvavoMockHandler)
     server.native_only = args.native_only  # type: ignore[attr-defined]
-    print(f"EVAVO ComfyUI simulator ready at http://{args.host}:{args.port} native_only={args.native_only}")
+    server.no_checkpoint_loader = args.no_checkpoint_loader  # type: ignore[attr-defined]
+    print(f"EVAVO ComfyUI simulator ready at http://{args.host}:{args.port} native_only={args.native_only} no_checkpoint_loader={args.no_checkpoint_loader}")
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
