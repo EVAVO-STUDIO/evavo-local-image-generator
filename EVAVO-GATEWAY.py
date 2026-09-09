@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from evavo_operations import TaskTracker, _interprocess_lock
+from evavo_operations import TaskTracker, interprocess_lock
 from evavo_local_image_generator.backends import ComfyUIBackend
 from evavo_local_image_generator.comfyui_runtime import ensure_comfyui, native_health
 
@@ -163,7 +163,7 @@ class TaskStore:
         return result
 
     def _load(self) -> None:
-        with _interprocess_lock(self.lock_path):
+        with interprocess_lock(self.lock_path):
             self._tasks = self._read_unlocked()
 
     @staticmethod
@@ -199,7 +199,7 @@ class TaskStore:
             raise
 
     def _create_sync(self, prefix: str, task: Dict[str, Any]) -> Dict[str, Any]:
-        with _interprocess_lock(self.lock_path):
+        with interprocess_lock(self.lock_path):
             tasks = self._read_unlocked()
             task_id = self._next_id(prefix, tasks)
             created = dict(task)
@@ -215,7 +215,7 @@ class TaskStore:
 
     def _put_sync(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(task["task_id"])
-        with _interprocess_lock(self.lock_path):
+        with interprocess_lock(self.lock_path):
             tasks = self._read_unlocked()
             if task_id in tasks:
                 raise RuntimeError(f"GATEWAY_TASK_ID_COLLISION:{task_id}")
@@ -229,7 +229,7 @@ class TaskStore:
             return await asyncio.to_thread(self._put_sync, dict(task))
 
     def _update_sync(self, task_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
-        with _interprocess_lock(self.lock_path):
+        with interprocess_lock(self.lock_path):
             tasks = self._read_unlocked()
             task = tasks.get(task_id)
             if task is None:
@@ -245,7 +245,7 @@ class TaskStore:
             return await asyncio.to_thread(self._update_sync, task_id, dict(fields))
 
     def _get_sync(self, task_id: str) -> Optional[Dict[str, Any]]:
-        with _interprocess_lock(self.lock_path):
+        with interprocess_lock(self.lock_path):
             tasks = self._read_unlocked()
             self._tasks = tasks
             task = tasks.get(task_id)
@@ -256,7 +256,7 @@ class TaskStore:
             return await asyncio.to_thread(self._get_sync, task_id)
 
     def _list_sync(self, limit: int) -> list[Dict[str, Any]]:
-        with _interprocess_lock(self.lock_path):
+        with interprocess_lock(self.lock_path):
             tasks = self._read_unlocked()
             self._tasks = tasks
             values = list(tasks.values())[-max(1, min(limit, 1000)) :]
@@ -267,7 +267,7 @@ class TaskStore:
             return await asyncio.to_thread(self._list_sync, limit)
 
     def _recover_interrupted_sync(self) -> None:
-        with _interprocess_lock(self.lock_path):
+        with interprocess_lock(self.lock_path):
             tasks = self._read_unlocked()
             changed = False
             for task in tasks.values():
