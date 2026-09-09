@@ -79,13 +79,18 @@ def _agent_tests() -> tuple[bool, str]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     if result.returncode == 0:
-        return True, "MCP stdio + Streamable HTTP generation/history/image-content tests passed"
+        return True, "MCP stdio + Streamable HTTP generation/history/preflight/image-content tests passed"
     detail = (result.stderr or result.stdout).strip()[-1600:]
     return False, detail or f"exit {result.returncode}"
 
 
 def _checkpoint_source_configured() -> bool:
     return bool(os.getenv("EVAVO_CHECKPOINT_FILE") or os.getenv("EVAVO_CHECKPOINT_URL"))
+
+
+def _custom_workflow() -> Optional[str]:
+    raw = os.getenv("EVAVO_COMFYUI_WORKFLOW")
+    return raw.strip() if raw and raw.strip() else None
 
 
 def _shared_model_configuration() -> tuple[bool, bool, str]:
@@ -160,6 +165,54 @@ def _inventory_detail(inventory: Dict[str, Any]) -> str:
     return ", ".join(parts) if parts else "no loader categories reported"
 
 
+def _decode_preflight_failure(exc: RuntimeError) -> Dict[str, Any]:
+    message = str(exc)
+    prefix = "COMFYUI_WORKFLOW_PREFLIGHT_FAILED:"
+    if not message.startswith(prefix):
+        return {"message": message}
+    try:
+        payload = json.loads(message[len(prefix):])
+    except json.JSONDecodeError:
+        return {"message": message[len(prefix):]}
+    return payload if isinstance(payload, dict) else {"message": str(payload)}
+
+
+def _preflight_needs_checkpoint(details: Dict[str, Any]) -> bool:
+    invalid = details.get("invalid_choices")
+    if not isinstance(invalid, list):
+        return False
+    for item in invalid:
+        if not isinstance(item, dict):
+            continue
+        if item.get("class_type") == "CheckpointLoaderSimple" and item.get("input") == "ckpt_name":
+            return True
+    return False
+
+
+def _custom_workflow_preflight(backend: ComfyUIBackend, workflow_path: str) -> tuple[bool, str, Dict[str, Any]]:
+    path = str(Path(workflow_path).expanduser().resolve())
+    try:
+        workflow = backend.build_txt2img_workflow(
+            "EVAVO doctor workflow preflight",
+            negative_prompt="",
+            width=1024,
+            height=1024,
+            steps=4,
+            cfg_scale=7.0,
+            seed=1,
+            workflow_path=path,
+            filename_prefix="EVAVO/doctor-preflight",
+        )
+        result = backend.preflight_workflow(workflow)
+    except RuntimeError as exc:
+        details = _decode_preflight_failure(exc)
+        return False, f"{path}: {str(exc)}", details
+    except (OSError, ValueError) as exc:
+        return False, f"{path}: {exc}", {"message": str(exc)}
+    classes = result.get("node_classes") if isinstance(result, dict) else []
+    return True, f"compatible: {path}; nodes={result.get('node_count', 0)}; classes={', '.join(classes or [])}", result
+
+
 def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bool) -> Dict[str, Any]:
     checks: List[Dict[str, Any]] = []
 
@@ -172,6 +225,15 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
     add("mcp_sdk", mcp_spec is not None, str(mcp_spec.origin) if mcp_spec else 'missing; install mcp[cli]>=2,<3')
 
     renderer_severity = "error" if repair else "warning"
+    workflow_path = _custom_workflow()
+    custom_workflow_configured = workflow_path is not None
+    add(
+        "generation_contract",
+        True,
+        f"custom workflow: {Path(workflow_path).expanduser()}" if workflow_path else "built-in CheckpointLoaderSimple txt2img workflow",
+        severity="info",
+    )
+
     shared_configured, shared_ok, shared_detail = _shared_model_configuration()
     add("shared_model_roots", shared_ok, shared_detail, severity=renderer_severity if shared_configured else "info")
 
@@ -179,7 +241,12 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
     provision_attempted = False
     if repair and provision:
         missing_runtime = not installs
-        configured_model_missing = bool(installs) and _checkpoint_source_configured() and not _filesystem_checkpoints(installs)
+        configured_model_missing = (
+            not custom_workflow_configured
+            and bool(installs)
+            and _checkpoint_source_configured()
+            and not _filesystem_checkpoints(installs)
+        )
         if missing_runtime:
             provision_attempted = True
             provision_ok, provision_detail = _provision_comfyui()
@@ -219,18 +286,45 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
 
     if health:
         backend = ComfyUIBackend(endpoint)
+
+        if workflow_path:
+            workflow_ok, workflow_detail, workflow_details = _custom_workflow_preflight(backend, workflow_path)
+            repaired_workflow = False
+            if (
+                not workflow_ok
+                and repair
+                and provision
+                and installs
+                and _checkpoint_source_configured()
+                and _preflight_needs_checkpoint(workflow_details)
+            ):
+                target = Path(installs[0].root)
+                provision_ok, provision_detail = _provision_comfyui(target=target, checkpoint_only=True)
+                add("workflow_checkpoint_repair", provision_ok, provision_detail, severity="error", repaired=provision_ok)
+                if provision_ok:
+                    workflow_ok, workflow_detail, workflow_details = _custom_workflow_preflight(backend, workflow_path)
+                    repaired_workflow = workflow_ok
+            add("custom_workflow", workflow_ok, workflow_detail, severity=renderer_severity, repaired=repaired_workflow)
+
         try:
             checkpoints = backend.checkpoints()
-            checkpoint_detail = f"{len(checkpoints)} available"
-            if not checkpoints:
-                checkpoint_detail = "none reported"
-                if shared_configured:
-                    checkpoint_detail += "; shared roots are configured, so restart ComfyUI through EVAVO if it was started externally without the EVAVO extra-model config"
-                elif repair and not _checkpoint_source_configured():
-                    checkpoint_detail += "; configure EVAVO_CHECKPOINT_FILE, EVAVO_CHECKPOINT_URL, or EVAVO_SHARED_MODEL_ROOTS"
-            add("checkpoints", bool(checkpoints), checkpoint_detail, severity="error" if repair else "warning")
+            if custom_workflow_configured:
+                checkpoint_detail = f"{len(checkpoints)} available; non-blocking because custom workflow readiness is checked separately"
+                add("checkpoints", True, checkpoint_detail, severity="info")
+            else:
+                checkpoint_detail = f"{len(checkpoints)} available"
+                if not checkpoints:
+                    checkpoint_detail = "none reported"
+                    if shared_configured:
+                        checkpoint_detail += "; shared roots are configured, so restart ComfyUI through EVAVO if it was started externally without the EVAVO extra-model config"
+                    elif repair and not _checkpoint_source_configured():
+                        checkpoint_detail += "; configure EVAVO_CHECKPOINT_FILE, EVAVO_CHECKPOINT_URL, or EVAVO_SHARED_MODEL_ROOTS"
+                add("checkpoints", bool(checkpoints), checkpoint_detail, severity="error" if repair else "warning")
         except RuntimeError as exc:
-            add("checkpoints", False, str(exc), severity="error" if repair else "warning")
+            if custom_workflow_configured:
+                add("checkpoints", True, f"not available ({exc}); non-blocking custom workflow contract", severity="info")
+            else:
+                add("checkpoints", False, str(exc), severity="error" if repair else "warning")
 
         try:
             inventory = backend.model_inventory(50)
@@ -240,7 +334,14 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
         except RuntimeError as exc:
             add("model_inventory", False, str(exc), severity="warning")
     else:
-        add("checkpoints", False, "not checked because native ComfyUI is offline", severity=renderer_severity)
+        if workflow_path:
+            add("custom_workflow", False, "not checked because native ComfyUI is offline", severity=renderer_severity)
+        add(
+            "checkpoints",
+            custom_workflow_configured,
+            "not checked because native ComfyUI is offline" if not custom_workflow_configured else "not checked; custom workflow is the active contract",
+            severity=renderer_severity if not custom_workflow_configured else "info",
+        )
         add("model_inventory", False, "not checked because native ComfyUI is offline", severity="warning")
 
     writable, output_detail = _output_writable()
@@ -272,6 +373,8 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
         "repair_requested": repair,
         "provision_requested": provision,
         "endpoint": endpoint,
+        "generation_contract": "custom_workflow" if custom_workflow_configured else "built_in_checkpoint",
+        "workflow_path": workflow_path,
         "mcp_http": f"http://{mcp_host}:{mcp_port}/mcp",
         "checks": checks,
     }
@@ -279,8 +382,8 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="EVAVO Claude/ChatGPT agent integration doctor")
-    parser.add_argument("--repair", action="store_true", help="Start native ComfyUI and require real-renderer/checkpoint readiness")
-    parser.add_argument("--provision", action="store_true", help="When repairing, provision missing official ComfyUI and any explicitly configured checkpoint source")
+    parser.add_argument("--repair", action="store_true", help="Start native ComfyUI and require the active built-in/custom generation contract to be ready")
+    parser.add_argument("--provision", action="store_true", help="When repairing, provision missing official ComfyUI and owner-configured checkpoint sources when the active workflow requires them")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--mcp-host", default=DEFAULT_MCP_HOST)
     parser.add_argument("--mcp-port", type=int, default=DEFAULT_MCP_PORT)
