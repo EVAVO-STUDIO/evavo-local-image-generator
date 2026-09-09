@@ -1,0 +1,174 @@
+param(
+    [string]$ComfyRoot = "C:\AI\ComfyUI",
+    [string]$KokoroRoot = "C:\AI\Kokoro-FastAPI",
+    [string]$AtmosphereRoot = "C:\GitRepos\atmosphere-studio",
+    [switch]$UseNextComfy,
+    [ValidateSet("dev", "start")]
+    [string]$AtmosphereMode = "dev",
+    [string]$OutputRoot = "C:\AI\evavo-generation-results"
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+if ($UseNextComfy) {
+    $ComfyRoot = "C:\AI\ComfyUI-next"
+    $ComfyPort = 8189
+} else {
+    $ComfyPort = 8188
+}
+
+$ComfyEndpoint = "http://127.0.0.1:$ComfyPort"
+$KokoroEndpoint = "http://127.0.0.1:8880"
+$AtmosphereEndpoint = "http://127.0.0.1:3000"
+$Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$LogRoot = Join-Path $OutputRoot "service-logs\$Stamp"
+New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
+
+function Test-Endpoint {
+    param([string]$Url)
+    try {
+        $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 4 -ErrorAction Stop
+        return ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500)
+    } catch {
+        if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -lt 500) {
+            return $true
+        }
+        return $false
+    }
+}
+
+function Wait-Endpoint {
+    param([string[]]$Urls, [int]$TimeoutSeconds)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        foreach ($url in $Urls) {
+            if (Test-Endpoint $url) { return $url }
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+    throw "Service did not become healthy within $TimeoutSeconds seconds. Tried: $($Urls -join ', ')"
+}
+
+function Find-ComfyPython {
+    param([string]$Root)
+    $candidates = @(
+        (Join-Path $Root ".venv\Scripts\python.exe"),
+        (Join-Path $Root "venv\Scripts\python.exe"),
+        (Join-Path $Root "python_embeded\python.exe"),
+        (Join-Path $Root "python_embedded\python.exe")
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) { return $candidate }
+    }
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if ($python) { return $python.Source }
+    throw "Could not find the Python runtime for ComfyUI under $Root"
+}
+
+function Start-LoggedProcess {
+    param(
+        [string]$Name,
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory
+    )
+    $safeName = $Name -replace '[^A-Za-z0-9._-]', '-'
+    $stdout = Join-Path $LogRoot "$safeName.out.log"
+    $stderr = Join-Path $LogRoot "$safeName.err.log"
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -WorkingDirectory $WorkingDirectory -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru -WindowStyle Hidden
+    Write-Host "[START] $Name PID $($process.Id)"
+    return $process
+}
+
+Write-Host "EVAVO QUALITY STACK" -ForegroundColor Cyan
+Write-Host "Logs: $LogRoot"
+Write-Host ""
+
+# ComfyUI
+if (Test-Endpoint "$ComfyEndpoint/system_stats") {
+    Write-Host "[OK] ComfyUI already healthy at $ComfyEndpoint" -ForegroundColor Green
+} else {
+    if (-not (Test-Path (Join-Path $ComfyRoot "main.py"))) {
+        throw "ComfyUI main.py not found at $ComfyRoot"
+    }
+    if ($UseNextComfy -and (Test-Path (Join-Path $ComfyRoot "START-EVAVO-COMFYUI-NEXT.ps1"))) {
+        Start-LoggedProcess "comfyui-next" "powershell.exe" @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ComfyRoot "START-EVAVO-COMFYUI-NEXT.ps1")
+        ) $ComfyRoot | Out-Null
+    } else {
+        $python = Find-ComfyPython $ComfyRoot
+        $arguments = @(
+            (Join-Path $ComfyRoot "main.py"),
+            "--listen", "127.0.0.1",
+            "--port", "$ComfyPort",
+            "--preview-method", "none",
+            "--reserve-vram", "1"
+        )
+        Start-LoggedProcess "comfyui" $python $arguments $ComfyRoot | Out-Null
+    }
+    Wait-Endpoint @("$ComfyEndpoint/system_stats", "$ComfyEndpoint/queue", $ComfyEndpoint) 300 | Out-Null
+    Write-Host "[OK] ComfyUI healthy at $ComfyEndpoint" -ForegroundColor Green
+}
+
+# Kokoro-FastAPI
+if (Test-Endpoint "$KokoroEndpoint/v1/audio/voices") {
+    Write-Host "[OK] Kokoro already healthy at $KokoroEndpoint" -ForegroundColor Green
+} else {
+    $kokoroStarter = Join-Path $KokoroRoot "start-gpu.ps1"
+    if (-not (Test-Path $kokoroStarter)) {
+        throw "Kokoro GPU starter not found: $kokoroStarter"
+    }
+    Start-LoggedProcess "kokoro" "powershell.exe" @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $kokoroStarter
+    ) $KokoroRoot | Out-Null
+    Wait-Endpoint @("$KokoroEndpoint/v1/audio/voices", "$KokoroEndpoint/docs") 300 | Out-Null
+    Write-Host "[OK] Kokoro healthy at $KokoroEndpoint" -ForegroundColor Green
+}
+
+# Atmosphere Studio
+if (Test-Endpoint $AtmosphereEndpoint) {
+    Write-Host "[OK] Atmosphere Studio already healthy at $AtmosphereEndpoint" -ForegroundColor Green
+} else {
+    if (-not (Test-Path (Join-Path $AtmosphereRoot "package.json"))) {
+        throw "Atmosphere Studio package.json not found at $AtmosphereRoot"
+    }
+    $npm = if (Get-Command npm.cmd -ErrorAction SilentlyContinue) { "npm.cmd" } else { "npm" }
+    if ($AtmosphereMode -eq "start" -and -not (Test-Path (Join-Path $AtmosphereRoot ".next"))) {
+        Write-Host "[INFO] Production Atmosphere build is missing; running npm run build first."
+        Push-Location $AtmosphereRoot
+        try {
+            & $npm run build
+            if ($LASTEXITCODE -ne 0) { throw "Atmosphere npm run build failed" }
+        } finally {
+            Pop-Location
+        }
+    }
+    Start-LoggedProcess "atmosphere" $npm @("run", $AtmosphereMode) $AtmosphereRoot | Out-Null
+    Wait-Endpoint @($AtmosphereEndpoint) 180 | Out-Null
+    Write-Host "[OK] Atmosphere Studio healthy at $AtmosphereEndpoint" -ForegroundColor Green
+}
+
+$summary = [ordered]@{
+    schemaVersion = 1
+    startedAt = (Get-Date).ToString("o")
+    useNextComfy = [bool]$UseNextComfy
+    comfyRoot = $ComfyRoot
+    comfyEndpoint = $ComfyEndpoint
+    kokoroRoot = $KokoroRoot
+    kokoroEndpoint = $KokoroEndpoint
+    atmosphereRoot = $AtmosphereRoot
+    atmosphereEndpoint = $AtmosphereEndpoint
+    atmosphereMode = $AtmosphereMode
+    logRoot = $LogRoot
+}
+$summary | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $LogRoot "stack.json") -Encoding UTF8
+
+Write-Host ""
+Write-Host "EVAVO quality stack is healthy." -ForegroundColor Green
+Write-Host "Run the quality gate from the generator repo:"
+if ($UseNextComfy) {
+    Write-Host "  .\RUN-PRODUCTION-QUALITY.ps1 -Mode standard -ComfyEndpoint http://127.0.0.1:8189"
+} else {
+    Write-Host "  .\RUN-PRODUCTION-QUALITY.ps1 -Mode standard"
+}
