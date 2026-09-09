@@ -7,8 +7,11 @@ legacy ComfyUI adapter, while making SDXL-native production settings canonical.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
+import secrets
 from dataclasses import replace
 from typing import Any, Dict, Optional
 
@@ -84,6 +87,35 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             raise ValueError(f"{name} must be finite and between -4 and 4")
         return number
 
+    @staticmethod
+    def _workflow_sha256(workflow: Dict[str, Any]) -> str:
+        canonical = json.dumps(
+            workflow,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    @staticmethod
+    def _workflow_seed(workflow: Dict[str, Any]) -> Optional[int]:
+        ordered = []
+        if "5" in workflow:
+            ordered.append(workflow["5"])
+        ordered.extend(node for key, node in workflow.items() if key != "5")
+        for node in ordered:
+            if not isinstance(node, dict) or node.get("class_type") != "KSampler":
+                continue
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict) or "seed" not in inputs:
+                continue
+            try:
+                return int(inputs["seed"])
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def _resolve_lora(
         self,
         lora_name: Optional[str],
@@ -158,9 +190,6 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
 
     @staticmethod
     def _apply_primary_sampling(workflow: Dict[str, Any], settings: ImageQualitySettings) -> None:
-        # Before a hero pass is appended, the canonical graph has only one
-        # KSampler. Custom workflows are left alone unless an explicit override
-        # was requested by the caller.
         for node in workflow.values():
             if not isinstance(node, dict) or node.get("class_type") != "KSampler":
                 continue
@@ -233,12 +262,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
 
     @staticmethod
     def _apply_lora(workflow: Dict[str, Any], lora: Dict[str, Any]) -> None:
-        """Insert one isolated LoRA into the canonical built-in graph.
-
-        The LoRA is loaded after the checkpoint and before both CLIP conditioning
-        and diffusion passes. This ensures the same LoRA influences model and
-        text conditioning consistently, including the optional hero pass.
-        """
+        """Insert one isolated LoRA into the canonical built-in graph."""
 
         required = {"1", "2", "3", "5"}
         if not required.issubset(workflow):
@@ -404,6 +428,11 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
 
+        # Choose the random seed here, rather than allowing the base workflow
+        # builder to hide it from the caller. The statistical behavior is the
+        # same (63 random bits), but the queue receipt is now reproducible.
+        effective_seed = int(seed) if seed is not None else secrets.randbits(63)
+
         settings = resolve_quality_settings(
             quality_profile=quality_profile,
             width=width,
@@ -432,7 +461,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             height=height,
             steps=steps,
             cfg_scale=cfg_scale,
-            seed=seed,
+            seed=effective_seed,
             checkpoint=checkpoint,
             filename_prefix=f"EVAVO/{project_name}",
             workflow_path=workflow_path,
@@ -457,6 +486,8 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         ) or settings.second_pass_enabled or lora is not None:
             self.preflight_workflow(workflow)
 
+        submitted_seed = self._workflow_seed(workflow)
+        workflow_sha256 = self._workflow_sha256(workflow)
         response = self._request("/prompt", method="POST", payload={"prompt": workflow}, timeout=30.0)
         prompt_id = response.get("prompt_id")
         if not isinstance(prompt_id, str) or not prompt_id:
@@ -487,6 +518,9 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             "project_name": project_name,
             "checkpoint": checkpoint or os.getenv("EVAVO_COMFYUI_CHECKPOINT") or self._workflow_checkpoint(workflow),
             "backend_mode": "native-comfyui",
+            "seed": submitted_seed if submitted_seed is not None else effective_seed,
+            "workflow_sha256": workflow_sha256,
+            "workflow_node_count": len(workflow),
             "quality_profile": settings.name if quality_applied else "custom_workflow",
             "quality": settings.as_dict() if quality_applied else None,
             "quality_applied": quality_applied,
