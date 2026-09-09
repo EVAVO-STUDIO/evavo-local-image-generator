@@ -61,6 +61,59 @@ class BackendAutomationTests(unittest.TestCase):
             self.assertEqual(rendered["1"]["inputs"]["text"], "custom prompt")
             self.assertIsInstance(rendered["1"]["inputs"]["seed"], int)
 
+    def test_custom_workflow_supports_uppercase_and_lowercase_placeholders(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with tempfile.TemporaryDirectory() as directory:
+            workflow = Path(directory) / "aliases.json"
+            workflow.write_text(
+                json.dumps(
+                    {
+                        "1": {
+                            "class_type": "CustomNode",
+                            "inputs": {
+                                "upper_prompt": "{{PROMPT}}",
+                                "lower_prompt": "{{prompt}}",
+                                "negative": "{{NEGATIVE_PROMPT}}",
+                                "width": "{{WIDTH}}",
+                                "height": "{{height}}",
+                                "steps": "{{STEPS}}",
+                                "cfg": "{{CFG}}",
+                                "cfg_scale": "{{CFG_SCALE}}",
+                                "seed": "{{SEED}}",
+                                "checkpoint": "{{CHECKPOINT}}",
+                                "prefix": "{{FILENAME_PREFIX}}",
+                            },
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(backend, "checkpoints", return_value=["test.safetensors"]):
+                rendered = backend.build_txt2img_workflow(
+                    "alias prompt",
+                    negative_prompt="alias negative",
+                    width=768,
+                    height=512,
+                    steps=17,
+                    cfg_scale=5.5,
+                    seed=12345,
+                    checkpoint="test.safetensors",
+                    filename_prefix="EVAVO/aliases",
+                    workflow_path=str(workflow),
+                )
+            inputs = rendered["1"]["inputs"]
+            self.assertEqual(inputs["upper_prompt"], "alias prompt")
+            self.assertEqual(inputs["lower_prompt"], "alias prompt")
+            self.assertEqual(inputs["negative"], "alias negative")
+            self.assertEqual(inputs["width"], 768)
+            self.assertEqual(inputs["height"], 512)
+            self.assertEqual(inputs["steps"], 17)
+            self.assertEqual(inputs["cfg"], 5.5)
+            self.assertEqual(inputs["cfg_scale"], 5.5)
+            self.assertEqual(inputs["seed"], 12345)
+            self.assertEqual(inputs["checkpoint"], "test.safetensors")
+            self.assertEqual(inputs["prefix"], "EVAVO/aliases")
+
     def test_output_image_rejects_unrecorded_file_outside_output_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
