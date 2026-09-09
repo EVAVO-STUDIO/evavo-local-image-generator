@@ -1,5 +1,6 @@
 # EVAVO Local Image Generator - update, install, validate, configure agents and verify
-# Safe by default: refuses to overwrite local Git changes and only fast-forwards main.
+# Safe by default: refuses to overwrite local Git changes, only fast-forwards
+# verified origin/main, and keeps EVAVO Python dependencies inside .venv.
 
 param(
     [switch]$SkipDependencies,
@@ -26,7 +27,6 @@ function Test-Truthy([string]$Value) {
 if ($McpPort -lt 1 -or $McpPort -gt 65535) {
     Fail "MCP port must be between 1 and 65535." 2
 }
-
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Fail "Git is not installed or not available on PATH." 2
 }
@@ -44,11 +44,8 @@ $branch = (git branch --show-current).Trim()
 if ($LASTEXITCODE -ne 0 -or $branch -ne "main") {
     Fail "Repository must be on branch main. Current branch: $branch" 2
 }
-
 $dirty = git status --porcelain
-if ($LASTEXITCODE -ne 0) {
-    Fail "Unable to inspect Git working tree." 2
-}
+if ($LASTEXITCODE -ne 0) { Fail "Unable to inspect Git working tree." 2 }
 if ($dirty) {
     Write-Host "Local changes detected:" -ForegroundColor Yellow
     $dirty | ForEach-Object { Write-Host "  $_" }
@@ -57,45 +54,62 @@ if ($dirty) {
 
 Write-Host "Updating EVAVO from verified origin/main..." -ForegroundColor Cyan
 git pull --ff-only origin main
-if ($LASTEXITCODE -ne 0) {
-    Fail "git pull --ff-only origin main failed." 3
-}
+if ($LASTEXITCODE -ne 0) { Fail "git pull --ff-only origin main failed." 3 }
 
-$python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path $python)) {
+# Resolve a Python 3.10+ interpreter for the stdlib-only structural preflight and,
+# when necessary, creation of the repository-local virtual environment. An
+# existing EVAVO venv can bootstrap itself even if `python` is not on PATH.
+$venvPython = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+$venvCreated = $false
+if (Test-Path $venvPython) {
+    $bootstrapPython = (Resolve-Path $venvPython).Path
+}
+else {
     $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $pythonCommand) {
-        Fail "Python 3.10+ was not found." 2
-    }
-    $python = $pythonCommand.Source
+    if (-not $pythonCommand) { Fail "Python 3.10+ was not found and .venv does not exist." 2 }
+    $bootstrapPython = $pythonCommand.Source
 }
 
-Write-Host "Using Python: $python" -ForegroundColor Cyan
-& $python --version
+& $bootstrapPython -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 2)"
+if ($LASTEXITCODE -ne 0) { Fail "Python 3.10+ is required to bootstrap EVAVO." 2 }
+Write-Host "Bootstrap Python: $bootstrapPython" -ForegroundColor Cyan
+
+# Verify source/PowerShell/compatibility structure before pip is allowed to
+# mutate even the isolated venv. This verifier path is stdlib-only.
+Write-Host "Running pre-dependency structural verification..." -ForegroundColor Cyan
+& $bootstrapPython (Join-Path $PSScriptRoot "verify-evavo.py") --require-powershell
 if ($LASTEXITCODE -ne 0) {
-    Fail "Python failed to run." 2
+    Fail "Structural verification failed before dependency installation; no pip mutation was attempted." 3
 }
 
-if (-not $SkipDependencies) {
-    Write-Host "Installing/updating EVAVO dependencies..." -ForegroundColor Cyan
-    & $python -m pip install -r (Join-Path $PSScriptRoot "requirements.txt")
-    if ($LASTEXITCODE -ne 0) {
-        Fail "Dependency installation failed." 3
+if (-not (Test-Path $venvPython)) {
+    Write-Host "Creating isolated EVAVO virtual environment at .venv..." -ForegroundColor Cyan
+    & $bootstrapPython -m venv (Join-Path $PSScriptRoot ".venv")
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPython)) {
+        Fail "Unable to create the repository-local .venv." 3
     }
+    $venvCreated = $true
+}
+$python = (Resolve-Path $venvPython).Path
+Write-Host "Using isolated EVAVO Python: $python" -ForegroundColor Cyan
+& $python --version
+if ($LASTEXITCODE -ne 0) { Fail "EVAVO .venv Python failed to run." 2 }
+
+if ($SkipDependencies -and $venvCreated) {
+    Fail "-SkipDependencies cannot be used when .venv had to be created; install the repository dependencies first." 3
+}
+if (-not $SkipDependencies) {
+    Write-Host "Installing/updating EVAVO dependencies inside .venv..." -ForegroundColor Cyan
+    & $python -m pip install -r (Join-Path $PSScriptRoot "requirements.txt")
+    if ($LASTEXITCODE -ne 0) { Fail "Dependency installation inside .venv failed." 3 }
 }
 
-# One authoritative, read-only validation surface owns the test inventory. This
-# prevents the updater, bootstrap and docs from silently drifting to different
-# subsets of the repository safety/integration suites.
 Write-Host "Running authoritative full repository verification..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "evavo.py") verify --full --require-powershell
 if ($LASTEXITCODE -ne 0) {
     Fail "Full repository verification failed. No agent configuration has been changed." 3
 }
 
-# Prepare the real renderer before strict bootstrap. A healthy externally
-# started ComfyUI is reused even when its filesystem install is not discoverable.
-# Provisioning is attempted only when requested and actually needed.
 Write-Host "Preparing and validating the native ComfyUI generation contract..." -ForegroundColor Cyan
 $backendDoctorArgs = @(
     (Join-Path $PSScriptRoot "agent-doctor.py"),
@@ -104,48 +118,44 @@ $backendDoctorArgs = @(
     "--mcp-port",
     "$McpPort"
 )
-if (-not $SkipComfyUIProvision) {
-    $backendDoctorArgs += "--provision"
-}
+if (-not $SkipComfyUIProvision) { $backendDoctorArgs += "--provision" }
 & $python @backendDoctorArgs
 $backendDoctorCode = $LASTEXITCODE
 $dependencyRecoveryStatus = "not_needed"
 
-# Strict doctor can expose a structured native ComfyUI missing_dependency
-# failure. Make exactly one evidence-gated recovery attempt using the same
-# constrained bridge exposed to MCP, then prove recovery by rerunning doctor.
-# This command cannot force-sync, invent package names/URLs, or repair custom
-# node dependencies as core ComfyUI.
+# Make at most one evidence-gated core dependency recovery attempt, then prove
+# the real generation contract again. No force sync, package guessing or
+# custom-node-as-core mutation is admitted here.
 if ($backendDoctorCode -ne 0 -and -not $SkipComfyUIDependencyRepair) {
     Write-Host "Strict doctor failed; checking for evidence-gated ComfyUI dependency recovery..." -ForegroundColor Yellow
     & $python (Join-Path $PSScriptRoot "recover-comfyui.py") --json
     $recoveryCode = $LASTEXITCODE
     if ($recoveryCode -eq 0) {
         $dependencyRecoveryStatus = "repaired"
-        Write-Host "Dependency recovery returned success; rerunning strict agent doctor to prove the real generation contract..." -ForegroundColor Cyan
+        Write-Host "Dependency recovery returned success; rerunning strict agent doctor..." -ForegroundColor Cyan
         & $python @backendDoctorArgs
         $backendDoctorCode = $LASTEXITCODE
     }
     else {
         $dependencyRecoveryStatus = "not_admitted_or_failed"
-        Write-Host "No admissible automatic core dependency repair completed. Strict doctor result remains authoritative." -ForegroundColor Yellow
+        Write-Host "No admissible automatic core dependency repair completed. Strict doctor remains authoritative." -ForegroundColor Yellow
     }
 }
-elseif ($backendDoctorCode -ne 0 -and $SkipComfyUIDependencyRepair) {
+elif ($backendDoctorCode -ne 0 -and $SkipComfyUIDependencyRepair) {
     $dependencyRecoveryStatus = "disabled"
 }
 
 if ($backendDoctorCode -ne 0) {
     if ($SkipComfyUIProvision -and $SkipComfyUIDependencyRepair) {
-        Fail "Native ComfyUI readiness failed while both provisioning and dependency repair were disabled. Start/configure the real renderer and dependencies manually, then rerun." 3
+        Fail "Native ComfyUI readiness failed while both provisioning and dependency repair were disabled." 3
     }
     if ($SkipComfyUIProvision) {
-        Fail "Native ComfyUI generation readiness failed while provisioning was disabled. Evidence-gated dependency recovery did not fully restore the contract." 3
+        Fail "Native ComfyUI readiness failed while provisioning was disabled; evidence-gated recovery did not restore the contract." 3
     }
     if ($SkipComfyUIDependencyRepair) {
-        Fail "Native ComfyUI generation readiness failed while evidence-gated dependency repair was disabled. Provisioning/model repair alone did not restore the contract." 3
+        Fail "Native ComfyUI readiness failed while evidence-gated dependency repair was disabled." 3
     }
-    Fail "Native ComfyUI provisioning/dependency repair or active generation-contract validation failed. Review structured startup evidence and any owner-controlled model/workflow requirements." 3
+    Fail "Native ComfyUI provisioning/dependency repair or active generation-contract validation failed." 3
 }
 
 Write-Host "Bootstrapping the verified native generation backend..." -ForegroundColor Cyan
@@ -155,34 +165,25 @@ if ($code -ne 0) {
     Fail "EVAVO strict native bootstrap failed with exit code $code. Review doctor output and .evavo logs." $code
 }
 
-# A healthy port + compatible workflow is still not execution proof. Prove the
-# real renderer before changing Claude/Startup configuration so a broken GPU or
-# runtime cannot leave freshly-written agent profiles pointing at an unproven
-# generation stack.
+# A healthy port + compatible workflow is not execution proof. Prove the real
+# renderer before persistent Claude/Startup configuration is changed.
 Write-Host "Running real native generation smoke proof before agent configuration..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "real-generation-smoke.py") --json
 if ($LASTEXITCODE -ne 0) {
-    Fail "Real native generation smoke proof failed. Agent configuration was not changed; setup will not report success until the active workflow actually renders a validated image." 3
+    Fail "Real native generation smoke proof failed. Agent configuration was not changed." 3
 }
 
 if (-not $SkipAgentConfiguration) {
     Write-Host "Installing/updating Claude Desktop stdio MCP configuration..." -ForegroundColor Cyan
     & (Join-Path $PSScriptRoot "INSTALL-CLAUDE-MCP.ps1") -SkipValidation
-    if ($LASTEXITCODE -ne 0) {
-        Fail "Claude MCP configuration failed." 3
-    }
+    if ($LASTEXITCODE -ne 0) { Fail "Claude MCP configuration failed." 3 }
 
     Write-Host "Installing/updating per-user private HTTP MCP autostart..." -ForegroundColor Cyan
     & (Join-Path $PSScriptRoot "INSTALL-AGENT-MCP-AUTOSTART.ps1") -Port $McpPort -SkipValidation
-    if ($LASTEXITCODE -ne 0) {
-        Fail "HTTP MCP autostart installation failed." 3
-    }
+    if ($LASTEXITCODE -ne 0) { Fail "HTTP MCP autostart installation failed." 3 }
 }
 
-# Recheck after configuration changes. Provisioning/dependency recovery has
-# already happened above; this final pass is deliberately proof/status only so
-# setup has one mutation decision point and cannot silently alter model/runtime
-# sources late in the run.
+# Recheck after configuration writes without reopening provisioning/recovery.
 Write-Host "Running final agent doctor..." -ForegroundColor Cyan
 $finalDoctorArgs = @(
     (Join-Path $PSScriptRoot "agent-doctor.py"),
@@ -198,9 +199,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host "Running final backend status..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "evavo.py") status
-if ($LASTEXITCODE -ne 0) {
-    Fail "Final backend status failed." 3
-}
+if ($LASTEXITCODE -ne 0) { Fail "Final backend status failed." 3 }
 
 # Cloud ChatGPT cannot directly reach workstation localhost. When an OpenAI
 # Secure MCP Tunnel ID is already configured, finish that outbound bridge.
@@ -211,31 +210,18 @@ if (-not $tunnelId -and (Test-Path $tunnelStatePath)) {
         $tunnelState = Get-Content $tunnelStatePath -Raw | ConvertFrom-Json
         $tunnelId = [string]$tunnelState.tunnel_id
     }
-    catch {
-        Fail "Existing ChatGPT tunnel state is invalid. Remove .evavo\chatgpt-tunnel.json or re-run the tunnel installer." 3
-    }
+    catch { Fail "Existing ChatGPT tunnel state is invalid. Remove .evavo\chatgpt-tunnel.json or re-run the tunnel installer." 3 }
 }
 
 $chatGptTunnelStatus = "not_configured"
 if (-not $SkipChatGPTTunnel -and $tunnelId) {
     Write-Host "Configuring OpenAI Secure MCP Tunnel for ChatGPT..." -ForegroundColor Cyan
-    $tunnelInstall = @{
-        TunnelId = $tunnelId
-        McpPort = $McpPort
-        SkipDoctor = $true
-    }
-    if (-not $SkipAgentConfiguration) {
-        $tunnelInstall["SkipLocalMcpInstall"] = $true
-    }
-
+    $tunnelInstall = @{ TunnelId = $tunnelId; McpPort = $McpPort; SkipDoctor = $true }
+    if (-not $SkipAgentConfiguration) { $tunnelInstall["SkipLocalMcpInstall"] = $true }
     $persistRequested = Test-Truthy $env:EVAVO_PERSIST_OPENAI_TUNNEL_KEY
-    if ($persistRequested -and $env:CONTROL_PLANE_API_KEY) {
-        $tunnelInstall["PersistRuntimeKey"] = $true
-    }
+    if ($persistRequested -and $env:CONTROL_PLANE_API_KEY) { $tunnelInstall["PersistRuntimeKey"] = $true }
     & (Join-Path $PSScriptRoot "INSTALL-CHATGPT-MCP-TUNNEL.ps1") @tunnelInstall
-    if ($LASTEXITCODE -ne 0) {
-        Fail "ChatGPT Secure MCP Tunnel profile installation failed." 3
-    }
+    if ($LASTEXITCODE -ne 0) { Fail "ChatGPT Secure MCP Tunnel profile installation failed." 3 }
 
     $secureKeyPath = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "EVAVO\Secure\chatgpt-tunnel-runtime-key.dpapi" } else { $null }
     $hasDpapiKey = $secureKeyPath -and (Test-Path $secureKeyPath)
@@ -244,21 +230,15 @@ if (-not $SkipChatGPTTunnel -and $tunnelId) {
     if ($hasDpapiKey -or $hasProcessKey) {
         Write-Host "Validating OpenAI tunnel local preflight/profile configuration..." -ForegroundColor Cyan
         & (Join-Path $PSScriptRoot "CHATGPT-TUNNEL-DOCTOR.ps1") -RequireRuntimeKey
-        if ($LASTEXITCODE -ne 0) {
-            Fail "ChatGPT tunnel doctor found a blocking profile/preflight/integrity problem." 3
-        }
+        if ($LASTEXITCODE -ne 0) { Fail "ChatGPT tunnel doctor found a blocking profile/preflight/integrity problem." 3 }
     }
 
     if ($hasDpapiKey) {
         Write-Host "Installing persistent ChatGPT tunnel login autostart..." -ForegroundColor Cyan
         & (Join-Path $PSScriptRoot "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1") -SkipDoctor
-        if ($LASTEXITCODE -ne 0) {
-            Fail "ChatGPT tunnel autostart installation failed." 3
-        }
+        if ($LASTEXITCODE -ne 0) { Fail "ChatGPT tunnel autostart installation failed." 3 }
         & (Join-Path $PSScriptRoot "CHATGPT-TUNNEL-DOCTOR.ps1") -RequireRuntimeKey -RequireRunning
-        if ($LASTEXITCODE -ne 0) {
-            Fail "ChatGPT tunnel was configured but did not remain running." 3
-        }
+        if ($LASTEXITCODE -ne 0) { Fail "ChatGPT tunnel was configured but did not remain running." 3 }
         $chatGptTunnelStatus = "persistent_running"
     }
     elseif ($hasProcessKey) {
@@ -274,9 +254,7 @@ if (-not $SkipChatGPTTunnel -and $tunnelId) {
             & (Join-Path $PSScriptRoot "CHATGPT-TUNNEL-DOCTOR.ps1") -RequireRunning -SkipControlPlane -Json *> $null
             $running = $LASTEXITCODE -eq 0
         } while (-not $running -and (Get-Date) -lt $deadline)
-        if (-not $running) {
-            Fail "ChatGPT tunnel did not remain running for the current session." 3
-        }
+        if (-not $running) { Fail "ChatGPT tunnel did not remain running for the current session." 3 }
         $chatGptTunnelStatus = "session_running"
         Write-Host "For reboot persistence, run SAVE-CHATGPT-TUNNEL-KEY.ps1 and then INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1." -ForegroundColor Yellow
     }
@@ -286,7 +264,7 @@ if (-not $SkipChatGPTTunnel -and $tunnelId) {
         Write-Host "Set CONTROL_PLANE_API_KEY temporarily or run SAVE-CHATGPT-TUNNEL-KEY.ps1 to enable the outbound tunnel." -ForegroundColor Yellow
     }
 }
-elseif (-not $SkipChatGPTTunnel) {
+elif (-not $SkipChatGPTTunnel) {
     Write-Host "ChatGPT Secure MCP Tunnel is not configured because no OpenAI tunnel ID is available." -ForegroundColor Yellow
     Write-Host "Once a tunnel ID exists, set EVAVO_OPENAI_TUNNEL_ID=tunnel_<32 lowercase hex characters> and rerun this updater." -ForegroundColor Yellow
 }
@@ -294,8 +272,9 @@ elseif (-not $SkipChatGPTTunnel) {
 Write-Host ""
 Write-Host "EVAVO workstation setup completed." -ForegroundColor Green
 Write-Host "  Verified Git origin: $origin" -ForegroundColor Green
+Write-Host "  Pre-dependency structural verifier: passed" -ForegroundColor Green
+Write-Host "  Isolated Python environment: $python" -ForegroundColor Green
 Write-Host "  Authoritative full verifier: passed" -ForegroundColor Green
-Write-Host "  Python sources + PowerShell scripts: parsed successfully" -ForegroundColor Green
 Write-Host "  All registered safety/integration suites: passed" -ForegroundColor Green
 Write-Host "  Native generation contract preparation: passed" -ForegroundColor Green
 Write-Host "  Evidence-gated dependency recovery: $dependencyRecoveryStatus" -ForegroundColor $(if ($dependencyRecoveryStatus -eq "repaired") { "Green" } elseif ($dependencyRecoveryStatus -eq "not_needed") { "DarkGray" } else { "Yellow" })
