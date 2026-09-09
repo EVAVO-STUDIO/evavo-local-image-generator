@@ -30,6 +30,40 @@ C:\AI\python_embeded\python.exe -s C:\AI\ComfyUI\main.py --windows-standalone-bu
 
 Source/venv installs do not receive portable-only flags.
 
+## Dependency repair
+
+When the diagnostic category is `missing_dependency`, do not guess a PyPI version and do not install the package into a global/system Python. Repair the local ComfyUI environment from the requirements file that belongs to the checkout being launched:
+
+```powershell
+python .\repair-comfyui-dependencies.py --comfy-home C:\AI\ComfyUI
+```
+
+The repair command:
+
+- selects the same local/embedded Python layout used by ComfyUI;
+- probes `comfy_aimdo` by default, or another module supplied through `--module`;
+- runs that interpreter's `pip install -r <ComfyUI>\requirements.txt` only when repair is required;
+- never adds `--upgrade` implicitly;
+- runs `pip check` and re-imports the target module afterwards;
+- persists the bounded result to `<ComfyUI>\.evavo\dependency-repair-last.json`;
+- never starts, stops, or kills Python/ComfyUI processes.
+
+For another missing module reported by diagnostics:
+
+```powershell
+python .\repair-comfyui-dependencies.py --comfy-home C:\AI\ComfyUI --module <reported_module>
+```
+
+If the failure indicates that the environment as a whole is incomplete rather than one target import, use the checkout as authority and synchronize its requirements deliberately:
+
+```powershell
+python .\repair-comfyui-dependencies.py --comfy-home C:\AI\ComfyUI --force-sync
+```
+
+After a successful dependency repair, agents must re-run `diagnose_backend(seconds=60, cpu=true)`, then `ensure_backend`, then an actual generation smoke test. Package installation alone is not proof that the service is healthy.
+
+Agents with EVAVO Workstation Bridge/Operator execution authority should perform this repair themselves and wait for the terminal receipt. They should not hand routine PowerShell/Python execution back to the user merely because the operation is on Windows.
+
 ## Bounded 60-second CLI probe
 
 When MCP is unavailable or the client has not yet reloaded the updated server, run from this repository:
@@ -59,6 +93,8 @@ If that second probe becomes healthy, the failure is in custom-node startup rath
 - `startup_timeout`: the child stays alive but `/system_stats` never becomes ready by the deadline.
 - `ready`: the diagnostic child becomes HTTP-ready.
 
-## Lock behavior for agents
+## Process and lock safety for agents
+
+Do not use broad cleanup such as `taskkill /IM python.exe /F`, `Stop-Process -Name python`, or equivalent catch-all termination. Those commands can kill unrelated development, automation, model, or application processes. Lifecycle actions must target a known owned PID/process tree or verify the process identity and expected ComfyUI command line before termination.
 
 Windows lifecycle locks use named mutexes rather than creating new persistent `.lock` files. During migration, an existing legacy lock file is still honored before it is removed after release. This keeps mutual exclusion intact while avoiding stale lock-file artifacts that external agents may misinterpret as an active blocker.
