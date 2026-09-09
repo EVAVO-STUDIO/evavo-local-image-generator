@@ -2,7 +2,7 @@
   "contractVersion": "evavo_repository_capabilities_v1",
   "repository": "EVAVO-STUDIO/evavo-local-image-generator",
   "authority": "local-image-generation-control-plane",
-  "summary": "EVAVO's Windows-first local ComfyUI image-generation control plane and agent transport layer. It owns native ComfyUI discovery/provisioning/health, model inventory, live workflow preflight, real prompt submission/completion/output collection, bounded batch execution, shared task history, MCP delivery to local hosts and secure ChatGPT tunnelling. The deterministic mock is test infrastructure only; Local Image Generator is not Art Studio, does not provide creative approval and cannot claim real generation without a healthy native ComfyUI backend.",
+  "summary": "EVAVO's Windows-first local ComfyUI image-generation control plane and agent transport layer. It owns native ComfyUI discovery/provisioning/health, model inventory, live workflow preflight, real prompt submission/completion/output collection, bounded batch execution, shared task history, MCP delivery to local hosts and secure ChatGPT tunnelling. Its optional loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. The deterministic mock is test infrastructure only; Local Image Generator is not Art Studio, does not provide creative approval and cannot claim real image generation without a healthy native ComfyUI backend.",
   "capabilities": [
     {
       "id": "local-image.backend.discover-health",
@@ -105,20 +105,30 @@
       "requires": ["Existing authorised OpenAI tunnel identity/key", "Verified tunnel-client release"]
     },
     {
+      "id": "local-image.gateway.aux-provider-delegation",
+      "title": "Delegate optional gateway media to governed sibling Studio providers",
+      "description": "Keep image ownership in this repository while allowing the loopback compatibility gateway to delegate video, audio and 3D tasks only to readiness-checked sibling providers. Provider execution is fail-closed, receipt-backed, timeout-bounded and output-confined; unavailable providers produce structured failures rather than fake completion.",
+      "interfaces": ["http-gateway", "automation"],
+      "effects": ["read", "compute", "network", "execute", "write"],
+      "entrypoints": ["GET /services", "GET /capabilities", "POST /generate/video", "POST /generate/audio", "POST /generate/3d", "GATEWAY-AUX-PROVIDERS.md"],
+      "tags": ["gateway", "delegation", "video", "audio", "3d", "providers", "fail-closed"],
+      "requires": ["Loopback gateway", "Explicitly ready reviewed provider for the requested delegated modality"]
+    },
+    {
       "id": "local-image.validation.execute",
       "title": "Run repository and Windows integration verification",
-      "description": "Run read-only structural verification plus full safety/integration checks, optionally requiring PowerShell AST validation, and distinguish mock contract tests from real native-backend readiness.",
+      "description": "Run read-only structural verification plus full root, repository-level provider and package safety/integration checks, optionally requiring PowerShell AST validation, and distinguish mock contract tests from real native-backend readiness.",
       "interfaces": ["cli", "testing", "automation"],
       "effects": ["read", "compute", "execute", "write"],
       "entrypoints": ["python evavo.py verify", "python evavo.py verify --full", "python evavo.py verify --full --require-powershell", "UPDATE-AND-VERIFY-EVAVO.ps1"],
-      "tags": ["image", "validation", "powershell", "windows", "testing"],
+      "tags": ["image", "validation", "providers", "powershell", "windows", "testing"],
       "requires": ["Repository Python/PowerShell environment", "Native ComfyUI only for live generation validation"]
     }
   ],
   "brain": {
     "consult": true,
     "sanityCheck": true,
-    "topics": ["local image generation", "ComfyUI readiness", "model inventory", "workflow preflight", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling"]
+    "topics": ["local image generation", "ComfyUI readiness", "model inventory", "workflow preflight", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "governed gateway provider delegation"]
   },
-  "reviewedAt": "2026-09-09T16:39:00+10:00"
+  "reviewedAt": "2026-09-09T16:55:00+10:00"
 }
