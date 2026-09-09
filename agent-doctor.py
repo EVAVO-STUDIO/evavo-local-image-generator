@@ -128,13 +128,7 @@ def _provision_comfyui(*, target: Optional[Path] = None, checkpoint_only: bool =
     if checkpoint_only:
         command.append("--checkpoint-only")
     try:
-        result = subprocess.run(
-            command,
-            cwd=str(ROOT),
-            capture_output=True,
-            text=True,
-            timeout=3600,
-        )
+        result = subprocess.run(command, cwd=str(ROOT), capture_output=True, text=True, timeout=3600)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     try:
@@ -145,12 +139,25 @@ def _provision_comfyui(*, target: Optional[Path] = None, checkpoint_only: bool =
         provisioned_target = payload.get("target", "unknown")
         models = payload.get("verification", {}).get("checkpoint_files", []) if isinstance(payload.get("verification"), dict) else []
         return True, f"{payload.get('status', 'provisioned')} {provisioned_target}; local checkpoints={len(models)}"
-    detail = ""
-    if isinstance(payload, dict):
-        detail = str(payload.get("message", ""))
+    detail = str(payload.get("message", "")) if isinstance(payload, dict) else ""
     if not detail:
         detail = (result.stderr or result.stdout).strip()[-2000:]
     return False, detail or f"provisioner exit {result.returncode}"
+
+
+def _inventory_detail(inventory: Dict[str, Any]) -> str:
+    categories = inventory.get("categories")
+    if not isinstance(categories, dict):
+        return "no category data"
+    parts: List[str] = []
+    for name, entry in categories.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("available"):
+            parts.append(f"{name}={int(entry.get('count', 0))}")
+        else:
+            parts.append(f"{name}=unavailable")
+    return ", ".join(parts) if parts else "no loader categories reported"
 
 
 def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: int, run_tests: bool) -> Dict[str, Any]:
@@ -166,12 +173,7 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
 
     renderer_severity = "error" if repair else "warning"
     shared_configured, shared_ok, shared_detail = _shared_model_configuration()
-    add(
-        "shared_model_roots",
-        shared_ok,
-        shared_detail,
-        severity=renderer_severity if shared_configured else "info",
-    )
+    add("shared_model_roots", shared_ok, shared_detail, severity=renderer_severity if shared_configured else "info")
 
     installs = discover_comfyui()
     provision_attempted = False
@@ -216,8 +218,9 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
     )
 
     if health:
+        backend = ComfyUIBackend(endpoint)
         try:
-            checkpoints = ComfyUIBackend(endpoint).checkpoints()
+            checkpoints = backend.checkpoints()
             checkpoint_detail = f"{len(checkpoints)} available"
             if not checkpoints:
                 checkpoint_detail = "none reported"
@@ -225,21 +228,20 @@ def run(repair: bool, provision: bool, endpoint: str, mcp_host: str, mcp_port: i
                     checkpoint_detail += "; shared roots are configured, so restart ComfyUI through EVAVO if it was started externally without the EVAVO extra-model config"
                 elif repair and not _checkpoint_source_configured():
                     checkpoint_detail += "; configure EVAVO_CHECKPOINT_FILE, EVAVO_CHECKPOINT_URL, or EVAVO_SHARED_MODEL_ROOTS"
-            add(
-                "checkpoints",
-                bool(checkpoints),
-                checkpoint_detail,
-                severity="error" if repair else "warning",
-            )
+            add("checkpoints", bool(checkpoints), checkpoint_detail, severity="error" if repair else "warning")
         except RuntimeError as exc:
             add("checkpoints", False, str(exc), severity="error" if repair else "warning")
+
+        try:
+            inventory = backend.model_inventory(50)
+            available = int(inventory.get("available_categories", 0))
+            total = int(inventory.get("total_categories", 0))
+            add("model_inventory", available > 0, f"loader categories {available}/{total}; {_inventory_detail(inventory)}", severity="info" if available > 0 else "warning")
+        except RuntimeError as exc:
+            add("model_inventory", False, str(exc), severity="warning")
     else:
-        add(
-            "checkpoints",
-            False,
-            "not checked because native ComfyUI is offline",
-            severity=renderer_severity,
-        )
+        add("checkpoints", False, "not checked because native ComfyUI is offline", severity=renderer_severity)
+        add("model_inventory", False, "not checked because native ComfyUI is offline", severity="warning")
 
     writable, output_detail = _output_writable()
     add("output_directory", writable, output_detail)
