@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import subprocess
 import sys
@@ -38,6 +39,16 @@ def _backend() -> ComfyUIBackend:
 
 def _tracker() -> TaskTracker:
     return TaskTracker()
+
+
+def _positive_seconds(value: Any, *, name: str, maximum: float = 86400.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0 or parsed > maximum:
+        raise ValueError(f"{name} must be finite and greater than 0 and at most {maximum:g} seconds")
+    return parsed
 
 
 def _lexical_absolute(value: str | Path) -> Path:
@@ -118,7 +129,7 @@ def _validated_workflow_path(workflow_path: Optional[str]) -> Optional[str]:
     if workflow_path is None or not str(workflow_path).strip():
         return None
 
-    lexical, candidate = _resolve_ordinary_file(str(workflow_path), label="workflow_path")
+    _, candidate = _resolve_ordinary_file(str(workflow_path), label="workflow_path")
     owner_default = os.getenv("EVAVO_COMFYUI_WORKFLOW", "").strip()
     if owner_default:
         try:
@@ -182,6 +193,7 @@ async def _provision_backend() -> Dict[str, Any]:
 
 
 async def _ensure(auto_start: bool = True, wait_seconds: float = 90.0) -> Dict[str, Any]:
+    wait_seconds = _positive_seconds(wait_seconds, name="wait_seconds", maximum=3600.0)
     try:
         return await asyncio.to_thread(ensure_comfyui, _endpoint(), wait_seconds=wait_seconds, allow_start=auto_start)
     except RuntimeError as exc:
@@ -333,6 +345,7 @@ async def _generate_image_impl(
     local_failure_id = f"mcp_failed_{uuid.uuid4().hex}"
 
     try:
+        wait_timeout = _positive_seconds(wait_timeout, name="wait_timeout")
         workflow_path = _validated_workflow_path(workflow_path)
         target = _output_dir(project_name, output_dir) if wait or output_dir else None
         await _ensure(auto_start=auto_start)
@@ -451,7 +464,10 @@ async def provision_backend() -> Dict[str, Any]:
 @mcp.tool()
 async def ensure_backend(auto_start: bool = True, wait_seconds: float = 90.0) -> Dict[str, Any]:
     """Ensure native ComfyUI is healthy. It may be provisioned first when EVAVO_AUTO_PROVISION_COMFYUI=1."""
-    return await _ensure(auto_start=auto_start, wait_seconds=wait_seconds)
+    try:
+        return await _ensure(auto_start=auto_start, wait_seconds=wait_seconds)
+    except ValueError as exc:
+        return {"ok": False, "status": "failed", "error_code": "INVALID_WAIT_SECONDS", "message": str(exc)}
 
 
 @mcp.tool()
@@ -477,9 +493,13 @@ async def list_checkpoints(auto_start: bool = True) -> List[str]:
 
 @mcp.tool()
 async def model_inventory(auto_start: bool = True, limit_per_category: int = 200) -> Dict[str, Any]:
-    """List models exposed by common ComfyUI loader nodes: checkpoints, LoRAs, VAEs, ControlNet, UNet/diffusion, text encoders, CLIP vision and upscalers."""
+    """List models exposed by common ComfyUI loader nodes."""
     await _ensure(auto_start=auto_start)
-    limit = max(1, min(5000, int(limit_per_category)))
+    try:
+        limit = int(limit_per_category)
+    except (TypeError, ValueError):
+        return {"ok": False, "status": "failed", "error_code": "INVALID_LIMIT", "message": "limit_per_category must be an integer"}
+    limit = max(1, min(5000, limit))
     return await asyncio.to_thread(_backend().model_inventory, limit)
 
 
@@ -603,25 +623,38 @@ async def generate_batch(
             "error_code": "INVALID_PROMPT_ITEMS",
             "message": f"prompts at indices {invalid[:20]} must be non-empty strings",
         }
-    concurrency = max(1, min(16, int(concurrency)))
+    if not isinstance(project_name, str) or not project_name.strip():
+        return {"ok": False, "status": "failed", "error_code": "INVALID_PROJECT", "message": "project_name must be a non-empty string"}
+    try:
+        concurrency_value = int(concurrency)
+    except (TypeError, ValueError):
+        return {"ok": False, "status": "failed", "error_code": "INVALID_CONCURRENCY", "message": "concurrency must be an integer"}
+    concurrency_value = max(1, min(16, concurrency_value))
+    try:
+        wait_timeout_value = _positive_seconds(wait_timeout, name="wait_timeout")
+        workflow_value = _validated_workflow_path(workflow_path)
+        output_value = str(_output_dir(project_name.strip(), output_dir)) if wait or output_dir else None
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "error_code": "INVALID_FILE_OR_WAIT_POLICY", "message": str(exc)}
+
     await _ensure(auto_start=auto_start)
-    semaphore = asyncio.Semaphore(concurrency)
+    semaphore = asyncio.Semaphore(concurrency_value)
 
     async def one(prompt: str) -> Dict[str, Any]:
         async with semaphore:
             return await _generate_image_impl(
                 prompt,
-                project_name=project_name,
+                project_name=project_name.strip(),
                 negative_prompt=negative_prompt,
                 width=width,
                 height=height,
                 steps=steps,
                 cfg_scale=cfg_scale,
                 checkpoint=checkpoint,
-                workflow_path=workflow_path,
+                workflow_path=workflow_value,
                 wait=wait,
-                wait_timeout=wait_timeout,
-                output_dir=output_dir,
+                wait_timeout=wait_timeout_value,
+                output_dir=output_value,
                 auto_start=False,
             )
 
@@ -630,7 +663,7 @@ async def generate_batch(
     return {
         "ok": successful == len(results),
         "status": "completed" if wait and successful == len(results) else ("queued" if successful == len(results) else "partial_failure"),
-        "project_name": project_name,
+        "project_name": project_name.strip(),
         "total": len(results),
         "successful": successful,
         "failed": len(results) - successful,
@@ -662,13 +695,14 @@ async def collect_generation(
 ) -> Dict[str, Any]:
     """Wait for an existing prompt, download its images, and reconcile local task history."""
     try:
+        timeout_value = _positive_seconds(timeout, name="timeout")
         target = _output_dir("collected", output_dir)
     except Exception as exc:
-        return {"ok": False, "task_id": task_id, "status": "failed", "error_code": "INVALID_OUTPUT_DIR", "message": str(exc)}
+        return {"ok": False, "task_id": task_id, "status": "failed", "error_code": "INVALID_OUTPUT_OR_TIMEOUT", "message": str(exc)}
     await _ensure(auto_start=auto_start)
     backend = _backend()
     try:
-        downloaded = await asyncio.to_thread(backend.wait_and_download, task_id, target, timeout=timeout)
+        downloaded = await asyncio.to_thread(backend.wait_and_download, task_id, target, timeout=timeout_value)
     except Exception as exc:
         warning = await _track_update(task_id, "failed", output_dir=str(target), backend_mode="native-comfyui", error_code="GENERATION_WAIT_FAILED", error_message=str(exc))
         result: Dict[str, Any] = {"ok": False, "task_id": task_id, "status": "failed", "message": str(exc), "output_dir": str(target)}
@@ -691,8 +725,12 @@ def read_output_image(path: str) -> Image:
 @mcp.tool()
 async def task_history(limit: int = 20, project_name: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return recent generation history shared by MCP and CLI workflows."""
-    limit = max(1, min(200, int(limit)))
-    return await asyncio.to_thread(_tracker().list_tasks, limit, project_name)
+    try:
+        limit_value = int(limit)
+    except (TypeError, ValueError):
+        return []
+    limit_value = max(1, min(200, limit_value))
+    return await asyncio.to_thread(_tracker().list_tasks, limit_value, project_name)
 
 
 @mcp.tool()
@@ -725,7 +763,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="EVAVO MCP image-generation server")
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default=os.getenv("EVAVO_MCP_TRANSPORT", "stdio"))
     parser.add_argument("--host", default=os.getenv("EVAVO_MCP_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.getenv("EVAVO_MCP_PORT", "8765")))
+    parser.add_argument("--port", type=int, default=os.getenv("EVAVO_MCP_PORT", "8765"))
     parser.add_argument("--path", default=os.getenv("EVAVO_MCP_PATH", "/mcp"))
     parser.add_argument("--json-response", action="store_true", help="Use single JSON HTTP responses instead of SSE bodies")
     args = parser.parse_args()
@@ -737,8 +775,8 @@ def main() -> None:
         parser.error("local MCP HTTP transport is restricted to loopback")
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
-    if not args.path.startswith("/"):
-        parser.error("--path must start with /")
+    if not isinstance(args.path, str) or not args.path.startswith("/") or len(args.path) > 256 or any(ch in args.path for ch in ("?", "#", "\x00")):
+        parser.error("--path must be an absolute path up to 256 characters and must not contain ?, #, or NUL")
     mcp.run(
         transport="streamable-http",
         host=args.host,
