@@ -3,6 +3,7 @@ param(
     [string]$ComfyEndpoint = "http://127.0.0.1:8188",
     [string]$ComfyRoot = "",
     [string]$KokoroEndpoint = "http://127.0.0.1:8880",
+    [string]$KokoroRoot = "C:\AI\Kokoro-FastAPI",
     [string]$GatewayEndpoint = "http://127.0.0.1:8000",
     [string]$AtmosphereRoot = "C:\GitRepos\atmosphere-studio",
     [string]$ThreeDRoot = "C:\GitRepos\evavo-3d-studio",
@@ -18,7 +19,7 @@ Set-StrictMode -Version Latest
 Set-Location $PSScriptRoot
 
 Write-Host "EVAVO FULL LOCAL GENERATION RELEASE" -ForegroundColor Cyan
-Write-Host "Phase 1: multimodal production readiness"
+Write-Host "Phase 1: multimodal production readiness + sibling runtime attestation"
 Write-Host "Phase 2: expensive fixed-seed hero image A/B review + model/runtime attestation"
 Write-Host ""
 
@@ -27,6 +28,7 @@ $gateArgs = @(
     "-Python", $Python,
     "-ComfyEndpoint", $ComfyEndpoint,
     "-KokoroEndpoint", $KokoroEndpoint,
+    "-KokoroRoot", $KokoroRoot,
     "-GatewayEndpoint", $GatewayEndpoint,
     "-AtmosphereRoot", $AtmosphereRoot,
     "-ThreeDRoot", $ThreeDRoot,
@@ -71,4 +73,5 @@ if ($RequireGateway) {
 if ($Require3DExecution) {
     Write-Host "3D bounded execution-worker proof: required and passed." -ForegroundColor Green
 }
-Write-Host "The automated gates and runtime/model evidence are green. Final image-profile and voice promotion still require completing the generated human review sheets after visual/listening inspection."
+Write-Host "Sibling runtime receipts were captured for Kokoro, 3D Studio and Atmosphere Studio in the production-gate result directory."
+Write-Host "Final image-profile and voice promotion still require completing the generated human review sheets after visual/listening inspection."
