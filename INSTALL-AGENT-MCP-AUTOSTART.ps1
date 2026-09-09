@@ -134,9 +134,9 @@ if ($env:EVAVO_CHECKPOINT_URL) {
     Write-Host "Note: EVAVO_CHECKPOINT_URL was not persisted because checkpoint URLs may contain credentials/tokens." -ForegroundColor Yellow
 }
 
-Write-Host "Starting it now in a hidden process..." -ForegroundColor Cyan
+Write-Host "Starting/reloading it now in a hidden process..." -ForegroundColor Cyan
 $quotedScript = '"' + $script.Replace('"', '\"') + '"'
-$argumentLine = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $quotedScript -Port $Port -SkipValidation"
+$argumentLine = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $quotedScript -Port $Port -SkipValidation -RestartIfRunning"
 Start-Process -FilePath "powershell.exe" -ArgumentList $argumentLine -WorkingDirectory $repo -WindowStyle Hidden | Out-Null
 
 $deadline = (Get-Date).AddSeconds(20)
