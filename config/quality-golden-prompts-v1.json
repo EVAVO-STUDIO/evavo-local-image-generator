@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "prompt_set_version": "quality-golden-v1",
+  "description": "Controlled EVAVO SDXL quality corpus. Keep IDs and wording stable for longitudinal runtime/profile comparisons; create a new version instead of silently editing this file after promotion evidence exists.",
+  "prompts": {
+    "product": {
+      "prompt": "Minimal black anodized aluminium desk speaker on a matte charcoal surface, three-quarter front angle, soft neutral seamless background, large diffused key light with narrow edge light, precise machined edges and fine metal grain, clean commercial product photography, accurate geometry, natural contact shadow, no branding",
+      "negative": "warped product, duplicate product, floating object, incorrect perspective, melted edges, fake label, text, logo, watermark, excessive bloom",
+      "review_focus": [
+        "geometry",
+        "machined edge integrity",
+        "material texture",
+        "contact shadow",
+        "duplicate-object rate"
+      ]
+    },
+    "portrait": {
+      "prompt": "Studio portrait of a weathered shipwright in his late fifties, calm direct expression, chest-up three-quarter framing, dark timber workshop behind him, large soft window key light from camera left, subtle warm practical rim light, 85mm portrait-lens perspective, realistic skin texture, natural grey hair detail, coherent hands, restrained cinematic color grade",
+      "negative": "waxy skin, plastic skin, crossed eyes, asymmetrical pupils, malformed hands, extra fingers, duplicate face, blurry, oversharpened, watermark, text",
+      "review_focus": [
+        "eyes",
+        "skin texture",
+        "hands",
+        "hair",
+        "identity coherence",
+        "natural lighting"
+      ]
+    },
+    "landscape": {
+      "prompt": "Remote temperate coastline just after a storm, wet black rocks and tidal pools in the foreground, wind-bent grass and a narrow track through the midground, layered sea cliffs fading into rain haze, broken cloud with low late-afternoon light, eye-level 35mm landscape perspective, realistic wet stone and vegetation detail, controlled dynamic range",
+      "negative": "muddy detail, smeared foliage, repeated rocks, impossible horizon, oversaturated sky, haloing, blurry, watermark, text",
+      "review_focus": [
+        "depth layering",
+        "foliage coherence",
+        "rock repetition",
+        "horizon integrity",
+        "wet-material response",
+        "dynamic range"
+      ]
+    },
+    "interior": {
+      "prompt": "Late Victorian reading room, fixed eye-level camera facing the long wall, broad clear floor lane in the lower third, dark oak shelves and worn leather chairs, overcast daylight through tall sash windows with restrained gas-lamp warmth, quiet dusty atmosphere, documentary architectural photography, straight verticals, coherent scale",
+      "negative": "fisheye, extreme perspective, warped walls, floating furniture, duplicate doors, modern fixtures, blurry, text, watermark",
+      "review_focus": [
+        "architectural verticals",
+        "room scale",
+        "furniture duplication",
+        "camera perspective",
+        "period coherence",
+        "material separation"
+      ]
+    },
+    "game_art": {
+      "prompt": "1871 riverfront ship chandlery interior, fixed front-on side-stage camera with a broad horizontal gameplay lane, shop counter and merchant as the main midground silhouette, readable shelves, repair bench and exit zones, humid rain-darkened daylight with restrained lamp glow, black-and-white engraved DOS-era game art with dense hatching and hard silhouettes, historically coherent materials, uncluttered lower-third gameplay lane",
+      "negative": "modern signage, electric lights, plastic, flat modern UI, photorealism, fantasy decoration, extreme perspective, isometric view, cluttered floor, watermark, text",
+      "review_focus": [
+        "front-on gameplay readability",
+        "historical coherence",
+        "engraved linework",
+        "silhouette separation",
+        "clear lower-third lane",
+        "absence of modern leakage"
+      ]
+    }
+  }
+}
