@@ -25,7 +25,10 @@ class SafeMainGitTests(unittest.TestCase):
     def test_runtime_and_generated_paths_are_rejected(self) -> None:
         for path in (
             ".git/index.lock",
+            "./.git/index.lock",
             ".git.backup/HEAD",
+            ".evavo/operations-service.json",
+            ".evavo/chatgpt-tunnel.json",
             ".evavo/outputs/test.png",
             ".evavo/logs/service.log",
             "evavo-images/image.png",
@@ -40,8 +43,26 @@ class SafeMainGitTests(unittest.TestCase):
 
     def test_capability_manifest_and_normal_source_are_allowed(self) -> None:
         self.assertFalse(safe_main_git._forbidden_path(".evavo/capabilities.json"))
+        self.assertFalse(safe_main_git._forbidden_path("./.evavo/capabilities.json"))
         self.assertFalse(safe_main_git._forbidden_path("evavo.py"))
         self.assertFalse(safe_main_git._forbidden_path("README.md"))
+
+    def test_expected_origin_identity_accepts_https_and_ssh_only_for_this_repo(self) -> None:
+        accepted = (
+            "https://github.com/EVAVO-STUDIO/evavo-local-image-generator.git",
+            "https://github.com/EVAVO-STUDIO/evavo-local-image-generator",
+            "git@github.com:EVAVO-STUDIO/evavo-local-image-generator.git",
+            "ssh://git@github.com/EVAVO-STUDIO/evavo-local-image-generator.git",
+        )
+        for remote in accepted:
+            with self.subTest(remote=remote):
+                self.assertIsNotNone(safe_main_git.EXPECTED_ORIGIN_RE.search(remote))
+        for remote in (
+            "https://github.com/someone/evavo-local-image-generator.git",
+            "https://github.com/EVAVO-STUDIO/another-repo.git",
+        ):
+            with self.subTest(remote=remote):
+                self.assertIsNone(safe_main_git.EXPECTED_ORIGIN_RE.search(remote))
 
     def test_helper_has_no_destructive_git_repair_commands(self) -> None:
         source = (ROOT / "safe_main_git.py").read_text(encoding="utf-8").lower()
@@ -60,6 +81,7 @@ class SafeMainGitTests(unittest.TestCase):
         source = (ROOT / "safe_main_git.py").read_text(encoding="utf-8")
         self.assertIn('branch != "main"', source)
         self.assertIn('remote", "get-url", "origin"', source)
+        self.assertIn("EXPECTED_ORIGIN_RE", source)
         self.assertIn('rev-list", "--left-right", "--count", "HEAD...origin/main"', source)
         self.assertIn('push", "origin", "main:main"', source)
         self.assertIn('rev-parse", "origin/main"', source)
