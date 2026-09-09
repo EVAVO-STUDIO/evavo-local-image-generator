@@ -331,8 +331,17 @@ async def provision_backend() -> Dict[str, Any]:
     """Provision official ComfyUI using only workstation-configured environment/model sources, then ensure it is running."""
     provisioned = await _provision_backend()
     ensured = await asyncio.to_thread(ensure_comfyui, _endpoint(), wait_seconds=180.0, allow_start=True)
-    checkpoints = await asyncio.to_thread(_backend().checkpoints)
-    return {"ok": bool(checkpoints), "status": "ready" if checkpoints else "model_required", "provision": provisioned, "backend": ensured, "checkpoints": checkpoints}
+    backend = _backend()
+    checkpoints = await asyncio.to_thread(backend.checkpoints)
+    inventory = await asyncio.to_thread(backend.model_inventory, 100)
+    return {
+        "ok": bool(checkpoints),
+        "status": "ready" if checkpoints else "model_required",
+        "provision": provisioned,
+        "backend": ensured,
+        "checkpoints": checkpoints,
+        "model_inventory": inventory,
+    }
 
 
 @mcp.tool()
@@ -360,6 +369,14 @@ async def list_checkpoints(auto_start: bool = True) -> List[str]:
     """List checkpoints exposed by ComfyUI, starting/provisioning the backend when configured."""
     await _ensure(auto_start=auto_start)
     return await asyncio.to_thread(_backend().checkpoints)
+
+
+@mcp.tool()
+async def model_inventory(auto_start: bool = True, limit_per_category: int = 200) -> Dict[str, Any]:
+    """List models exposed by common ComfyUI loader nodes: checkpoints, LoRAs, VAEs, ControlNet, UNet/diffusion, text encoders, CLIP vision and upscalers."""
+    await _ensure(auto_start=auto_start)
+    limit = max(1, min(5000, int(limit_per_category)))
+    return await asyncio.to_thread(_backend().model_inventory, limit)
 
 
 @mcp.tool()
