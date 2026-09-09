@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -147,15 +149,66 @@ class ComfyUIBackend:
             "categories": categories,
         }
 
-    def choose_checkpoint(self, requested: Optional[str] = None) -> str:
+    @staticmethod
+    def _truthy_environment(name: str, default: bool = False) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _checkpoint_source_configured() -> bool:
+        return bool(os.getenv("EVAVO_CHECKPOINT_FILE") or os.getenv("EVAVO_CHECKPOINT_URL"))
+
+    def _provision_configured_checkpoint(self) -> bool:
+        """Invoke EVAVO's fixed checkpoint-only provisioner using operator environment."""
+        if not self._truthy_environment("EVAVO_AUTO_PROVISION_CHECKPOINT", default=False):
+            return False
+        if not self._checkpoint_source_configured():
+            return False
+        repo_root = Path(__file__).resolve().parents[2]
+        provisioner = repo_root / "provision-comfyui.py"
+        if not provisioner.is_file():
+            raise RuntimeError(f"COMFYUI_CHECKPOINT_PROVISIONER_MISSING:{provisioner}")
+        command = [sys.executable, str(provisioner), "--checkpoint-only", "--json"]
+        try:
+            result = subprocess.run(
+                command,
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                timeout=3600,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("COMFYUI_CHECKPOINT_PROVISION_TIMEOUT:checkpoint provisioning exceeded one hour") from exc
+        except OSError as exc:
+            raise RuntimeError(f"COMFYUI_CHECKPOINT_PROVISION_PROCESS:{exc}") from exc
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            detail = (result.stderr or result.stdout).strip()[-2000:]
+            raise RuntimeError(f"COMFYUI_CHECKPOINT_PROVISION_INVALID_JSON:{detail}") from exc
+        if not isinstance(payload, dict) or result.returncode != 0 or not payload.get("ok"):
+            detail = payload.get("message") if isinstance(payload, dict) else None
+            raise RuntimeError(f"COMFYUI_CHECKPOINT_PROVISION_FAILED:{detail or result.stderr or result.stdout}")
+        return True
+
+    def choose_checkpoint(self, requested: Optional[str] = None, *, allow_repair: bool = True) -> str:
         checkpoints = self.checkpoints()
         preferred = requested or os.getenv("EVAVO_COMFYUI_CHECKPOINT")
+        missing = (preferred is not None and preferred not in checkpoints) or (preferred is None and not checkpoints)
+        if missing and allow_repair and self._provision_configured_checkpoint():
+            checkpoints = self.checkpoints()
+
         if preferred:
             if preferred in checkpoints:
                 return preferred
             raise RuntimeError(f"COMFYUI_CHECKPOINT_NOT_FOUND:{preferred}")
         if not checkpoints:
-            raise RuntimeError("COMFYUI_NO_CHECKPOINTS:no checkpoints reported by CheckpointLoaderSimple")
+            raise RuntimeError(
+                "COMFYUI_NO_CHECKPOINTS:no checkpoints reported by CheckpointLoaderSimple; "
+                "configure EVAVO_CHECKPOINT_FILE/URL, EVAVO_SHARED_MODEL_ROOTS, or use a custom workflow"
+            )
         return checkpoints[0]
 
     @staticmethod
@@ -209,13 +262,21 @@ class ComfyUIBackend:
         safe_prefix = "".join(ch if ch.isalnum() or ch in "_-/" else "_" for ch in filename_prefix)[:120] or "EVAVO"
         template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
 
-        chosen_checkpoint: Optional[str] = None
-        try:
-            chosen_checkpoint = self.choose_checkpoint(checkpoint)
-        except RuntimeError:
-            if not template_path:
-                raise
-            chosen_checkpoint = checkpoint or os.getenv("EVAVO_COMFYUI_CHECKPOINT") or ""
+        if template_path:
+            # Custom API workflows may use UNETLoader/CLIPLoader rather than a
+            # CheckpointLoaderSimple. Do not auto-provision a checkpoint merely
+            # because that optional loader inventory is empty.
+            preferred = checkpoint or os.getenv("EVAVO_COMFYUI_CHECKPOINT")
+            if preferred:
+                try:
+                    chosen_checkpoint = self.choose_checkpoint(preferred, allow_repair=False)
+                except RuntimeError:
+                    chosen_checkpoint = preferred
+            else:
+                available = self.checkpoints()
+                chosen_checkpoint = available[0] if available else ""
+        else:
+            chosen_checkpoint = self.choose_checkpoint(checkpoint, allow_repair=True)
 
         replacements: Dict[str, Any] = {
             "{{prompt}}": prompt,
