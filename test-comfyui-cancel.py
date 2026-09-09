@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from evavo_operations import TaskTracker
 from evavo_local_image_generator.backends import ComfyUIBackend
 from evavo_local_image_generator.comfyui_cancel import cancel_prompt
 
@@ -20,7 +24,7 @@ class ComfyUICancelTests(unittest.TestCase):
             patch("evavo_local_image_generator.comfyui_cancel.prompt_status", return_value=before),
             patch.object(self.backend, "cancel_job", return_value={"cancelled": True}) as cancel,
         ):
-            result = cancel_prompt(self.backend, "job-1")
+            result = cancel_prompt(self.backend, "job-1", audit_history=False)
         self.assertTrue(result["ok"])
         self.assertTrue(result["cancelled"])
         self.assertEqual(result["status"], "cancelled")
@@ -36,7 +40,7 @@ class ComfyUICancelTests(unittest.TestCase):
             patch("evavo_local_image_generator.comfyui_cancel.prompt_status", side_effect=states),
             patch.object(self.backend, "cancel_job", return_value={"cancelled": True}) as cancel,
         ):
-            result = cancel_prompt(self.backend, "job-2")
+            result = cancel_prompt(self.backend, "job-2", audit_history=False)
         cancel.assert_called_once_with("job-2")
         self.assertTrue(result["ok"])
         self.assertTrue(result["cancel_requested"])
@@ -51,7 +55,7 @@ class ComfyUICancelTests(unittest.TestCase):
             patch.object(self.backend, "cancel_job") as cancel,
             patch.object(self.backend, "delete_pending") as delete,
         ):
-            result = cancel_prompt(self.backend, "job-3")
+            result = cancel_prompt(self.backend, "job-3", audit_history=False)
         cancel.assert_not_called()
         delete.assert_not_called()
         self.assertTrue(result["ok"])
@@ -65,7 +69,7 @@ class ComfyUICancelTests(unittest.TestCase):
             patch.object(self.backend, "cancel_job", side_effect=RuntimeError("COMFYUI_HTTP_ERROR:404:no jobs api")),
             patch.object(self.backend, "delete_pending") as delete,
         ):
-            result = cancel_prompt(self.backend, "job-4")
+            result = cancel_prompt(self.backend, "job-4", audit_history=False)
         self.assertTrue(result["cancelled"])
         self.assertEqual(result["method"], "legacy_pending_queue_delete")
         delete.assert_called_once_with("job-4")
@@ -77,7 +81,7 @@ class ComfyUICancelTests(unittest.TestCase):
             patch.object(self.backend, "cancel_job", side_effect=RuntimeError("COMFYUI_HTTP_ERROR:404:no jobs api")),
             patch.object(self.backend, "delete_pending") as delete,
         ):
-            result = cancel_prompt(self.backend, "job-5")
+            result = cancel_prompt(self.backend, "job-5", audit_history=False)
         delete.assert_not_called()
         self.assertFalse(result["ok"])
         self.assertFalse(result["cancel_requested"])
@@ -90,12 +94,66 @@ class ComfyUICancelTests(unittest.TestCase):
             patch.object(self.backend, "cancel_job") as cancel,
             patch.object(self.backend, "delete_pending") as delete,
         ):
-            result = cancel_prompt(self.backend, "missing")
+            result = cancel_prompt(self.backend, "missing", audit_history=False)
         cancel.assert_not_called()
         delete.assert_not_called()
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "unknown")
         self.assertFalse(result["cancel_requested"])
+
+    def test_production_audit_keeps_running_status_until_terminal_cancel(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            history = Path(temp) / "history.json"
+            tracker = TaskTracker(history)
+            tracker.add_task("job-audit", "cancel audit", "running", project_name="audit")
+            env = os.environ.copy()
+            env["EVAVO_TASK_HISTORY"] = str(history)
+
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch(
+                    "evavo_local_image_generator.comfyui_cancel.prompt_status",
+                    side_effect=[
+                        {"task_id": "job-audit", "status": "running"},
+                        {"task_id": "job-audit", "status": "running"},
+                    ],
+                ),
+                patch.object(self.backend, "cancel_job", return_value={"cancelled": True}),
+            ):
+                requested = cancel_prompt(self.backend, "job-audit")
+
+            self.assertEqual(requested["status"], "cancel_requested")
+            first = TaskTracker(history).get_task("job-audit")
+            self.assertIsNotNone(first)
+            assert first is not None
+            self.assertEqual(first["status"], "running")
+            self.assertEqual(first["cancel_method"], "jobs_cancel")
+            self.assertEqual(first["backend_status"], "running")
+            self.assertTrue(first.get("cancel_requested_at"))
+            requested_at = first["cancel_requested_at"]
+
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch(
+                    "evavo_local_image_generator.comfyui_cancel.prompt_status",
+                    side_effect=[
+                        {"task_id": "job-audit", "status": "running"},
+                        {"task_id": "job-audit", "status": "cancelled"},
+                    ],
+                ),
+                patch.object(self.backend, "cancel_job", return_value={"cancelled": True}),
+            ):
+                terminal = cancel_prompt(self.backend, "job-audit")
+
+            self.assertEqual(terminal["status"], "cancelled")
+            final = TaskTracker(history).get_task("job-audit")
+            self.assertIsNotNone(final)
+            assert final is not None
+            self.assertEqual(final["status"], "cancelled")
+            self.assertEqual(final["cancel_requested_at"], requested_at)
+            self.assertEqual(final["cancel_method"], "jobs_cancel")
+            self.assertEqual(final["backend_status"], "cancelled")
+            self.assertTrue(final.get("cancelled_at"))
 
 
 if __name__ == "__main__":
