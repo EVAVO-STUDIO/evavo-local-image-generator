@@ -2,7 +2,7 @@
   "contractVersion": "evavo_repository_capabilities_v1",
   "repository": "EVAVO-STUDIO/evavo-local-image-generator",
   "authority": "local-image-generation-control-plane",
-  "summary": "EVAVO's Windows-first local ComfyUI image-generation control plane and agent transport layer. It owns native ComfyUI discovery/provisioning/health, model inventory, live workflow preflight, real prompt submission/completion/output collection, bounded batch execution, shared task history, MCP delivery to local hosts and secure ChatGPT tunnelling. Its optional loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. The deterministic mock is test infrastructure only; Local Image Generator is not Art Studio, does not provide creative approval and cannot claim real image generation without a healthy native ComfyUI backend.",
+  "summary": "EVAVO's Windows-first local ComfyUI image-generation control plane and agent transport layer. It owns native ComfyUI discovery/provisioning/health, model inventory, live workflow preflight, real prompt submission/completion/output collection, bounded batch execution, shared task history, MCP delivery to local hosts and secure ChatGPT tunnelling. Its optional hardened loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. The deterministic mock is test infrastructure only; Local Image Generator is not Art Studio, does not provide creative approval and cannot claim real image generation without a healthy native ComfyUI backend.",
   "capabilities": [
     {
       "id": "local-image.backend.discover-health",
@@ -105,13 +105,23 @@
       "requires": ["Existing authorised OpenAI tunnel identity/key", "Verified tunnel-client release"]
     },
     {
+      "id": "local-image.gateway.private-contract",
+      "title": "Expose a hardened private loopback compatibility gateway",
+      "description": "Expose REST/WebSocket compatibility only on loopback with CORS disabled by default, pre-parse request-body caps including chunked bodies, bounded project/timeout fields, default-denied per-request workflow file paths, atomic cross-process task persistence, interprocess task-ID allocation and fail-closed corrupt-state handling.",
+      "interfaces": ["http-gateway", "automation", "testing"],
+      "effects": ["read", "compute", "network", "execute", "write"],
+      "entrypoints": ["GET /health", "GET /tasks", "GET /tasks/{task_id}/status", "WS /ws/progress/{task_id}", "GATEWAY-INTEGRATION-GUIDE.md"],
+      "tags": ["gateway", "loopback", "cors", "request-limit", "workflow-safety", "task-state", "locking"],
+      "requires": ["Trusted local host", "Native ComfyUI for healthy owned image generation"]
+    },
+    {
       "id": "local-image.gateway.aux-provider-delegation",
       "title": "Delegate optional gateway media to governed sibling Studio providers",
-      "description": "Keep image ownership in this repository while allowing the loopback compatibility gateway to delegate video, audio and 3D tasks only to readiness-checked sibling providers. Provider execution is fail-closed, receipt-backed, timeout-bounded and output-confined; unavailable providers produce structured failures rather than fake completion.",
+      "description": "Keep image ownership in this repository while allowing the loopback compatibility gateway to delegate video, audio and 3D tasks only to readiness-checked sibling providers. Provider execution is fail-closed, receipt-backed, timeout-bounded, output-confined and digest-verified when a receipt supplies a hash; unavailable providers produce structured failures rather than fake completion.",
       "interfaces": ["http-gateway", "automation"],
       "effects": ["read", "compute", "network", "execute", "write"],
       "entrypoints": ["GET /services", "GET /capabilities", "POST /generate/video", "POST /generate/audio", "POST /generate/3d", "GATEWAY-AUX-PROVIDERS.md"],
-      "tags": ["gateway", "delegation", "video", "audio", "3d", "providers", "fail-closed"],
+      "tags": ["gateway", "delegation", "video", "audio", "3d", "providers", "fail-closed", "digest"],
       "requires": ["Loopback gateway", "Explicitly ready reviewed provider for the requested delegated modality"]
     },
     {
@@ -128,7 +138,7 @@
   "brain": {
     "consult": true,
     "sanityCheck": true,
-    "topics": ["local image generation", "ComfyUI readiness", "model inventory", "workflow preflight", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "governed gateway provider delegation"]
+    "topics": ["local image generation", "ComfyUI readiness", "model inventory", "workflow preflight", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "hardened private gateway", "governed gateway provider delegation"]
   },
-  "reviewedAt": "2026-09-09T16:55:00+10:00"
+  "reviewedAt": "2026-09-09T17:18:00+10:00"
 }
