@@ -29,6 +29,7 @@ EXPECTED_TOOLS = {
     "discover_backends",
     "list_checkpoints",
     "model_inventory",
+    "workflow_preflight",
     "generate_image",
     "generate_batch",
     "generation_status",
@@ -172,6 +173,17 @@ class AgentIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as state_directory, tempfile.TemporaryDirectory() as output_directory:
             history_file = Path(state_directory) / "agent-task-history.json"
+            valid_workflow = Path(state_directory) / "valid-workflow.json"
+            invalid_workflow = Path(state_directory) / "invalid-workflow.json"
+            valid_workflow.write_text(
+                json.dumps({"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "evavo-test-unet.safetensors"}}}),
+                encoding="utf-8",
+            )
+            invalid_workflow.write_text(
+                json.dumps({"1": {"class_type": "UNETLoader", "inputs": {"unet_name": "missing-unet.safetensors"}}}),
+                encoding="utf-8",
+            )
+
             env = os.environ.copy()
             env["PYTHONPATH"] = str(ROOT)
             env["PYTHONUNBUFFERED"] = "1"
@@ -223,6 +235,30 @@ class AgentIntegrationTests(unittest.TestCase):
                             self.assertTrue(entry.get("available"), entry)
                             self.assertEqual(entry.get("count"), 1)
                             self.assertIn(expected_model, entry.get("items", []))
+
+                        valid_preflight = await client.call_tool(
+                            "workflow_preflight",
+                            {"workflow_path": str(valid_workflow), "auto_start": False},
+                        )
+                        valid_preflight_payload = valid_preflight.structured_content
+                        self.assertIsInstance(valid_preflight_payload, dict)
+                        assert isinstance(valid_preflight_payload, dict)
+                        self.assertTrue(valid_preflight_payload.get("ok"), valid_preflight_payload)
+                        self.assertEqual(valid_preflight_payload.get("status"), "compatible")
+                        self.assertEqual(valid_preflight_payload.get("preflight", {}).get("node_classes"), ["UNETLoader"])
+
+                        invalid_preflight = await client.call_tool(
+                            "workflow_preflight",
+                            {"workflow_path": str(invalid_workflow), "auto_start": False},
+                        )
+                        invalid_preflight_payload = invalid_preflight.structured_content
+                        self.assertIsInstance(invalid_preflight_payload, dict)
+                        assert isinstance(invalid_preflight_payload, dict)
+                        self.assertFalse(invalid_preflight_payload.get("ok"), invalid_preflight_payload)
+                        self.assertEqual(invalid_preflight_payload.get("status"), "incompatible")
+                        invalid_choices = invalid_preflight_payload.get("preflight", {}).get("invalid_choices", [])
+                        self.assertTrue(invalid_choices, invalid_preflight_payload)
+                        self.assertEqual(invalid_choices[0].get("value"), "missing-unet.safetensors")
 
                         single = await client.call_tool(
                             "generate_image",
