@@ -45,10 +45,10 @@ if (-not $TunnelId -and (Test-Path $statePath)) {
 }
 
 if (-not $TunnelId) {
-    Fail "No OpenAI tunnel ID is configured. Create/associate a Secure MCP Tunnel in OpenAI Platform, then set EVAVO_OPENAI_TUNNEL_ID or pass -TunnelId tunnel_..."
+    Fail "No OpenAI tunnel ID is configured. Create/associate a Secure MCP Tunnel in OpenAI Platform, then set EVAVO_OPENAI_TUNNEL_ID or pass -TunnelId tunnel_<32 lowercase hex characters>."
 }
-if ($TunnelId -notmatch '^tunnel_[A-Za-z0-9_-]{8,}$') {
-    Fail "TunnelId does not look like an OpenAI tunnel ID: $TunnelId"
+if ($TunnelId -notmatch '^tunnel_[0-9a-f]{32}$') {
+    Fail "TunnelId must match OpenAI's tunnel_<32 lowercase hexadecimal characters> format: $TunnelId"
 }
 
 # Download the latest official public release and verify the SHA-256 digest
@@ -170,35 +170,46 @@ if ($PersistRuntimeKey) {
 
 if (-not $SkipDoctor) {
     $keyAvailable = [bool]$env:CONTROL_PLANE_API_KEY
-    $secureKeyPath = Join-Path $env:LOCALAPPDATA "EVAVO\Secure\chatgpt-tunnel-runtime-key.dpapi"
-    if (-not $keyAvailable -and (Test-Path $secureKeyPath)) {
+    $loadedFromDpapi = $false
+    $secureKeyPath = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "EVAVO\Secure\chatgpt-tunnel-runtime-key.dpapi" } else { $null }
+    if (-not $keyAvailable -and $secureKeyPath -and (Test-Path $secureKeyPath)) {
         try {
             $secure = Get-Content $secureKeyPath -Raw | ConvertTo-SecureString
             $credential = New-Object System.Management.Automation.PSCredential("evavo-tunnel", $secure)
             $env:CONTROL_PLANE_API_KEY = $credential.GetNetworkCredential().Password
             $keyAvailable = [bool]$env:CONTROL_PLANE_API_KEY
+            $loadedFromDpapi = $keyAvailable
         }
         catch {
             Write-Host "Stored tunnel key could not be decrypted in this Windows user context." -ForegroundColor Yellow
         }
     }
-    if ($keyAvailable) {
-        Write-Host "Running OpenAI tunnel-client doctor..." -ForegroundColor Cyan
-        & $binary doctor --profile $Profile --explain
-        if ($LASTEXITCODE -ne 0) {
-            Fail "OpenAI tunnel-client doctor reported a blocking problem."
+    try {
+        if ($keyAvailable) {
+            Write-Host "Running tunnel-client local preflight doctor..." -ForegroundColor Cyan
+            & $binary doctor --profile $Profile --explain
+            if ($LASTEXITCODE -ne 0) {
+                Fail "OpenAI tunnel-client local preflight doctor reported a blocking problem."
+            }
+            Write-Host "Local tunnel preflight passed. Runtime authorization/workspace visibility is validated by the running tunnel and ChatGPT connector setup, not by doctor alone." -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "Tunnel profile installed, but CONTROL_PLANE_API_KEY is not available, so tunnel-client doctor was skipped." -ForegroundColor Yellow
+            Write-Host "Set the runtime key for this shell or run SAVE-CHATGPT-TUNNEL-KEY.ps1 once for encrypted Windows-user storage." -ForegroundColor Yellow
         }
     }
-    else {
-        Write-Host "Tunnel profile installed, but CONTROL_PLANE_API_KEY is not available, so control-plane doctor was skipped." -ForegroundColor Yellow
-        Write-Host "Set the runtime key for this shell or run SAVE-CHATGPT-TUNNEL-KEY.ps1 once for encrypted Windows-user storage." -ForegroundColor Yellow
+    finally {
+        if ($loadedFromDpapi) {
+            $env:CONTROL_PLANE_API_KEY = $null
+            $credential = $null
+        }
     }
 }
 
-Write-Host "" 
+Write-Host ""
 Write-Host "EVAVO ChatGPT Secure MCP Tunnel profile is configured." -ForegroundColor Green
 Write-Host "  Tunnel ID: $TunnelId" -ForegroundColor Green
 Write-Host "  Profile:   $Profile" -ForegroundColor Green
 Write-Host "  Private MCP target: $mcpUrl" -ForegroundColor Green
 Write-Host "  Binary:    $binary" -ForegroundColor Green
-Write-Host "Run START-CHATGPT-MCP-TUNNEL.ps1 to connect this workstation to OpenAI." -ForegroundColor Green
+Write-Host "Run START-CHATGPT-MCP-TUNNEL.ps1 to start the outbound tunnel runtime." -ForegroundColor Green
