@@ -1,100 +1,61 @@
-# FINAL STEP: Complete the Upgrade
+# EVAVO Local Image Generator — Current Final Instructions
 
-## Status: 99% Complete ✅
+The old "99% complete / just commit these files" milestone is finished and superseded. The repository is already being maintained directly on `main`; the remaining proof of readiness belongs on the actual Windows workstation/GPU.
 
-All automation files are created and ready in:
-```
-C:\Gitrepos\evavo-local-image-generator\
-```
-
-## Files Ready to Commit (6 new production files):
-
-1. **EVAVO-AUTOMATION.py** - Main automation script (production-ready)
-2. **AUTOMATION-GUIDE.md** - Complete documentation
-3. **CLAUDE-UPGRADE-COMPLETE.md** - Upgrade summary
-4. **LINUX_GENERATION_RUNNER.py** - Linux VM runner
-5. **COMMIT-UPGRADE.ps1** - Automated commit script
-6. **UPGRADE-SUMMARY.txt** - Reference guide
-
-## 🚀 FINAL STEP: Run From Windows PowerShell
-
-The only remaining step is to commit and push. This MUST be done from Windows (not Linux VM).
-
-### Option 1: Automated (Recommended)
-
-Open Windows PowerShell and run:
+## Canonical workstation command
 
 ```powershell
 cd C:\Gitrepos\evavo-local-image-generator
-.\COMMIT-UPGRADE.ps1
+git pull --ff-only origin main
+.\UPDATE-AND-VERIFY-EVAVO.ps1
 ```
 
-That's it! The script handles everything.
+That command is the supported end-to-end setup/verification path. It does **not** blindly overwrite a dirty worktree.
 
-### Option 2: Manual Git Commands
+## What it verifies
 
-Open Windows Command Prompt or PowerShell:
+- current Python sources compile;
+- supported PowerShell scripts parse before configuration writes;
+- modern root/package test suites pass;
+- retained legacy launchers delegate safely and do not revive blanket process kills, hidden service graphs, fake multimodal outputs, or destructive source regenerators;
+- native ComfyUI can be discovered/repaired/provisioned when allowed;
+- the active workflow/model contract is ready;
+- Claude stdio MCP/private HTTP MCP are configured;
+- final backend status is healthy;
+- ChatGPT Secure MCP Tunnel is configured/started when its OpenAI tunnel ID/runtime key are already available.
 
-```bash
-cd C:\Gitrepos\evavo-local-image-generator
-git add -A
-git commit -m "feat: EVAVO fully automated generation system - production ready"
-git push origin main
+## Real image proof
+
+```powershell
+python evavo.py generate --prompts "EVAVO final real-render smoke test" --project final_smoke --wait
 ```
 
-### Option 3: From Git Bash or IDE
+A real production proof is a `completed` task with an actual non-empty downloaded image path. A deterministic mock queue response is not sufficient.
 
-Use your preferred git interface to:
-1. Stage all files
-2. Commit with message: "feat: EVAVO fully automated generation - production ready"
-3. Push to origin main
+## Claude
 
-## ✅ After Commit & Push
+Restart Claude Desktop after the updater changes its MCP configuration. Claude uses local stdio MCP.
 
-Once committed to main, you can immediately use:
+## ChatGPT
 
-```bash
-# Test the automation
-python EVAVO-AUTOMATION.py --help
+ChatGPT uses OpenAI Secure MCP Tunnel to reach the private workstation MCP listener. See `CHATGPT-TUNNEL.md`. A passing local tunnel doctor proves local profile/integrity/process readiness, not by itself workspace visibility in ChatGPT.
 
-# Run tests only
-python EVAVO-AUTOMATION.py --mode test
+## No manual commit script required
 
-# Full generation
-python EVAVO-AUTOMATION.py
+Do not use old `COMMIT-UPGRADE.ps1`, `PUSH-UPGRADE-TO-MAIN.ps1`, or milestone instructions as the primary workflow. Current repository changes are committed directly to `main`; workstation deployment should focus on pulling/verifying the exact head.
 
-# From Claude - just ask!
-# From ChatGPT - share repo and ask to run it!
-```
+## Current scope
 
-## 📊 What Gets Generated
+This repository verifies native **image generation**. Historical claims of automatic video/audio/3D/particle/text/PBR generation in this repo are superseded.
 
-71 real multi-modal tests across:
-- 45 Images
-- 3 Videos
-- 6 Audio files
-- 3 Text samples
-- 4 Particle systems
-- 6 3D Models
-- 4 Texture sets
+Current source-of-truth docs:
 
-All saved to: `C:\Users\User\beestation\evavo-generation\`
-
-## ⏱️ Time Required
-
-- Commit & Push: **2 minutes**
-- Test run: **5-10 minutes**
-- Full generation: **15-30 minutes** (depending on GPU)
-
-## 🎯 That's All!
-
-Once you run the commit script:
-1. Everything is saved to git
-2. Claude and ChatGPT can use it
-3. You have full automation for EVAVO generation
-4. Production-ready system deployed
-
----
-
-**You're 99% there! Just need to run the PowerShell script from Windows.**
-
+- `README.md`
+- `CLAUDE.md`
+- `AGENT-INTEGRATION.md`
+- `AUTOMATION-GUIDE.md`
+- `OPERATIONS-GUIDE.md`
+- `DEPLOYMENT-CHECKLIST.md`
+- `GATEWAY-INTEGRATION-GUIDE.md`
+- `CHATGPT-TUNNEL.md`
+- `QUICK-REFERENCE.md`
