@@ -2,7 +2,8 @@
 param(
     [int]$Port = 8765,
     [string]$Path = "/mcp",
-    [switch]$JsonResponse
+    [switch]$JsonResponse,
+    [switch]$SkipValidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,9 +25,6 @@ if (-not $Path.StartsWith("/")) {
     throw "Path must start with '/'."
 }
 
-# HTTP MCP may provision the fixed official ComfyUI runtime and may install an
-# owner-configured checkpoint when the built-in workflow needs one. No arbitrary
-# checkpoint URL is accepted through an MCP tool argument.
 $env:EVAVO_AUTO_PROVISION_COMFYUI = "1"
 $env:EVAVO_AUTO_PROVISION_CHECKPOINT = "1"
 
@@ -42,16 +40,18 @@ if ($listener) {
     throw "Port $Port is already owned by PID $($listener.OwningProcess), which is not the EVAVO MCP server. Choose another -Port or stop that process."
 }
 
-Write-Host "Validating EVAVO agent integration..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "test-agent-integration.py")
-if ($LASTEXITCODE -ne 0) {
-    throw "Agent integration tests failed."
-}
+if (-not $SkipValidation) {
+    Write-Host "Validating EVAVO agent integration..." -ForegroundColor Cyan
+    & $python (Join-Path $PSScriptRoot "test-agent-integration.py")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Agent integration tests failed."
+    }
 
-Write-Host "Checking EVAVO/ComfyUI environment..." -ForegroundColor Cyan
-& $python (Join-Path $PSScriptRoot "evavo.py") doctor
-if ($LASTEXITCODE -ne 0) {
-    throw "EVAVO operations doctor found a blocking problem."
+    Write-Host "Checking EVAVO/ComfyUI environment..." -ForegroundColor Cyan
+    & $python (Join-Path $PSScriptRoot "evavo.py") doctor
+    if ($LASTEXITCODE -ne 0) {
+        throw "EVAVO operations doctor found a blocking problem."
+    }
 }
 
 $argsList = @(
