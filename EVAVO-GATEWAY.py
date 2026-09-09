@@ -36,6 +36,7 @@ GATEWAY_PORT = int(os.getenv("EVAVO_GATEWAY_PORT", "8000"))
 MAX_PROMPT_CHARS = int(os.getenv("EVAVO_GATEWAY_MAX_PROMPT_CHARS", "100000"))
 IMAGE_TIMEOUT_SECONDS = float(os.getenv("EVAVO_GATEWAY_IMAGE_TIMEOUT", "600"))
 TASK_ID_RE = re.compile(r"^(img|vid|aud|3d)_\d+$")
+LOOPBACK_ORIGIN_RE = re.compile(r"^https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$", re.IGNORECASE)
 
 
 class GenerationRequest(BaseModel):
@@ -321,6 +322,21 @@ async def lifespan(_: FastAPI):
         await asyncio.gather(*pending, return_exceptions=True)
 
 
+def _configured_cors_origins() -> list[str]:
+    """Return explicit loopback-only CORS origins; disabled by default."""
+    raw = os.getenv("EVAVO_GATEWAY_CORS_ORIGINS", "").strip()
+    if not raw:
+        return []
+    origins = [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
+    invalid = [origin for origin in origins if origin == "*" or not LOOPBACK_ORIGIN_RE.fullmatch(origin)]
+    if invalid:
+        raise RuntimeError(
+            "EVAVO_GATEWAY_CORS_ORIGINS accepts only explicit loopback http/https origins; invalid: "
+            + ", ".join(invalid)
+        )
+    return list(dict.fromkeys(origins))
+
+
 app = FastAPI(
     title="EVAVO Unified Generator",
     version="2.1.0",
@@ -328,22 +344,21 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-cors_raw = os.getenv("EVAVO_GATEWAY_CORS_ORIGINS", "*")
-cors_origins = [item.strip() for item in cors_raw.split(",") if item.strip()] or ["*"]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+cors_origins = _configured_cors_origins()
+if cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
     comfy_ok = await _check_comfyui_health()
     if comfy_ok:
-        # This exact healthy response is a compatibility contract.
         return {"status": "healthy", "gateway": "ok", "comfyui": "ok"}
     return {"status": "degraded", "gateway": "ok", "comfyui": "offline"}
 
@@ -351,7 +366,6 @@ async def health() -> Dict[str, str]:
 @app.get("/services")
 async def services() -> Dict[str, Any]:
     """Additive provider readiness detail; `/health` stays compatibility-stable."""
-
     comfy_ready = await _check_comfyui_health()
     return await _providers().services(comfyui_ready=comfy_ready)
 
