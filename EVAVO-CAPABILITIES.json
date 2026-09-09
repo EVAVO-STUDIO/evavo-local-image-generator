@@ -16,11 +16,13 @@
       "verify": "python evavo.py verify --full",
       "strict_windows_verify": "python evavo.py verify --full --require-powershell",
       "repair": "python agent-doctor.py --repair --provision",
+      "comfyui_dependency_repair": "python repair-comfyui-dependencies.py",
       "generate": "python evavo.py generate --prompts \"your prompt\" --project demo --wait",
       "status": "python evavo.py status"
     },
     "python": {
       "backend": "evavo_local_image_generator.backends.ComfyUIBackend",
+      "repair_bridge": "evavo_local_image_generator.comfyui_repair.repair_backend_dependencies",
       "wrapper": "evavo-wrapper.py",
       "owned_generation_modalities": ["image"]
     },
@@ -33,6 +35,11 @@
         "purpose": ["local MCP clients", "integration testing", "private target for OpenAI Secure MCP Tunnel"]
       },
       "owned_generation_modalities": ["image"],
+      "client_parity": {
+        "claude": "stdio-mcp",
+        "chatgpt": "same private MCP through OpenAI Secure MCP Tunnel",
+        "same_tool_implementation": true
+      },
       "file_policy": {
         "default_output_root_environment": "EVAVO_GENERATION_OUTPUT_DIR",
         "additional_output_roots_environment": "EVAVO_MCP_OUTPUT_ROOTS",
@@ -46,6 +53,19 @@
         "persistent_profiles_keep_non_secret_policy": true
       },
       "invalid_request_preflight_before_backend_work": true,
+      "startup_dependency_repair": {
+        "tool": "repair_backend_dependencies",
+        "normal_admission_category": "missing_dependency",
+        "custom_node_core_sync_allowed": false,
+        "arbitrary_package_input_allowed": false,
+        "arbitrary_python_path_allowed": false,
+        "arbitrary_comfyui_path_allowed": false,
+        "uses_checkout_requirements": true,
+        "uses_selected_comfyui_python": true,
+        "shell_execution": false,
+        "structured_receipt": true,
+        "force_sync_explicit_only": true
+      },
       "generation_status": {
         "source": ["GET /api/jobs/<job_id>", "GET /history/<prompt_id>", "GET /queue"],
         "normalized_states": ["queued", "running", "completed", "failed", "cancelled", "unknown"],
@@ -60,7 +80,7 @@
         "legacy_running_broad_interrupt_allowed": false
       },
       "tools": [
-        "provision_backend", "ensure_backend", "diagnose_backend", "last_startup_failure", "health_check",
+        "provision_backend", "ensure_backend", "diagnose_backend", "last_startup_failure", "repair_backend_dependencies", "health_check",
         "discover_backends", "list_checkpoints", "model_inventory", "workflow_preflight", "generate_image",
         "generate_batch", "generation_status", "cancel_generation", "collect_generation", "read_output_image",
         "task_history", "task_statistics", "stop_managed_backend"
@@ -70,9 +90,14 @@
       "transport": "openai-secure-mcp-tunnel",
       "direct_localhost_supported": false,
       "runbook": "CHATGPT-TUNNEL.md",
-      "private_mcp_default": "http://127.0.0.1:8765/mcp"
+      "private_mcp_default": "http://127.0.0.1:8765/mcp",
+      "shared_mcp_tool_parity_with_claude": true
     },
-    "claude": {"transport": "stdio-mcp", "installer": "INSTALL-CLAUDE-MCP.ps1"},
+    "claude": {
+      "transport": "stdio-mcp",
+      "installer": "INSTALL-CLAUDE-MCP.ps1",
+      "shared_mcp_tool_parity_with_chatgpt": true
+    },
     "http_gateway": {
       "optional": true,
       "default_url": "http://127.0.0.1:8000",
@@ -114,6 +139,8 @@
     "auto_discover_comfyui": true,
     "auto_start_native_comfyui": true,
     "optional_runtime_provisioning": true,
+    "bounded_dependency_repair": true,
+    "dependency_repair_requires_structured_evidence_by_default": true,
     "optional_checkpoint_repair": true,
     "shared_model_roots": true,
     "custom_workflow_preflight": true,
@@ -151,6 +178,11 @@
     "mcp_failed_prompt_not_reported_as_queued": true,
     "mcp_targeted_cancel_preferred": true,
     "mcp_legacy_running_broad_interrupt_allowed": false,
+    "mcp_dependency_repair_arbitrary_package_allowed": false,
+    "mcp_dependency_repair_arbitrary_python_path_allowed": false,
+    "mcp_dependency_repair_arbitrary_comfyui_path_allowed": false,
+    "mcp_dependency_repair_custom_node_core_sync_allowed": false,
+    "mcp_dependency_repair_shell_execution": false,
     "broad_python_process_kill": false,
     "managed_process_identity_verification": true,
     "user_managed_comfyui_never_killed": true,
@@ -170,7 +202,7 @@
   "not_owned_production_modalities": ["video", "audio", "3d", "particles", "general-text", "dedicated-pbr-textures"],
   "delegated_gateway_modalities": ["video", "audio", "3d"],
   "source_of_truth": [
-    "README.md", "CLAUDE.md", "AGENT-INTEGRATION.md", "AGENT-RECOVERY.md", "AUTOMATION-GUIDE.md",
+    "AGENTS.md", "README.md", "CLAUDE.md", "AGENT-INTEGRATION.md", "AGENT-RECOVERY.md", "COMFYUI-STARTUP-DIAGNOSTICS.md", "AUTOMATION-GUIDE.md",
     "OPERATIONS-GUIDE.md", "DEPLOYMENT-CHECKLIST.md", "GATEWAY-INTEGRATION-GUIDE.md", "GATEWAY-AUX-PROVIDERS.md",
     "PROVIDER-INTEGRATION-GUIDE.md", "CHATGPT-TUNNEL.md", "QUICK-REFERENCE.md", ".evavo/capabilities.json"
   ]
