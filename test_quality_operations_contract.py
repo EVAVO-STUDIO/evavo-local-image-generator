@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent
 
 QUALITY_PYTHON = (
     "quality-benchmark.py",
+    "quality-report.py",
     "kokoro-quality-test.py",
     "kokoro-provider.py",
 )
@@ -21,6 +22,7 @@ QUALITY_PYTHON = (
 QUALITY_POWERSHELL = (
     "RUN-PRODUCTION-QUALITY.ps1",
     "RUN-HERO-QUALITY.ps1",
+    "RUN-FULL-QUALITY-RELEASE.ps1",
     "START-EVAVO-QUALITY-STACK.ps1",
     "SETUP-COMFYUI-NEXT.ps1",
 )
@@ -134,12 +136,23 @@ class QualityOperationsContractTests(unittest.TestCase):
         self.assertEqual(forwarded["prompt"], payload["prompt"])
         self.assertEqual(forwarded["project_name"], payload["project_name"])
 
-    def test_hero_runner_compares_against_single_pass_and_legacy_profiles(self):
+    def test_hero_runner_builds_review_package(self):
         source = (ROOT / "RUN-HERO-QUALITY.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("quality,hero,detail,euler_reference,legacy_768_reference", source)
         self.assertIn("1337,424242", source)
         self.assertIn("test_quality_profiles.py", source)
         self.assertIn("quality-benchmark.py", source)
+        self.assertIn("quality-report.py", source)
+        self.assertIn("human_review.csv", source)
+
+    def test_full_release_runs_system_gate_before_expensive_hero_review(self):
+        source = (ROOT / "RUN-FULL-QUALITY-RELEASE.ps1").read_text(encoding="utf-8-sig")
+        production_index = source.index("RUN-PRODUCTION-QUALITY.ps1")
+        hero_index = source.index("RUN-HERO-QUALITY.ps1")
+        self.assertLess(production_index, hero_index)
+        self.assertIn('"-Mode", "full"', source)
+        self.assertIn("Require3DExecution", source)
+        self.assertIn("human_review.csv", source)
 
     def test_3d_startup_is_opt_in_and_token_gated(self):
         source = (ROOT / "START-EVAVO-QUALITY-STACK.ps1").read_text(encoding="utf-8-sig")
