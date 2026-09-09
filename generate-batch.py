@@ -160,6 +160,7 @@ def _receipt(result: Dict[str, Any]) -> Dict[str, Any]:
 
 def _generation_options(args: argparse.Namespace) -> Dict[str, Any]:
     mapping = {
+        "negative_prompt": args.negative_prompt if args.negative_prompt else None,
         "quality_profile": args.quality_profile,
         "width": args.width,
         "height": args.height,
