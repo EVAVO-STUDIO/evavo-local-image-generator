@@ -20,7 +20,8 @@ from typing import Iterable, Sequence
 ROOT = Path(__file__).resolve().parent
 DEFAULT_MESSAGE = "chore(repo): update local EVAVO image-generator changes"
 EXPECTED_ORIGIN_RE = re.compile(
-    r"(?:github\.com[:/])EVAVO-STUDIO/evavo-local-image-generator(?:\.git)?$",
+    r"^(?:https://github\.com/|ssh://git@github\.com/|git@github\.com:)"
+    r"EVAVO-STUDIO/evavo-local-image-generator(?:\.git)?$",
     re.IGNORECASE,
 )
 
@@ -88,7 +89,7 @@ def _assert_repository() -> str:
     remote = _run(["remote", "get-url", "origin"]).stdout.strip()
     if not remote:
         raise GitSafetyError("origin remote is not configured")
-    if not EXPECTED_ORIGIN_RE.search(remote):
+    if not EXPECTED_ORIGIN_RE.fullmatch(remote):
         raise GitSafetyError(f"origin points to an unexpected repository: {remote}")
     return remote
 
@@ -171,8 +172,26 @@ def _run_verifier(skip_verify: bool) -> None:
         raise GitSafetyError(f"authoritative EVAVO verification failed with exit {completed.returncode}")
 
 
+def _assert_worktree_unchanged(expected_paths: Iterable[str]) -> list[str]:
+    expected = sorted({_normalize_repo_path(path) for path in expected_paths if path})
+    current = _assert_safe_changes(_status_paths())
+    if current != expected:
+        expected_set = set(expected)
+        current_set = set(current)
+        added = sorted(current_set - expected_set)
+        removed = sorted(expected_set - current_set)
+        detail: list[str] = []
+        if added:
+            detail.append("new/changed after verification: " + ", ".join(added[:20]))
+        if removed:
+            detail.append("no longer changed after verification: " + ", ".join(removed[:20]))
+        raise GitSafetyError("working tree changed during verification; refusing to stage: " + " | ".join(detail))
+    return current
+
+
 def _stage_and_commit(message: str, paths: list[str]) -> str | None:
-    if not paths:
+    current = _assert_worktree_unchanged(paths)
+    if not current:
         return None
     _run(["add", "-A", "--", "."])
     staged = _lines(["diff", "--cached", "--name-only", "--diff-filter=ACDMRTUXB"])
@@ -222,8 +241,9 @@ def main() -> int:
             if commit_sha:
                 print(f"Created commit {commit_sha}")
         elif ahead:
+            _run_verifier(args.skip_verify)
             commit_sha = _run(["rev-parse", "HEAD"]).stdout.strip()
-            print(f"Working tree is clean; {ahead} reviewed local commit(s) are ready to push.")
+            print(f"Working tree is clean; {ahead} verified local commit(s) are ready to push.")
         else:
             print("Working tree is clean and main already matches origin/main.")
             return 0
