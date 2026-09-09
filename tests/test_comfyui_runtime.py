@@ -37,9 +37,24 @@ class ComfyUIRuntimeTests(unittest.TestCase):
             portable=True,
         )
         command = install.command(cpu=True, disable_all_custom_nodes=True)
+        self.assertEqual(command[0], str(install.python))
+        self.assertEqual(command[1], "-s")
+        self.assertEqual(command[2], str(install.main_py))
         self.assertIn("--cpu", command)
         self.assertIn("--disable-all-custom-nodes", command)
         self.assertIn("--windows-standalone-build", command)
+
+    def test_source_install_does_not_add_portable_python_flag(self) -> None:
+        install = runtime.ComfyUIInstall(
+            root=Path("C:/AI/ComfyUI"),
+            python=Path("C:/AI/ComfyUI/.venv/Scripts/python.exe"),
+            main_py=Path("C:/AI/ComfyUI/main.py"),
+            portable=False,
+        )
+        command = install.command(cpu=True)
+        self.assertEqual(command[:2], [str(install.python), str(install.main_py)])
+        self.assertNotIn("-s", command)
+        self.assertNotIn("--windows-standalone-build", command)
 
     def test_missing_custom_node_dependency_is_classified(self) -> None:
         output = """Prestartup script for custom_nodes/example\nTraceback (most recent call last):\nModuleNotFoundError: No module named 'kornia'\n"""
