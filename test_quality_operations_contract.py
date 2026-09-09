@@ -18,6 +18,7 @@ QUALITY_PYTHON = (
     "quality-review-summary.py",
     "runtime-snapshot.py",
     "lora-sweep.py",
+    "gateway-smoke-test.py",
     "kokoro-quality-test.py",
     "kokoro-provider.py",
 )
@@ -26,6 +27,7 @@ QUALITY_POWERSHELL = (
     "RUN-PRODUCTION-QUALITY.ps1",
     "RUN-HERO-QUALITY.ps1",
     "RUN-LORA-SWEEP.ps1",
+    "RUN-GATEWAY-QUALITY-SMOKE.ps1",
     "RUN-FULL-QUALITY-RELEASE.ps1",
     "FINALIZE-QUALITY-REVIEW.ps1",
     "START-EVAVO-QUALITY-STACK.ps1",
@@ -61,7 +63,7 @@ class FakeComfyUIBackend:
 
 class QualityOperationsContractTests(unittest.TestCase):
     def test_quality_entrypoints_exist(self):
-        for relative in (*QUALITY_PYTHON, *QUALITY_POWERSHELL, "QUALITY-PRODUCTION.md"):
+        for relative in (*QUALITY_PYTHON, *QUALITY_POWERSHELL, "QUALITY-PRODUCTION.md", "QUALITY-ADVANCED-WORKFLOWS.md", "GATEWAY-IMAGE-QUALITY.md"):
             with self.subTest(path=relative):
                 self.assertTrue((ROOT / relative).is_file(), f"missing quality entrypoint: {relative}")
 
@@ -165,6 +167,19 @@ class QualityOperationsContractTests(unittest.TestCase):
         self.assertIn("quality-report.py", source)
         self.assertIn("human_review.csv", source)
         self.assertIn("test_quality_profiles.py", source)
+
+    def test_gateway_smoke_validates_current_quality_contract(self):
+        source = (ROOT / "RUN-GATEWAY-QUALITY-SMOKE.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("gateway-smoke-test.py", source)
+        self.assertIn("per_request_quality", source)
+        self.assertIn("hero_two_pass", source)
+        self.assertIn("workflow_sha256", source)
+        self.assertIn("-StartIfNeeded", source)
+        stack = (ROOT / "START-EVAVO-QUALITY-STACK.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("[switch]$StartGateway", stack)
+        self.assertIn("Test-GatewayQualityContract", stack)
+        self.assertIn("START-GATEWAY.ps1", stack)
+        self.assertIn("EVAVO_COMFYUI_ENDPOINT", stack)
 
     def test_review_finalizer_never_mutates_defaults(self):
         source = (ROOT / "FINALIZE-QUALITY-REVIEW.ps1").read_text(encoding="utf-8-sig")
