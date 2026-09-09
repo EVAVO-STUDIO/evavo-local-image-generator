@@ -39,6 +39,30 @@ def _env_true(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _lexical_absolute(value: str | Path) -> Path:
+    """Normalize an absolute path without following symlinks/junctions."""
+    return Path(os.path.abspath(os.path.expanduser(str(value))))
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
+
+
+def _resolve_ordinary_file(value: str | Path, *, label: str) -> tuple[Path, Path]:
+    lexical = _lexical_absolute(value)
+    if lexical.is_symlink():
+        raise ValueError(f"{label} must not be a symlink")
+    try:
+        resolved = lexical.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{label} is unavailable: {exc}") from exc
+    if not _same_path(lexical, resolved):
+        raise ValueError(f"{label} traverses a symlink or redirected parent path")
+    if not resolved.is_file():
+        raise ValueError(f"{label} must resolve to an existing ordinary file")
+    return lexical, resolved
+
+
 def _config_int(name: str, default: int, minimum: int, maximum: int, *, clamp: bool) -> int:
     raw = os.getenv(name, str(default)).strip()
     try:
@@ -86,12 +110,15 @@ if REQUEST_WORKFLOW_PATHS_ALLOWED:
         raise RuntimeError(
             "GATEWAY_CONFIG_INVALID:EVAVO_GATEWAY_WORKFLOW_ROOT:required when EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS=1"
         )
+    root_lexical = _lexical_absolute(WORKFLOW_ROOT_RAW)
+    if root_lexical.is_symlink():
+        raise RuntimeError("GATEWAY_CONFIG_INVALID:EVAVO_GATEWAY_WORKFLOW_ROOT:must not be a symlink")
     try:
-        REQUEST_WORKFLOW_ROOT = Path(WORKFLOW_ROOT_RAW).expanduser().resolve(strict=True)
+        REQUEST_WORKFLOW_ROOT = root_lexical.resolve(strict=True)
     except OSError as exc:
         raise RuntimeError(f"GATEWAY_CONFIG_INVALID:EVAVO_GATEWAY_WORKFLOW_ROOT:{exc}") from exc
-    if not REQUEST_WORKFLOW_ROOT.is_dir():
-        raise RuntimeError("GATEWAY_CONFIG_INVALID:EVAVO_GATEWAY_WORKFLOW_ROOT:must be an existing directory")
+    if not _same_path(root_lexical, REQUEST_WORKFLOW_ROOT) or not REQUEST_WORKFLOW_ROOT.is_dir():
+        raise RuntimeError("GATEWAY_CONFIG_INVALID:EVAVO_GATEWAY_WORKFLOW_ROOT:must be an existing ordinary directory")
 
 
 class RequestBodyLimitMiddleware:
@@ -368,16 +395,29 @@ def _request_workflow_path(value: Any) -> Optional[str]:
     if REQUEST_WORKFLOW_ROOT is None:
         raise HTTPException(status_code=500, detail="gateway workflow-root configuration is unavailable")
     try:
-        candidate = Path(str(value)).expanduser().resolve(strict=True)
-    except OSError as exc:
-        raise HTTPException(status_code=422, detail=f"workflow_path is unavailable: {exc}") from exc
+        _, candidate = _resolve_ordinary_file(str(value), label="workflow_path")
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         candidate.relative_to(REQUEST_WORKFLOW_ROOT)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail="workflow_path is outside EVAVO_GATEWAY_WORKFLOW_ROOT") from exc
-    if not candidate.is_file():
-        raise HTTPException(status_code=422, detail="workflow_path must resolve to an existing file")
     return str(candidate)
+
+
+def _validated_result_path(raw: Any, task_id: str) -> Path:
+    try:
+        lexical, candidate = _resolve_ordinary_file(str(raw), label="recorded result")
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    task_root = (RESULT_DIR / task_id).resolve()
+    try:
+        candidate.relative_to(task_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=410, detail="Recorded result path is outside the gateway result directory") from exc
+    if not _same_path(lexical, candidate):
+        raise HTTPException(status_code=410, detail="Recorded result path was redirected after generation")
+    return candidate
 
 
 async def _track_add(task: Dict[str, Any]) -> None:
@@ -585,7 +625,7 @@ def _configured_cors_origins() -> list[str]:
 
 app = FastAPI(
     title="EVAVO Unified Generator",
-    version="2.4.0",
+    version="2.5.0",
     description="Stable local image gateway with governed auxiliary provider delegation for ChatGPT, Claude, MCP and HTTP clients.",
     lifespan=lifespan,
 )
@@ -708,16 +748,7 @@ async def result(task_id: str):
                 "progress": int(task.get("progress", 0)),
             },
         )
-    candidate = Path(str(paths[0])).expanduser().resolve()
-    task_root = (RESULT_DIR / task_id).resolve()
-    try:
-        authorized = candidate.is_relative_to(task_root)
-    except ValueError:
-        authorized = False
-    if not authorized:
-        raise HTTPException(status_code=410, detail="Recorded result path is outside the gateway result directory")
-    if not candidate.is_file():
-        raise HTTPException(status_code=410, detail="Result file is no longer available")
+    candidate = _validated_result_path(paths[0], task_id)
     return FileResponse(candidate, filename=candidate.name)
 
 
