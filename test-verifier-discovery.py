@@ -26,6 +26,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
         tests = set(verifier.discover_tests())
         required = {
             "test-capability-manifest.py",
+            "test-comfyui-status.py",
             "test-gateway.py",
             "test-gateway-config-safety.py",
             "test-gateway-config-security.py",
