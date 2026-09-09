@@ -9,7 +9,7 @@ cd C:\Gitrepos\evavo-local-image-generator
 
 For a stale clean checkout first run `git pull --ff-only origin main`.
 
-The updater safely fast-forwards `main`, installs dependencies, runs all discovered verifier suites, prepares/provisions native ComfyUI when allowed, and runs strict doctor. If doctor fails, it may make one evidence-gated core dependency-repair attempt unless `-SkipComfyUIDependencyRepair` is supplied, then reruns strict doctor. After bootstrap and agent configuration it performs one **real native generation smoke proof**; setup does not report success unless the active workflow produces a downloaded, signature-validated image. ChatGPT Secure MCP Tunnel configuration follows when its external tunnel identity/key are available.
+The updater safely fast-forwards `main`, installs dependencies, runs all discovered verifier suites, prepares/provisions native ComfyUI when allowed, and runs strict doctor. If doctor fails, it may make one evidence-gated core dependency-repair attempt unless `-SkipComfyUIDependencyRepair` is supplied, then reruns strict doctor. After strict bootstrap it performs one **real native generation smoke proof before Claude/Windows Startup configuration is written**. Only after a downloaded, signature-validated image exists does it install/reload the agent profiles, run final doctor/status, and conditionally configure the ChatGPT Secure MCP Tunnel.
 
 ## Verification / readiness
 
@@ -22,7 +22,7 @@ python real-generation-smoke.py --json
 .\AGENT-STATUS.ps1
 ```
 
-The deterministic mock/native-only simulator can validate repository contracts, but neither satisfies the canonical workstation's **real production readiness proof**. The updater uses the actual configured native ComfyUI for its final smoke render.
+The deterministic mock/native-only simulator can validate repository contracts, but neither satisfies the canonical workstation's **real production readiness proof**. The updater uses the actual configured native ComfyUI for its smoke render before persistent agent writes.
 
 ## Claude
 
@@ -116,7 +116,7 @@ unknown
 - older ComfyUI + pending prompt: exact pending queue delete;
 - older ComfyUI + running prompt: EVAVO **refuses broad `/interrupt`** and reports targeted cancellation unsupported.
 
-This avoids cancelling unrelated renderer work.
+A running cancel request remains `running` in shared history while EVAVO records request time/method/backend state; terminal `cancelled` is persisted only when ComfyUI confirms it.
 
 ## MCP output/workflow policy
 
@@ -147,7 +147,7 @@ $env:EVAVO_MCP_WORKFLOW_ROOT = "D:\EVAVO\workflows\approved"
 
 Arbitrary output directories/workflow files are denied. Symlinked or redirected paths are rejected. Generated images are signature-validated before promotion and again before MCP image delivery.
 
-Invalid file/wait policy is rejected **before ComfyUI startup, queueing or task creation**.
+Invalid file/wait policy is rejected **before ComfyUI startup, queueing or task creation**. Claude and private-HTTP installers validate this owner policy before writing persistent configuration, even when expensive protocol validation is skipped by the canonical updater.
 
 ## Real CLI image generation
 
@@ -172,14 +172,15 @@ $env:EVAVO_CHECKPOINT_SHA256 = "<optional sha256>"
 
 or explicit HTTPS `EVAVO_CHECKPOINT_URL`. Agent tools cannot invent arbitrary model URLs.
 
-## Shared task history
+## Shared task history / proof status
 
 ```powershell
 python evavo.py tasks --limit 20
 python evavo.py stats
+.\AGENT-STATUS.ps1
 ```
 
-CLI/MCP share atomic lock-protected task history including failed/cancelled reconciliation. The setup smoke proof also records its real prompt ID and validated output under project `setup-smoke`.
+CLI/MCP share atomic lock-protected task history including failed/cancelled reconciliation. The setup smoke proof records its real prompt ID and validated output under project `setup-smoke`; `AGENT-STATUS.ps1` reports the latest proof separately from current live readiness.
 
 ## Optional HTTP gateway
 
