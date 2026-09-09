@@ -36,13 +36,15 @@ if (-not $SkipValidation) {
 }
 
 # This read-only gate always runs, including the canonical updater's fast path.
-Write-Host "Validating MCP filesystem authority before changing login autostart..." -ForegroundColor Cyan
+Write-Host "Validating MCP production authority before changing login autostart..." -ForegroundColor Cyan
 $policyOutput = & $python -m evavo_local_image_generator.mcp_policy --json
-if ($LASTEXITCODE -ne 0) { throw "MCP filesystem policy is invalid. Windows login autostart was not changed." }
+if ($LASTEXITCODE -ne 0) { throw "MCP production policy is invalid. Windows login autostart was not changed." }
 try { $policyResult = ($policyOutput -join "`n") | ConvertFrom-Json }
-catch { throw "MCP filesystem policy returned invalid JSON. Windows login autostart was not changed." }
+catch { throw "MCP production policy returned invalid JSON. Windows login autostart was not changed." }
 $generationOutputDir = [string]$policyResult.policy.default_output_root
-if (-not $generationOutputDir) { throw "MCP filesystem policy did not return a validated default output root. Windows login autostart was not changed." }
+$comfyEndpoint = [string]$policyResult.policy.comfyui_endpoint
+if (-not $generationOutputDir) { throw "MCP production policy did not return a validated default output root. Windows login autostart was not changed." }
+if (-not $comfyEndpoint) { throw "MCP production policy did not return a validated loopback ComfyUI endpoint. Windows login autostart was not changed." }
 
 New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
 
@@ -54,10 +56,6 @@ function ConvertTo-CmdSetLine([string]$Name, [string]$Value) {
     $safe = $Value.Replace('%', '%%')
     return "set `"$Name=$safe`""
 }
-
-$comfyEndpoint = [Environment]::GetEnvironmentVariable("COMFYUI_ENDPOINT")
-if (-not $comfyEndpoint) { $comfyEndpoint = [Environment]::GetEnvironmentVariable("EVAVO_COMFYUI_ENDPOINT") }
-if (-not $comfyEndpoint) { $comfyEndpoint = "http://127.0.0.1:8188" }
 
 $persistedEnvironment = [ordered]@{
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
@@ -113,9 +111,9 @@ start "EVAVO Agent MCP" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -
 Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 
 Write-Host "Installed EVAVO agent MCP autostart: $launcher" -ForegroundColor Green
-Write-Host "ComfyUI endpoint: $comfyEndpoint" -ForegroundColor Green
+Write-Host "ComfyUI endpoint: $comfyEndpoint (policy-validated loopback)" -ForegroundColor Green
 Write-Host "Generation output root: $generationOutputDir" -ForegroundColor Green
-Write-Host "MCP launch and persisted path authority are policy-validated." -ForegroundColor Green
+Write-Host "MCP launch and persisted authority are policy-validated." -ForegroundColor Green
 if ($env:EVAVO_CHECKPOINT_URL) { Write-Host "EVAVO_CHECKPOINT_URL was not persisted because URLs may contain secrets." -ForegroundColor Yellow }
 
 Write-Host "Starting/reloading it now in a hidden process..." -ForegroundColor Cyan
