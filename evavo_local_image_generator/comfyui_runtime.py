@@ -84,7 +84,10 @@ class ComfyUIInstall:
         cpu: bool = False,
         disable_all_custom_nodes: bool = False,
     ) -> List[str]:
-        command = [str(self.python), str(self.main_py)]
+        command = [str(self.python)]
+        if self.portable:
+            command.append("-s")
+        command.append(str(self.main_py))
         if self.portable:
             command.append("--windows-standalone-build")
         command.extend(["--listen", host, "--port", str(port)])
