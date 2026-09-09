@@ -3,7 +3,8 @@
 
 This verifier is intentionally read-only. It checks the critical repository
 contract, compiles Python sources in memory, optionally asks PowerShell to parse
-the canonical Windows scripts, and can run every modern root/package test suite.
+supported Windows scripts, statically rejects retired legacy launcher behavior,
+and can run every modern root/package test suite.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from typing import Any, Dict, Iterable, List, Sequence
 ROOT = Path(__file__).resolve().parent
 
 CRITICAL_FILES: Sequence[str] = (
+    ".mcp.json",
     "evavo.py",
     "verify-evavo.py",
     "evavo_operations.py",
@@ -31,10 +33,27 @@ CRITICAL_FILES: Sequence[str] = (
     "mock-comfyui-server.py",
     "provision-comfyui.py",
     "agent-doctor.py",
+    "legacy_image_cli.py",
+    "claude_control.py",
     "EVAVO-GATEWAY.py",
     "EVAVO-SERVICE-MANAGER.py",
     "gateway-smoke-test.py",
+    "run_autonomous.py",
+    "EVAVO-AUTOMATION.py",
+    "EXECUTE-GENERATION.py",
+    "LAUNCH-GENERATION.py",
+    "RUN-GENERATION.py",
+    "RUN-FULL-GENERATION.py",
+    "LINUX_GENERATION_RUNNER.py",
+    "start_and_generate.py",
+    "demo_autonomous.py",
+    "setup-production.py",
+    "create-complete-production.py",
+    "COMPLETE-MULTIMODAL-TEST.py",
+    "TEST-ALL-AI-SYSTEMS.py",
     "test-gateway.py",
+    "test-legacy-compatibility.py",
+    "test_autonomous.py",
     "test-operations.py",
     "test-provisioning.py",
     "test-backend-automation.py",
@@ -53,6 +72,20 @@ CRITICAL_FILES: Sequence[str] = (
     "START-CHATGPT-MCP-TUNNEL.ps1",
     "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
     "CHATGPT-TUNNEL-DOCTOR.ps1",
+    "START-GATEWAY.ps1",
+    "SETUP-MCP-INTEGRATION.ps1",
+    "VERIFY-INSTALLATION.ps1",
+    "START-EVERYTHING.ps1",
+    "MASTER-AUTOMATION-CONTROLLER.ps1",
+    "RUN-FULL-GENERATION.ps1",
+    "START-SERVICES.ps1",
+    "START-EVAVO-SERVICES.bat",
+    "START-ALL-SERVICES-AND-GENERATE.bat",
+    "FULL-GENERATION-START.bat",
+    "START-AUTONOMOUS.bat",
+    "EVAVO-GENERATE-NOW.bat",
+    "START-GENERATION.bat",
+    "run_full_generation.sh",
     "README.md",
     "AGENT-INTEGRATION.md",
     "CHATGPT-TUNNEL.md",
@@ -72,6 +105,62 @@ POWERSHELL_SCRIPTS: Sequence[str] = (
     "START-CHATGPT-MCP-TUNNEL.ps1",
     "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
     "CHATGPT-TUNNEL-DOCTOR.ps1",
+    "START-GATEWAY.ps1",
+    "SETUP-MCP-INTEGRATION.ps1",
+    "VERIFY-INSTALLATION.ps1",
+    "START-EVERYTHING.ps1",
+    "MASTER-AUTOMATION-CONTROLLER.ps1",
+    "RUN-FULL-GENERATION.ps1",
+    "START-SERVICES.ps1",
+)
+
+LEGACY_RUNTIME_ENTRYPOINTS: Sequence[str] = (
+    "run_autonomous.py",
+    "EVAVO-AUTOMATION.py",
+    "EXECUTE-GENERATION.py",
+    "LAUNCH-GENERATION.py",
+    "RUN-GENERATION.py",
+    "RUN-FULL-GENERATION.py",
+    "LINUX_GENERATION_RUNNER.py",
+    "start_and_generate.py",
+    "demo_autonomous.py",
+    "setup-production.py",
+    "create-complete-production.py",
+    "COMPLETE-MULTIMODAL-TEST.py",
+    "TEST-ALL-AI-SYSTEMS.py",
+    "START-GATEWAY.ps1",
+    "SETUP-MCP-INTEGRATION.ps1",
+    "VERIFY-INSTALLATION.ps1",
+    "START-EVERYTHING.ps1",
+    "MASTER-AUTOMATION-CONTROLLER.ps1",
+    "RUN-FULL-GENERATION.ps1",
+    "START-SERVICES.ps1",
+    "START-ALL-SERVICES-AND-GENERATE.bat",
+    "FULL-GENERATION-START.bat",
+    "START-AUTONOMOUS.bat",
+    "EVAVO-GENERATE-NOW.bat",
+    "START-GENERATION.bat",
+    "run_full_generation.sh",
+)
+
+RETIRED_PATTERNS: Sequence[str] = (
+    "taskkill /f /im python.exe",
+    "taskkill /im python.exe",
+    "cmd /k",
+    "-noexit",
+    "create_new_console",
+    "c:\\ai\\comfyui",
+    "ollama serve",
+    "kokoro-fastapi",
+    "kokoro_endpoint",
+    "model3d_endpoint",
+    "texture_endpoint",
+    "particle_endpoint",
+    "c:\\users\\user\\beestation",
+    "$home/mnt/beestation",
+    "/api/models",
+    "task queued for",
+    "mock_video_data",
 )
 
 
@@ -82,10 +171,11 @@ def _result(name: str, ok: bool, detail: str, *, severity: str = "error", skippe
 def discover_tests() -> List[str]:
     """Discover modern tests by repository naming/location contract."""
     paths = [path for path in ROOT.glob("test-*.py") if path.is_file()]
+    paths.extend(path for path in ROOT.glob("test_*.py") if path.is_file())
     package_tests = ROOT / "evavo_local_image_generator" / "tests"
     if package_tests.is_dir():
         paths.extend(path for path in package_tests.glob("test_*.py") if path.is_file())
-    return sorted(path.relative_to(ROOT).as_posix() for path in paths)
+    return sorted({path.relative_to(ROOT).as_posix() for path in paths})
 
 
 def _critical_python_files() -> List[Path]:
@@ -127,6 +217,30 @@ def verify_python_compile() -> Dict[str, Any]:
     if failures:
         detail += "; failures: " + " | ".join(failures[:20])
     return _result("python_compile", not failures, detail)
+
+
+def verify_legacy_entrypoints() -> Dict[str, Any]:
+    """Reject retired side effects/false-success patterns in supported shims."""
+    failures: List[str] = []
+    checked = 0
+    for name in LEGACY_RUNTIME_ENTRYPOINTS:
+        path = ROOT / name
+        if not path.is_file():
+            failures.append(f"{name}: missing")
+            continue
+        checked += 1
+        try:
+            source = path.read_text(encoding="utf-8", errors="replace").lower()
+        except OSError as exc:
+            failures.append(f"{name}: {exc}")
+            continue
+        for pattern in RETIRED_PATTERNS:
+            if pattern in source:
+                failures.append(f"{name}: contains retired pattern {pattern!r}")
+    detail = f"checked {checked} compatibility entry points"
+    if failures:
+        detail += "; failures: " + " | ".join(failures[:30])
+    return _result("legacy_entrypoint_safety", not failures, detail)
 
 
 def _powershell_executable() -> str | None:
@@ -211,7 +325,7 @@ def run_tests(tests: Iterable[str]) -> List[Dict[str, Any]]:
 
 def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
     tests = discover_tests()
-    checks = [verify_files(), verify_python_compile(), verify_powershell_syntax(require_powershell)]
+    checks = [verify_files(), verify_python_compile(), verify_legacy_entrypoints(), verify_powershell_syntax(require_powershell)]
     if full:
         checks.append(
             _result(
@@ -236,7 +350,7 @@ def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify EVAVO repository/runtime contracts without mutating workstation configuration")
-    parser.add_argument("--full", action="store_true", help="Run every discovered root/package modern test suite after structural checks")
+    parser.add_argument("--full", action="store_true", help="Run every discovered modern root/package test suite after structural checks")
     parser.add_argument("--require-powershell", action="store_true", help="Fail when PowerShell is unavailable instead of reporting a skipped warning")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     args = parser.parse_args()
