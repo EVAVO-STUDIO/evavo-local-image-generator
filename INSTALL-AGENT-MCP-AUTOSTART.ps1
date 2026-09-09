@@ -42,8 +42,10 @@ if ($LASTEXITCODE -ne 0) { throw "MCP production policy is invalid. Windows logi
 try { $policyResult = ($policyOutput -join "`n") | ConvertFrom-Json }
 catch { throw "MCP production policy returned invalid JSON. Windows login autostart was not changed." }
 $generationOutputDir = [string]$policyResult.policy.default_output_root
+$taskHistoryFile = [string]$policyResult.policy.task_history_file
 $comfyEndpoint = [string]$policyResult.policy.comfyui_endpoint
 if (-not $generationOutputDir) { throw "MCP production policy did not return a validated default output root. Windows login autostart was not changed." }
+if (-not $taskHistoryFile) { throw "MCP production policy did not return a validated task-history path. Windows login autostart was not changed." }
 if (-not $comfyEndpoint) { throw "MCP production policy did not return a validated loopback ComfyUI endpoint. Windows login autostart was not changed." }
 
 New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
@@ -62,6 +64,7 @@ $persistedEnvironment = [ordered]@{
     "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
     "COMFYUI_ENDPOINT" = $comfyEndpoint
     "EVAVO_GENERATION_OUTPUT_DIR" = $generationOutputDir
+    "EVAVO_TASK_HISTORY" = $taskHistoryFile
 }
 
 # Persist normalized MCP authority paths returned by the validator, not raw
@@ -86,7 +89,6 @@ $nonSecretEnvironment = @(
     "EVAVO_CHECKPOINT_SHA256",
     "EVAVO_CHECKPOINT_NAME",
     "EVAVO_COMFYUI_CHECKPOINT",
-    "EVAVO_TASK_HISTORY",
     "EVAVO_TORCH_INDEX_URL"
 )
 foreach ($name in $nonSecretEnvironment) {
@@ -113,6 +115,7 @@ Set-Content -Path $launcher -Value $cmd -Encoding ASCII
 Write-Host "Installed EVAVO agent MCP autostart: $launcher" -ForegroundColor Green
 Write-Host "ComfyUI endpoint: $comfyEndpoint (policy-validated loopback)" -ForegroundColor Green
 Write-Host "Generation output root: $generationOutputDir" -ForegroundColor Green
+Write-Host "Task history: $taskHistoryFile" -ForegroundColor Green
 Write-Host "MCP launch and persisted authority are policy-validated." -ForegroundColor Green
 if ($env:EVAVO_CHECKPOINT_URL) { Write-Host "EVAVO_CHECKPOINT_URL was not persisted because URLs may contain secrets." -ForegroundColor Yellow }
 
