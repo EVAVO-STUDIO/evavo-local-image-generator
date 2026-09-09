@@ -40,13 +40,69 @@ def _tracker() -> TaskTracker:
     return TaskTracker()
 
 
+def _lexical_absolute(value: str | Path) -> Path:
+    """Normalize an absolute path without resolving symlinks/junctions."""
+    return Path(os.path.abspath(os.path.expanduser(str(value))))
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
+
+
+def _resolve_ordinary_file(value: str | Path, *, label: str) -> tuple[Path, Path]:
+    lexical = _lexical_absolute(value)
+    if lexical.is_symlink():
+        raise PermissionError(f"{label} must not be a symlink")
+    try:
+        resolved = lexical.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"{label} does not exist: {lexical}") from exc
+    if not _same_path(lexical, resolved):
+        raise PermissionError(f"{label} traverses a symlink or redirected parent path")
+    if not resolved.is_file():
+        raise ValueError(f"{label} must be an ordinary file")
+    return lexical, resolved
+
+
 def _output_root() -> Path:
     return Path(os.getenv("EVAVO_GENERATION_OUTPUT_DIR", str(ROOT / ".evavo" / "outputs"))).expanduser().resolve()
 
 
+def _split_roots(raw: str) -> list[str]:
+    if not raw.strip():
+        return []
+    separator = ";" if ";" in raw else os.pathsep
+    return [item.strip() for item in raw.split(separator) if item.strip()]
+
+
+def _allowed_output_roots() -> list[Path]:
+    roots = [_output_root()]
+    for raw in _split_roots(os.getenv("EVAVO_MCP_OUTPUT_ROOTS", "")):
+        try:
+            root = Path(raw).expanduser().resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError(f"MCP_OUTPUT_ROOT_INVALID:{raw}:{exc}") from exc
+        if not root.is_dir():
+            raise RuntimeError(f"MCP_OUTPUT_ROOT_INVALID:{raw}:must be an existing directory")
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _validated_output_dir(output_dir: str) -> Path:
+    candidate = Path(output_dir).expanduser().resolve(strict=False)
+    for root in _allowed_output_roots():
+        try:
+            candidate.relative_to(root)
+            return candidate
+        except ValueError:
+            continue
+    raise PermissionError("output_dir is outside EVAVO_GENERATION_OUTPUT_DIR/EVAVO_MCP_OUTPUT_ROOTS")
+
+
 def _output_dir(project_name: str, output_dir: Optional[str]) -> Path:
     if output_dir:
-        return Path(output_dir).expanduser().resolve()
+        return _validated_output_dir(output_dir)
     safe_project = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in project_name)[:80] or "mcp"
     return _output_root() / safe_project
 
@@ -56,6 +112,40 @@ def _truthy_environment(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validated_workflow_path(workflow_path: Optional[str]) -> Optional[str]:
+    if workflow_path is None or not str(workflow_path).strip():
+        return None
+
+    lexical, candidate = _resolve_ordinary_file(str(workflow_path), label="workflow_path")
+    owner_default = os.getenv("EVAVO_COMFYUI_WORKFLOW", "").strip()
+    if owner_default:
+        try:
+            _, configured = _resolve_ordinary_file(owner_default, label="EVAVO_COMFYUI_WORKFLOW")
+        except (ValueError, PermissionError):
+            configured = None
+        if configured is not None and _same_path(candidate, configured):
+            return str(candidate)
+
+    if not _truthy_environment("EVAVO_MCP_ALLOW_WORKFLOW_PATHS", False):
+        raise PermissionError(
+            "tool-supplied workflow_path is disabled; use EVAVO_COMFYUI_WORKFLOW or enable EVAVO_MCP_ALLOW_WORKFLOW_PATHS with EVAVO_MCP_WORKFLOW_ROOT"
+        )
+    root_raw = os.getenv("EVAVO_MCP_WORKFLOW_ROOT", "").strip()
+    if not root_raw:
+        raise RuntimeError("MCP_WORKFLOW_ROOT_REQUIRED:EVAVO_MCP_WORKFLOW_ROOT is required when tool-supplied workflow paths are enabled")
+    try:
+        root = Path(root_raw).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"MCP_WORKFLOW_ROOT_INVALID:{root_raw}:{exc}") from exc
+    if not root.is_dir():
+        raise RuntimeError(f"MCP_WORKFLOW_ROOT_INVALID:{root}:must be an existing directory")
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise PermissionError("workflow_path is outside EVAVO_MCP_WORKFLOW_ROOT") from exc
+    return str(candidate)
 
 
 def _provision_backend_sync() -> Dict[str, Any]:
@@ -171,36 +261,49 @@ def _recorded_output_paths() -> set[Path]:
         outputs = task.get("output_uris")
         if isinstance(outputs, list):
             for raw in outputs:
-                try:
-                    allowed.add(Path(str(raw)).expanduser().resolve())
-                except OSError:
-                    continue
+                if raw:
+                    allowed.add(_lexical_absolute(str(raw)))
         raw = task.get("output_uri")
         if raw:
-            try:
-                allowed.add(Path(str(raw)).expanduser().resolve())
-            except OSError:
-                pass
+            allowed.add(_lexical_absolute(str(raw)))
     return allowed
 
 
+def _has_valid_image_signature(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(12)
+    except OSError:
+        return False
+    suffix = path.suffix.lower()
+    if suffix == ".png":
+        return head.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix in {".jpg", ".jpeg"}:
+        return head.startswith(b"\xff\xd8\xff")
+    if suffix == ".gif":
+        return head.startswith((b"GIF87a", b"GIF89a"))
+    if suffix == ".webp":
+        return len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    return False
+
+
 def _validated_output_image(path: str) -> Path:
-    candidate = Path(path).expanduser().resolve()
-    if not candidate.is_file():
-        raise ValueError(f"generated image does not exist: {candidate}")
+    lexical, candidate = _resolve_ordinary_file(path, label="generated image")
     if candidate.suffix.lower() not in IMAGE_EXTENSIONS:
         raise ValueError("generated output must be PNG/JPEG/GIF/WebP")
     try:
         within_default_root = candidate.is_relative_to(_output_root())
     except ValueError:
         within_default_root = False
-    if not within_default_root and candidate not in _recorded_output_paths():
+    if not within_default_root and lexical not in _recorded_output_paths():
         raise PermissionError("image path is not a recorded EVAVO output")
     size = candidate.stat().st_size
     if size <= 0:
         raise ValueError("generated image is empty")
     if size > MAX_MCP_IMAGE_BYTES:
         raise ValueError(f"generated image exceeds {MAX_MCP_IMAGE_BYTES // (1024 * 1024)} MiB MCP payload limit")
+    if not _has_valid_image_signature(candidate):
+        raise ValueError("generated image content does not match its PNG/JPEG/GIF/WebP extension")
     return candidate
 
 
@@ -230,6 +333,8 @@ async def _generate_image_impl(
     local_failure_id = f"mcp_failed_{uuid.uuid4().hex}"
 
     try:
+        workflow_path = _validated_workflow_path(workflow_path)
+        target = _output_dir(project_name, output_dir) if wait or output_dir else None
         await _ensure(auto_start=auto_start)
         backend = _backend()
         result = await asyncio.to_thread(
@@ -273,7 +378,6 @@ async def _generate_image_impl(
     task_id = str(result["task_id"])
     effective_checkpoint = result.get("checkpoint")
     effective_backend = str(result.get("backend_mode") or "native-comfyui")
-    target = _output_dir(project_name, output_dir) if wait or output_dir else None
     tracking_warning = await _track_queued(
         task_id,
         prompt,
@@ -392,12 +496,16 @@ async def workflow_preflight(
     checkpoint: Optional[str] = None,
     auto_start: bool = True,
 ) -> Dict[str, Any]:
-    """Validate a custom ComfyUI API workflow against live node classes, required inputs and literal loader/model choices without queueing work."""
+    """Validate an owner-authorized custom ComfyUI API workflow without queueing work."""
     if not isinstance(workflow_path, str) or not workflow_path.strip():
         return {"ok": False, "status": "failed", "error_code": "INVALID_WORKFLOW_PATH", "message": "workflow_path must be a non-empty string"}
+    try:
+        path = _validated_workflow_path(workflow_path)
+    except Exception as exc:
+        return {"ok": False, "status": "failed", "error_code": "INVALID_WORKFLOW_PATH", "message": str(exc)}
+    assert path is not None
     await _ensure(auto_start=auto_start)
     backend = _backend()
-    path = str(Path(workflow_path).expanduser().resolve())
     try:
         workflow = await asyncio.to_thread(
             backend.build_txt2img_workflow,
@@ -553,9 +661,12 @@ async def collect_generation(
     auto_start: bool = False,
 ) -> Dict[str, Any]:
     """Wait for an existing prompt, download its images, and reconcile local task history."""
+    try:
+        target = _output_dir("collected", output_dir)
+    except Exception as exc:
+        return {"ok": False, "task_id": task_id, "status": "failed", "error_code": "INVALID_OUTPUT_DIR", "message": str(exc)}
     await _ensure(auto_start=auto_start)
     backend = _backend()
-    target = _output_dir("collected", output_dir)
     try:
         downloaded = await asyncio.to_thread(backend.wait_and_download, task_id, target, timeout=timeout)
     except Exception as exc:
@@ -573,7 +684,7 @@ async def collect_generation(
 
 @mcp.tool(structured_output=False)
 def read_output_image(path: str) -> Image:
-    """Return a generated EVAVO output as native MCP image content for visual inspection by the host model."""
+    """Return an authorized ordinary generated image as native MCP image content."""
     return Image(path=_validated_output_image(path))
 
 
