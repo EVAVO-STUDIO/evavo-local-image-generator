@@ -95,12 +95,18 @@ class DocumentationContractTests(unittest.TestCase):
         self.assertIn("evavo_gateway_max_request_bytes", source)
         self.assertIn("chunked", source)
         self.assertIn("evavo_gateway_max_project_chars", source)
+        self.assertIn("gateway_config_invalid", source)
         self.assertIn("evavo_gateway_allow_request_workflow_paths", source)
+        self.assertIn("evavo_gateway_workflow_root", source)
         self.assertIn("denied by default", source)
+        self.assertIn("outside", source)
         self.assertIn("tasks.json.lock", source)
-        self.assertIn("interprocess", source)
+        self.assertIn("evavo_operations.interprocess_lock", source)
         self.assertIn("gateway_task_state_corrupt", source)
         self.assertIn("leaves the original file untouched", source)
+        self.assertIn("service_manager_state_corrupt", source)
+        self.assertIn("fail closed", source)
+        self.assertIn("bearer-token plaintext", source)
 
     def test_historical_reports_are_visibly_superseded(self) -> None:
         for name in HISTORICAL_DOCS:
