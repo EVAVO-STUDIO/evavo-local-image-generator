@@ -50,6 +50,46 @@ if (-not $env:COMFYUI_ENDPOINT -and -not $env:EVAVO_COMFYUI_ENDPOINT) {
     $env:COMFYUI_ENDPOINT = "http://127.0.0.1:8188"
 }
 
+# Auto-discover the first-party Audio Studio provider in the normal sibling-repo
+# layout. An explicit EVAVO_AUDIO_PROVIDER_ARGV always wins. The gateway provider
+# contract is argv JSON rather than a shell command, preserving shell=False.
+if (-not $env:EVAVO_AUDIO_PROVIDER_ARGV) {
+    $audioCandidates = @()
+    if ($env:EVAVO_AUDIO_STUDIO_DIR) {
+        $audioCandidates += $env:EVAVO_AUDIO_STUDIO_DIR
+    }
+    $repoParent = Split-Path -Parent $PSScriptRoot
+    $audioCandidates += (Join-Path $repoParent "evavo-audio-studio")
+    $audioCandidates += (Join-Path $repoParent "audio-studio")
+
+    foreach ($candidate in $audioCandidates) {
+        if (-not $candidate) { continue }
+        $audioRoot = [System.IO.Path]::GetFullPath($candidate)
+        $audioWorker = Join-Path $audioRoot "worker_provider.py"
+        if (-not (Test-Path -LiteralPath $audioWorker -PathType Leaf)) { continue }
+
+        $audioPython = Join-Path $audioRoot ".venv\Scripts\python.exe"
+        if (-not (Test-Path -LiteralPath $audioPython -PathType Leaf)) {
+            $audioPython = $python
+        }
+
+        $audioArgv = @(
+            $audioPython,
+            $audioWorker,
+            "--request-json", "{request_json}",
+            "--output-dir", "{output_dir}",
+            "--task-id", "{task_id}"
+        )
+        $env:EVAVO_AUDIO_PROVIDER_ARGV = ConvertTo-Json -InputObject $audioArgv -Compress
+        $env:EVAVO_AUDIO_STUDIO_DIR = $audioRoot
+        if (-not $env:EVAVO_AUDIO_PROVIDER_TIMEOUT) {
+            $env:EVAVO_AUDIO_PROVIDER_TIMEOUT = "7200"
+        }
+        Write-Host "Audio Studio provider: $audioWorker" -ForegroundColor DarkGreen
+        break
+    }
+}
+
 $manager = Join-Path $PSScriptRoot "EVAVO-SERVICE-MANAGER.py"
 if ($Monitor) {
     & $python $manager monitor --interval $Interval
