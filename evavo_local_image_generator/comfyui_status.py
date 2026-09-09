@@ -1,10 +1,26 @@
-"""Normalize native ComfyUI prompt history/queue state for EVAVO agents."""
+"""Normalize native ComfyUI prompt/job state for EVAVO agents."""
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import urllib.parse
+from typing import Any, Dict, List, Optional
 
 from .backends import ComfyUIBackend
+
+_JOB_STATUS_MAP = {
+    "waiting_to_dispatch": "queued",
+    "pending": "queued",
+    "queued": "queued",
+    "in_progress": "running",
+    "running": "running",
+    "completed": "completed",
+    "success": "completed",
+    "error": "failed",
+    "failed": "failed",
+    "failure": "failed",
+    "cancelled": "cancelled",
+    "canceled": "cancelled",
+}
 
 
 def _outputs_from_history(history: Dict[str, Any], prompt_id: str) -> List[Dict[str, str]]:
@@ -47,25 +63,38 @@ def _queue_contains(items: Any, prompt_id: str) -> bool:
     return False
 
 
-def prompt_status(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
-    """Return one normalized prompt state using `/history` then `/queue`.
+def _current_job(backend: ComfyUIBackend, prompt_id: str) -> Optional[Dict[str, Any]]:
+    """Read the current jobs namespace when supported, otherwise return None.
 
-    ComfyUI history is authoritative for terminal execution. If no history entry
-    exists yet, queue state distinguishes actively running from pending work.
+    Current ComfyUI exposes ``GET /api/jobs/{job_id}``. Older installations and
+    unknown job ids return 404, in which case EVAVO falls back to legacy
+    history/queue reconciliation rather than treating the backend as broken.
     """
-    if not isinstance(prompt_id, str) or not prompt_id.strip():
-        raise ValueError("prompt_id must be a non-empty string")
-    prompt_id = prompt_id.strip()
+    encoded = urllib.parse.quote(prompt_id, safe="")
+    try:
+        payload = backend._request(f"/api/jobs/{encoded}", timeout=10.0)
+    except RuntimeError as exc:
+        if str(exc).startswith("COMFYUI_HTTP_ERROR:404:"):
+            return None
+        raise
+    return payload if isinstance(payload, dict) else None
 
+
+def _history_state(backend: ComfyUIBackend, prompt_id: str) -> Optional[Dict[str, Any]]:
     history = backend.history(prompt_id)
     entry = history.get(prompt_id)
-    if isinstance(entry, dict):
-        outputs = _outputs_from_history(history, prompt_id)
-        raw_status = entry.get("status") if isinstance(entry.get("status"), dict) else {}
-        status_str = str(raw_status.get("status_str", "")).strip().lower()
-        completed = raw_status.get("completed")
-        messages = raw_status.get("messages") if isinstance(raw_status.get("messages"), list) else []
+    if not isinstance(entry, dict):
+        return None
 
+    outputs = _outputs_from_history(history, prompt_id)
+    raw_status = entry.get("status") if isinstance(entry.get("status"), dict) else {}
+    status_str = str(raw_status.get("status_str", "")).strip().lower()
+    completed = raw_status.get("completed")
+    messages = raw_status.get("messages") if isinstance(raw_status.get("messages"), list) else []
+
+    if status_str in {"cancelled", "canceled", "interrupted"}:
+        status = "cancelled"
+    else:
         failed = status_str in {"error", "failed", "failure"}
         if not failed and completed is False:
             failed = any(
@@ -74,7 +103,6 @@ def prompt_status(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
                 and str(message[0]).strip().lower() in {"execution_error", "error", "failed", "failure"}
                 for message in messages
             )
-
         if failed:
             status = "failed"
         elif outputs or completed is True or status_str in {"success", "completed"}:
@@ -84,15 +112,61 @@ def prompt_status(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
         else:
             status = "unknown"
 
+    return {
+        "task_id": prompt_id,
+        "status": status,
+        "outputs": outputs,
+        "history_present": True,
+        "job_api": False,
+        "comfyui_status": status_str or None,
+        "completed": completed,
+        "messages": messages,
+        "error_message": None,
+    }
+
+
+def prompt_status(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
+    """Return one normalized ComfyUI job state.
+
+    Current ``/api/jobs/{id}`` is preferred because it distinguishes cancellation
+    explicitly. Legacy ``/history`` + ``/queue`` remains the compatibility
+    fallback. Returned state is one of queued/running/completed/failed/cancelled/
+    unknown and never invents queued for an absent prompt.
+    """
+    if not isinstance(prompt_id, str) or not prompt_id.strip():
+        raise ValueError("prompt_id must be a non-empty string")
+    prompt_id = prompt_id.strip()
+
+    job = _current_job(backend, prompt_id)
+    if job is not None:
+        raw = str(job.get("status", "")).strip().lower()
+        normalized = _JOB_STATUS_MAP.get(raw, "unknown")
+        history_state: Optional[Dict[str, Any]] = None
+        if normalized in {"completed", "failed"}:
+            try:
+                history_state = _history_state(backend, prompt_id)
+            except RuntimeError:
+                history_state = None
+        outputs = history_state.get("outputs", []) if history_state else []
+        messages = history_state.get("messages", []) if history_state else []
+        error_message = job.get("error_message")
+        if normalized == "failed" and not messages and error_message:
+            messages = [["job_error", {"exception_message": str(error_message)}]]
         return {
             "task_id": prompt_id,
-            "status": status,
+            "status": normalized,
             "outputs": outputs,
-            "history_present": True,
-            "comfyui_status": status_str or None,
-            "completed": completed,
+            "history_present": history_state is not None,
+            "job_api": True,
+            "comfyui_status": raw or None,
+            "completed": normalized in {"completed", "failed", "cancelled"},
             "messages": messages,
+            "error_message": str(error_message) if error_message not in {None, ""} else None,
         }
+
+    legacy = _history_state(backend, prompt_id)
+    if legacy is not None:
+        return legacy
 
     queue = backend._request("/queue", timeout=10.0)
     running = queue.get("queue_running")
@@ -108,7 +182,9 @@ def prompt_status(backend: ComfyUIBackend, prompt_id: str) -> Dict[str, Any]:
         "status": status,
         "outputs": [],
         "history_present": False,
+        "job_api": False,
         "comfyui_status": None,
         "completed": None,
         "messages": [],
+        "error_message": None,
     }
