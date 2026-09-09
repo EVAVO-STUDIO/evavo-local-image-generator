@@ -3,6 +3,7 @@
 
 param(
     [int]$Port = 8765,
+    [string]$Path = "/mcp",
     [switch]$RemoveAutostart
 )
 
@@ -12,6 +13,54 @@ Set-Location $PSScriptRoot
 if ($Port -lt 1 -or $Port -gt 65535) {
     throw "MCP port must be between 1 and 65535."
 }
+if (-not $Path.StartsWith("/")) {
+    throw "MCP path must start with '/'."
+}
+
+$python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $python)) {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $cmd) {
+        throw "Python 3.10+ was not found, so EVAVO cannot verify the MCP listener runtime identity."
+    }
+    $python = $cmd.Source
+}
+$python = (Resolve-Path $python).Path
+
+function Test-EvavoMcpListenerIdentity($Listener) {
+    if (-not $Listener) { return $false }
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$($Listener.OwningProcess)" -ErrorAction SilentlyContinue
+    if (-not $process) { return $false }
+
+    $commandLine = [string]$process.CommandLine
+    $executable = [string]$process.ExecutablePath
+    $escapedPath = [regex]::Escape($Path)
+    $requiredArgs = @(
+        "evavo_local_image_generator\.mcp_server",
+        "--transport\s+streamable-http",
+        "--host\s+127\.0\.0\.1",
+        "--port\s+$Port(?:\s|$)",
+        "--path\s+(?:`"$escapedPath`"|$escapedPath)(?:\s|$)"
+    )
+    foreach ($pattern in $requiredArgs) {
+        if ($commandLine -notmatch $pattern) { return $false }
+    }
+
+    if ($executable -and [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($executable), [IO.Path]::GetFullPath($python))) {
+        return $true
+    }
+
+    $parentPid = [int]$process.ParentProcessId
+    if ($parentPid -gt 0) {
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$parentPid" -ErrorAction SilentlyContinue
+        $parentCommand = if ($parent) { [string]$parent.CommandLine } else { "" }
+        $escapedLauncher = [regex]::Escape((Join-Path $PSScriptRoot "START-AGENT-MCP.ps1"))
+        if ($parentCommand -match $escapedLauncher) {
+            return $true
+        }
+    }
+    return $false
+}
 
 $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $listener) {
@@ -19,14 +68,10 @@ if (-not $listener) {
 }
 else {
     $pidValue = [int]$listener.OwningProcess
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$pidValue" -ErrorAction SilentlyContinue
-    $commandLine = if ($process) { [string]$process.CommandLine } else { "" }
-    if (-not $process -or $commandLine -notmatch "evavo_local_image_generator\.mcp_server") {
-        throw "Port $Port is owned by PID $pidValue, but its command line is not the EVAVO MCP server. Refusing to stop it."
+    if (-not (Test-EvavoMcpListenerIdentity $listener)) {
+        throw "Port $Port is owned by PID $pidValue, but EVAVO cannot prove it is this repository's Streamable HTTP MCP listener. Refusing to stop it."
     }
-    if ($commandLine -notmatch "--transport\s+streamable-http") {
-        throw "PID $pidValue is an EVAVO MCP process but is not the Streamable HTTP listener. Refusing to stop it through this command."
-    }
+
     Stop-Process -Id $pidValue -Force -ErrorAction Stop
     $deadline = (Get-Date).AddSeconds(10)
     do {
@@ -34,9 +79,9 @@ else {
         $stillListening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     } while ($stillListening -and (Get-Date) -lt $deadline)
     if ($stillListening) {
-        throw "EVAVO MCP PID $pidValue was signalled but port $Port is still listening."
+        throw "Verified EVAVO MCP PID $pidValue was signalled but port $Port is still listening."
     }
-    Write-Host "Stopped EVAVO private MCP listener PID $pidValue on port $Port." -ForegroundColor Green
+    Write-Host "Stopped verified EVAVO private MCP listener PID $pidValue on port $Port." -ForegroundColor Green
 }
 
 if ($RemoveAutostart) {
