@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from evavo_local_image_generator.backends import ComfyUIBackend, KokoroBackend, OllamaBackend
 from evavo_local_image_generator.backends.comfyui_backend import MODEL_LOADER_INPUTS
+from evavo_local_image_generator import mcp_server
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,6 +26,26 @@ class ComfyUIBackendTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             backend = ComfyUIBackend()
         self.assertEqual(backend.endpoint, "http://127.0.0.1:8188")
+
+    def test_canonical_endpoint_wins_over_legacy_alias(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "COMFYUI_ENDPOINT": "http://127.0.0.1:19001",
+                "EVAVO_COMFYUI_ENDPOINT": "http://127.0.0.1:19002",
+            },
+            clear=False,
+        ):
+            self.assertEqual(ComfyUIBackend().endpoint, "http://127.0.0.1:19001")
+            self.assertEqual(mcp_server._endpoint(), "http://127.0.0.1:19001")
+
+    def test_legacy_endpoint_alias_remains_supported(self) -> None:
+        env = os.environ.copy()
+        env.pop("COMFYUI_ENDPOINT", None)
+        env["EVAVO_COMFYUI_ENDPOINT"] = "http://127.0.0.1:19002"
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(ComfyUIBackend().endpoint, "http://127.0.0.1:19002")
+            self.assertEqual(mcp_server._endpoint(), "http://127.0.0.1:19002")
 
     def test_model_inventory_covers_current_loader_categories(self) -> None:
         expected = {
