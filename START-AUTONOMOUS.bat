@@ -2,8 +2,8 @@
 setlocal EnableExtensions
 
 REM Compatibility shim retained for old EVAVO shortcuts.
-REM The former version invoked MASTER-AUTOMATION-CONTROLLER.ps1 and paused in
-REM console windows. Agent setup and lifecycle now live in the canonical tools.
+REM It now repairs/provisions the real image runtime and never starts hidden
+REM multimodal jobs or unrelated services.
 
 set "ROOT=%~dp0"
 pushd "%ROOT%" >nul
@@ -12,7 +12,7 @@ if not exist "%PYTHON%" set "PYTHON=python"
 
 echo START-AUTONOMOUS.bat now validates the canonical EVAVO agent stack.
 
-"%PYTHON%" "%ROOT%agent-doctor.py" --repair
+"%PYTHON%" "%ROOT%agent-doctor.py" --repair --provision --skip-tests
 if errorlevel 1 (
     set "CODE=%errorlevel%"
     popd >nul
@@ -23,8 +23,8 @@ if errorlevel 1 (
 set "CODE=%errorlevel%"
 
 echo.
-echo EVAVO agent backend is ready.
-echo Claude uses stdio MCP; local HTTP MCP uses http://127.0.0.1:8765/mcp.
+echo EVAVO native image backend is ready.
+echo Claude uses local stdio MCP. ChatGPT uses the outbound OpenAI Secure MCP Tunnel.
 
 popd >nul
 exit /b %CODE%
