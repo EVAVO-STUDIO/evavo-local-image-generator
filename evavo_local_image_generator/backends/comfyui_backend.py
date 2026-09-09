@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import secrets
 import subprocess
@@ -26,6 +27,25 @@ MODEL_LOADER_INPUTS: Dict[str, Tuple[str, str]] = {
     "clip_vision": ("CLIPVisionLoader", "clip_name"),
     "upscale_models": ("UpscaleModelLoader", "model_name"),
 }
+SUPPORTED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+def _has_image_signature(path: Path, suffix: str) -> bool:
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(12)
+    except OSError:
+        return False
+    suffix = suffix.lower()
+    if suffix == ".png":
+        return head.startswith(b"\x89PNG\r\n\x1a\n")
+    if suffix in {".jpg", ".jpeg"}:
+        return head.startswith(b"\xff\xd8\xff")
+    if suffix == ".gif":
+        return head.startswith((b"GIF87a", b"GIF89a"))
+    if suffix == ".webp":
+        return len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    return False
 
 
 class ComfyUIBackend:
@@ -104,12 +124,10 @@ class ComfyUIBackend:
         return []
 
     def node_input_choices(self, node_class: str, input_name: str) -> List[str]:
-        """Return string choice values exposed by one ComfyUI node input."""
         info = self.object_info(node_class)
         return self._extract_choice_values(info, node_class, input_name)
 
     def checkpoints(self) -> List[str]:
-        """Return checkpoint choices; a missing checkpoint loader means an empty inventory, not a dead backend."""
         try:
             return self.node_input_choices("CheckpointLoaderSimple", "ckpt_name")
         except RuntimeError as exc:
@@ -118,8 +136,11 @@ class ComfyUIBackend:
             raise
 
     def model_inventory(self, limit_per_category: int = 200) -> Dict[str, Any]:
-        """Inspect common model loader choices without failing on missing node classes."""
-        limit = max(1, min(5000, int(limit_per_category)))
+        try:
+            limit = int(limit_per_category)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("limit_per_category must be an integer") from exc
+        limit = max(1, min(5000, limit))
         categories: Dict[str, Any] = {}
         total_items = 0
         available_categories = 0
@@ -167,7 +188,6 @@ class ComfyUIBackend:
         return bool(os.getenv("EVAVO_CHECKPOINT_FILE") or os.getenv("EVAVO_CHECKPOINT_URL"))
 
     def _provision_configured_checkpoint(self) -> bool:
-        """Invoke EVAVO's fixed checkpoint-only provisioner using operator environment."""
         if not self._truthy_environment("EVAVO_AUTO_PROVISION_CHECKPOINT", default=False):
             return False
         if not self._checkpoint_source_configured():
@@ -290,7 +310,6 @@ class ComfyUIBackend:
         return [str(value) for value in spec[0] if isinstance(value, str) and value]
 
     def preflight_workflow(self, workflow: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate custom workflow node classes/required inputs/literal choices against live ComfyUI."""
         if not isinstance(workflow, dict) or not workflow:
             raise RuntimeError("COMFYUI_WORKFLOW_PREFLIGHT_FAILED:workflow must be a non-empty object")
 
@@ -368,8 +387,8 @@ class ComfyUIBackend:
         height = self._dimension(height, 1024)
         steps = max(1, min(200, int(steps)))
         cfg_scale = float(cfg_scale)
-        if not 0.0 <= cfg_scale <= 100.0:
-            raise ValueError("cfg_scale must be between 0 and 100")
+        if not math.isfinite(cfg_scale) or not 0.0 <= cfg_scale <= 100.0:
+            raise ValueError("cfg_scale must be finite and between 0 and 100")
         seed_value = int(seed) if seed is not None else secrets.randbits(63)
         safe_prefix = "".join(ch if ch.isalnum() or ch in "_-/" else "_" for ch in filename_prefix)[:120] or "EVAVO"
         template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
@@ -412,9 +431,11 @@ class ComfyUIBackend:
         }
 
     def queue_image(self, prompt: str, *, project_name: str = "batch_gen", negative_prompt: str = "", width: int = 1024, height: int = 1024, steps: int = 24, cfg_scale: float = 7.0, seed: Optional[int] = None, checkpoint: Optional[str] = None, workflow_path: Optional[str] = None) -> Dict[str, Any]:
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
         template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
         workflow = self.build_txt2img_workflow(
-            prompt,
+            prompt.strip(),
             negative_prompt=negative_prompt,
             width=width,
             height=height,
@@ -452,10 +473,12 @@ class ComfyUIBackend:
         return None
 
     def history(self, prompt_id: str) -> Dict[str, Any]:
-        return self._request(f"/history/{urllib.parse.quote(prompt_id)}", timeout=15.0)
+        if not isinstance(prompt_id, str) or not prompt_id:
+            raise ValueError("prompt_id must be a non-empty string")
+        return self._request(f"/history/{urllib.parse.quote(prompt_id, safe='')}", timeout=15.0)
 
-    def outputs(self, prompt_id: str) -> List[Dict[str, str]]:
-        history = self.history(prompt_id)
+    @staticmethod
+    def _outputs_from_history(history: Dict[str, Any], prompt_id: str) -> List[Dict[str, str]]:
         entry = history.get(prompt_id)
         if not isinstance(entry, dict):
             return []
@@ -478,17 +501,25 @@ class ComfyUIBackend:
                     })
         return found
 
+    def outputs(self, prompt_id: str) -> List[Dict[str, str]]:
+        return self._outputs_from_history(self.history(prompt_id), prompt_id)
+
     def wait_for_outputs(self, prompt_id: str, *, timeout: float = 600.0, interval: float = 1.0) -> List[Dict[str, str]]:
-        if timeout <= 0:
-            raise ValueError("timeout must be greater than zero")
-        if interval < 0.1:
-            raise ValueError("interval must be at least 0.1 seconds")
+        try:
+            timeout = float(timeout)
+            interval = float(interval)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("timeout/interval must be numbers") from exc
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and greater than zero")
+        if not math.isfinite(interval) or interval < 0.1:
+            raise ValueError("interval must be finite and at least 0.1 seconds")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             history = self.history(prompt_id)
             entry = history.get(prompt_id)
             if isinstance(entry, dict):
-                outputs = self.outputs(prompt_id)
+                outputs = self._outputs_from_history(history, prompt_id)
                 if outputs:
                     return outputs
                 status = entry.get("status")
@@ -501,11 +532,21 @@ class ComfyUIBackend:
 
     def download_output(self, output: Dict[str, str], target_dir: str | Path, *, max_bytes: int = 256 * 1024 * 1024) -> str:
         filename = output.get("filename")
-        if not isinstance(filename, str) or not filename:
-            raise ValueError("output filename is missing")
+        if not isinstance(filename, str) or not filename or "\x00" in filename:
+            raise ValueError("output filename is missing or invalid")
         safe_name = Path(filename).name
         if safe_name in {"", ".", ".."}:
             raise ValueError("output filename is invalid")
+        suffix = Path(safe_name).suffix.lower()
+        if suffix not in SUPPORTED_IMAGE_SUFFIXES:
+            raise RuntimeError(f"COMFYUI_OUTPUT_TYPE_UNSUPPORTED:{safe_name}")
+        try:
+            max_bytes = int(max_bytes)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_bytes must be an integer") from exc
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be greater than zero")
+
         destination_dir = Path(target_dir).expanduser().resolve()
         destination_dir.mkdir(parents=True, exist_ok=True)
         destination = destination_dir / safe_name
@@ -528,7 +569,14 @@ class ComfyUIBackend:
                     handle.write(chunk)
                 handle.flush()
                 os.fsync(handle.fileno())
+            temp_path = Path(temp_name)
+            if total <= 0 or temp_path.stat().st_size <= 0:
+                raise RuntimeError(f"COMFYUI_OUTPUT_EMPTY:{safe_name}")
+            if not _has_image_signature(temp_path, suffix):
+                raise RuntimeError(f"COMFYUI_OUTPUT_INVALID_IMAGE:{safe_name}")
             os.replace(temp_name, destination)
+            if not destination.is_file() or destination.is_symlink() or destination.stat().st_size <= 0:
+                raise RuntimeError(f"COMFYUI_OUTPUT_PROMOTION_FAILED:{safe_name}")
         except Exception:
             try:
                 os.unlink(temp_name)
