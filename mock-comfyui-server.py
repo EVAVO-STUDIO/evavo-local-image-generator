@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from evavo_operations import PROTOCOL_VERSION, SERVICE_NAME, now_iso
 
@@ -23,8 +23,29 @@ PNG_1X1 = base64.b64decode(
 )
 
 
+def _choice_node(input_name: str, values: list[str]) -> Dict[str, Any]:
+    return {"input": {"required": {input_name: [values, {}]}}}
+
+
+NATIVE_NODES: Dict[str, Dict[str, Any]] = {
+    "CheckpointLoaderSimple": _choice_node("ckpt_name", ["evavo-test-model.safetensors"]),
+    "LoraLoader": _choice_node("lora_name", ["evavo-test-lora.safetensors"]),
+    "VAELoader": _choice_node("vae_name", ["evavo-test-vae.safetensors"]),
+    "ControlNetLoader": _choice_node("control_net_name", ["evavo-test-controlnet.safetensors"]),
+    "UNETLoader": _choice_node("unet_name", ["evavo-test-unet.safetensors"]),
+    "CLIPLoader": _choice_node("clip_name", ["evavo-test-clip.safetensors"]),
+    "CLIPVisionLoader": _choice_node("clip_name", ["evavo-test-clip-vision.safetensors"]),
+    "UpscaleModelLoader": _choice_node("model_name", ["evavo-test-upscaler.pth"]),
+    "CLIPTextEncode": {"input": {"required": {}}},
+    "EmptyLatentImage": {"input": {"required": {}}},
+    "KSampler": {"input": {"required": {}}},
+    "VAEDecode": {"input": {"required": {}}},
+    "SaveImage": {"input": {"required": {}}},
+}
+
+
 class EvavoMockHandler(BaseHTTPRequestHandler):
-    server_version = "EVAVOMockComfyUI/2.1"
+    server_version = "EVAVOMockComfyUI/2.2"
 
     @property
     def native_only(self) -> bool:
@@ -74,16 +95,16 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
         if path == "/system_stats":
             self._send_json(200, {"system": {"comfyui_version": "test-native-1.0", "python_version": "test"}, "devices": [{"name": "EVAVO Test GPU", "vram_total": 8589934592, "vram_free": 6442450944}]})
             return
-        if path in {"/object_info", "/object_info/CheckpointLoaderSimple"}:
-            nodes = {
-                "CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [["evavo-test-model.safetensors"], {}]}}},
-                "CLIPTextEncode": {"input": {"required": {}}},
-                "EmptyLatentImage": {"input": {"required": {}}},
-                "KSampler": {"input": {"required": {}}},
-                "VAEDecode": {"input": {"required": {}}},
-                "SaveImage": {"input": {"required": {}}},
-            }
-            self._send_json(200, nodes if path == "/object_info" else {"CheckpointLoaderSimple": nodes["CheckpointLoaderSimple"]})
+        if path == "/object_info":
+            self._send_json(200, NATIVE_NODES)
+            return
+        if path.startswith("/object_info/"):
+            node_name = unquote(path[len("/object_info/"):])
+            node = NATIVE_NODES.get(node_name)
+            if node is None:
+                self._send_json(404, {"error": "unknown_node", "node": node_name})
+            else:
+                self._send_json(200, {node_name: node})
             return
         if path.startswith("/history/"):
             prompt_id = path.rsplit("/", 1)[-1]
