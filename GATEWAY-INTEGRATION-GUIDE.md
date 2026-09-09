@@ -29,11 +29,11 @@ ComfyUI:  http://127.0.0.1:8188
 
 `EVAVO_GATEWAY_HOST` is restricted to `127.0.0.1`, `localhost`, or `::1`. Public binds are rejected.
 
-CORS is **disabled by default**. If `EVAVO_GATEWAY_CORS_ORIGINS` is configured, every origin must be an explicit loopback HTTP/HTTPS origin. Wildcard CORS is rejected.
+CORS is **disabled by default**. If `EVAVO_GATEWAY_CORS_ORIGINS` is configured, every origin must be an explicit loopback HTTP/HTTPS origin with a valid port. Wildcard CORS is rejected.
 
 Cloud ChatGPT reaches the workstation through the OpenAI Secure MCP Tunnel described in `CHATGPT-TUNNEL.md`; do not expose port 8000 publicly.
 
-## Request and workflow safety
+## Request and configuration safety
 
 The gateway bounds generation requests before they become large Pydantic objects. `EVAVO_GATEWAY_MAX_REQUEST_BYTES` defaults to 1 MiB and is clamped to a maximum of 16 MiB. The ASGI ingress middleware checks declared `Content-Length` immediately and also counts streaming/chunked request bytes, so omitting a length header does not bypass the limit.
 
@@ -45,13 +45,22 @@ EVAVO_GATEWAY_MAX_PROJECT_CHARS  default 128, hard cap 1024
 EVAVO_GATEWAY_IMAGE_TIMEOUT      default 600 seconds, bounded 1..86400
 ```
 
-Per-request `workflow_path` is **denied by default** on `/generate/image`. Prefer owner-configured `EVAVO_COMFYUI_WORKFLOW`. A workstation owner may deliberately opt into request-supplied workflow paths with:
+Malformed numeric configuration fails at startup with a stable `GATEWAY_CONFIG_INVALID:<variable>:...` error instead of an unclassified Python conversion failure. Non-finite numeric values such as `nan` are rejected.
+
+### Request-supplied workflows
+
+Per-request `workflow_path` is **denied by default** on `/generate/image`. Prefer owner-configured `EVAVO_COMFYUI_WORKFLOW` for the normal production workflow.
+
+If a workstation owner deliberately needs request-supplied workflows, both an explicit allow switch **and** an existing owner-selected root are required:
 
 ```powershell
+$env:EVAVO_GATEWAY_WORKFLOW_ROOT = "D:\EVAVO\workflows"
 $env:EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS = "1"
 ```
 
-Do not enable that switch for an untrusted HTTP client. The gateway is private loopback infrastructure, not a general arbitrary-file workflow service.
+The gateway resolves the requested file strictly and requires the resulting path to remain inside `EVAVO_GATEWAY_WORKFLOW_ROOT`. Missing files and path escapes fail before a task is queued. Symlink/path resolution therefore cannot be used to escape the admitted root.
+
+Do not enable request-supplied workflows for an untrusted HTTP client. The gateway is private loopback infrastructure, not a general arbitrary-file workflow service.
 
 ## Routes
 
@@ -81,6 +90,8 @@ A fully ready core response remains:
 
 `/health` deliberately reflects the owned image renderer, not optional auxiliary providers. Use `/services` when an agent needs to know whether video/audio/3D delegation is currently available.
 
+The service manager's `health`/`status` command additionally reports its own ownership-state health. A running gateway can therefore have healthy core rendering while the manager reports overall `degraded` because safe lifecycle ownership metadata is corrupt.
+
 ## Start / monitor / stop
 
 ```powershell
@@ -97,9 +108,13 @@ The service manager:
 - never kills an unknown process occupying a port;
 - stops only identity-verified EVAVO-managed processes;
 - reports auxiliary provider readiness separately from core image health;
-- fingerprints effective provider configuration without storing provider secrets;
+- fingerprints effective provider configuration without storing provider bearer-token plaintext;
 - restarts only an identity-verified **managed** gateway when provider configuration changes;
-- never kills an externally owned gateway merely to apply new provider settings.
+- never kills an externally owned gateway merely to apply new provider settings;
+- treats a missing `service-manager.json` as normal first-run state;
+- treats malformed/unreadable/unsafe manager state as a lifecycle safety error rather than silently replacing it with `{}`.
+
+If `service-manager.json` is corrupt, `health` reports degraded manager state while preserving the file for diagnosis. `start`, `stop`, and `monitor` fail closed before provider/backend/process mutation because EVAVO cannot safely prove what it owns. A symlinked manager-state file is also rejected.
 
 For fresh-machine repair/provisioning:
 
@@ -172,11 +187,13 @@ See `GATEWAY-AUX-PROVIDERS.md` for the provider-specific controls.
 .evavo/gateway/service-manager.json
 ```
 
-Gateway task state is atomically written and guarded by the same cross-platform advisory lock used by EVAVO task history. Task-ID allocation and insertion occur inside one interprocess critical section, so two loopback gateway processes accidentally sharing a task file cannot reuse the same ID.
+Gateway task state is atomically written and guarded by the public `evavo_operations.interprocess_lock` primitive also used by EVAVO task history. The older `_interprocess_lock` name remains only as an in-repository compatibility alias. Task-ID allocation and insertion occur inside one interprocess critical section, so two loopback gateway processes accidentally sharing a task file cannot reuse the same ID.
 
 Reads refresh from the persisted state under the same lock. Interrupted queued/running gateway tasks are marked failed with `GATEWAY_RESTARTED` after restart instead of remaining falsely active.
 
 Malformed/corrupt `tasks.json` is **not** treated as an empty task store. Gateway startup fails with `GATEWAY_TASK_STATE_CORRUPT` (or a read error) and leaves the original file untouched for diagnosis/recovery instead of silently overwriting task history.
+
+Manager ownership metadata has the same fail-closed principle: malformed `service-manager.json` is reported with `SERVICE_MANAGER_STATE_CORRUPT` and is not silently reset before lifecycle operations.
 
 ## CORS
 
@@ -186,7 +203,7 @@ No cross-origin browser access is enabled by default. Optional local-only exampl
 $env:EVAVO_GATEWAY_CORS_ORIGINS = "http://127.0.0.1:3000,http://localhost:3000"
 ```
 
-`*` and non-loopback origins are rejected.
+`*`, non-loopback origins, and invalid ports are rejected.
 
 ## Validation
 
@@ -196,7 +213,7 @@ The authoritative verifier discovers root, `tests/`, and package suites:
 python evavo.py verify --full --require-powershell
 ```
 
-Coverage includes native image flow, unavailable-provider fail-closed behavior, provider receipt/output confinement and digest evidence, service-manager provider safety, loopback binding, CORS defaults, declared and chunked request-size limits, workflow-path denial, bounded project names, restart-safe task IDs, shared-task-file interprocess locking, and corrupt-state fail-closed startup.
+Coverage includes native image flow, unavailable-provider fail-closed behavior, provider receipt/output confinement and digest evidence, provider secret/state handling, service-manager ownership-state corruption, loopback binding, structured startup configuration errors, CORS defaults, declared and chunked request-size limits, workflow-root confinement, bounded project names, restart-safe task IDs, shared-task-file interprocess locking, and corrupt-state fail-closed startup.
 
 For an already-running real gateway:
 
