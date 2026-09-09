@@ -5,10 +5,14 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+
+from evavo_local_image_generator import comfyui_runtime
 
 ROOT = Path(__file__).resolve().parent
 PROVISIONER = ROOT / "provision-comfyui.py"
@@ -150,6 +154,68 @@ class ProvisioningSafetyTests(unittest.TestCase):
                 self.module.ensure_checkout(target, "https://example.invalid/ComfyUI.git", update=False)
             self.assertIn("COMFYUI_TARGET_CONFLICT", str(context.exception))
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
+    def test_shared_model_config_only_emits_existing_supported_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shared-models"
+            for relative in (
+                "models/checkpoints",
+                "models/loras",
+                "vae",
+                "models/controlnet",
+                "custom_nodes",
+                "ignored-folder",
+            ):
+                (root / relative).mkdir(parents=True, exist_ok=True)
+            destination = Path(directory) / "extra-model-paths.yaml"
+            written = comfyui_runtime.write_extra_model_paths_config([root], destination)
+            self.assertEqual(written, destination.resolve())
+            text = destination.read_text(encoding="utf-8")
+            self.assertIn("evavo_shared_1:", text)
+            self.assertIn(root.resolve().as_posix(), text)
+            self.assertIn('checkpoints: "models/checkpoints"', text)
+            self.assertIn('loras: "models/loras"', text)
+            self.assertIn('vae: "vae"', text)
+            self.assertIn('controlnet: "models/controlnet"', text)
+            self.assertIn('custom_nodes: "custom_nodes"', text)
+            self.assertNotIn("ignored-folder", text)
+
+    def test_shared_model_config_supports_multiple_existing_paths_for_one_category(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shared-models"
+            (root / "models" / "text_encoders").mkdir(parents=True)
+            (root / "models" / "clip").mkdir(parents=True)
+            text = comfyui_runtime.render_extra_model_paths_yaml([root])
+            self.assertIn("text_encoders: |", text)
+            self.assertIn("models/text_encoders", text)
+            self.assertIn("models/clip", text)
+
+    def test_shared_model_config_rejects_empty_supported_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "empty-library"
+            root.mkdir()
+            with self.assertRaises(RuntimeError) as context:
+                comfyui_runtime.render_extra_model_paths_yaml([root])
+            self.assertIn("SHARED_MODEL_ROOT_EMPTY", str(context.exception))
+
+    def test_shared_model_environment_rejects_missing_root(self) -> None:
+        missing = str((Path(tempfile.gettempdir()) / "evavo-definitely-missing-model-root").resolve())
+        with patch.dict(os.environ, {"EVAVO_SHARED_MODEL_ROOTS": missing}, clear=False):
+            with self.assertRaises(RuntimeError) as context:
+                comfyui_runtime.configured_shared_model_roots()
+            self.assertIn("SHARED_MODEL_ROOT_NOT_FOUND", str(context.exception))
+
+    def test_comfyui_command_includes_evavo_extra_model_config(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            python = root / "python.exe"
+            main_py = root / "main.py"
+            config = root / "extra.yaml"
+            install = comfyui_runtime.ComfyUIInstall(root=root, python=python, main_py=main_py, portable=False)
+            command = install.command(extra_model_config=config)
+            self.assertIn("--extra-model-paths-config", command)
+            index = command.index("--extra-model-paths-config")
+            self.assertEqual(command[index + 1], str(config))
 
 
 if __name__ == "__main__":
