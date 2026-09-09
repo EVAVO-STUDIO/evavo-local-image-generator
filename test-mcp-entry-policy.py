@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -57,13 +58,22 @@ class McpEntryPolicyTests(unittest.TestCase):
         self.assertIn("from .mcp_entry import main", source)
         self.assertNotIn("from .mcp_server import main", source)
 
-    def test_supported_profiles_use_validated_entry(self) -> None:
-        root_profile = (ROOT / ".mcp.json").read_text(encoding="utf-8")
+    def test_generated_agent_profiles_use_validated_entry(self) -> None:
         claude = (ROOT / "INSTALL-CLAUDE-MCP.ps1").read_text(encoding="utf-8")
         http = (ROOT / "START-AGENT-MCP.ps1").read_text(encoding="utf-8")
-        for name, source in (("root", root_profile), ("claude", claude), ("http", http)):
+        for name, source in (("claude", claude), ("http", http)):
             with self.subTest(name=name):
                 self.assertIn("evavo_local_image_generator.mcp_entry", source)
+
+    def test_root_project_profile_bootstraps_into_isolated_venv(self) -> None:
+        profile = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
+        server = profile["mcpServers"]["evavo-local-image-generator"]
+        self.assertEqual(server["command"], "python")
+        self.assertEqual(server["args"][:2], ["mcp-bootstrap.py", "--transport"])
+        bootstrap = (ROOT / "mcp-bootstrap.py").read_text(encoding="utf-8")
+        self.assertIn('"evavo_local_image_generator.mcp_entry"', bootstrap)
+        self.assertIn('ROOT / ".venv"', bootstrap)
+        self.assertIn("os.execv", bootstrap)
 
 
 if __name__ == "__main__":
