@@ -96,16 +96,30 @@ class ProviderServiceManagerTests(unittest.TestCase):
         self.assertEqual(argv[-6:], ["--request-json", "{request_json}", "--output-dir", "{output_dir}", "--task-id", "{task_id}"])
         self.assertEqual(os.environ["EVAVO_AUDIO_PROVIDER_TIMEOUT"], "7200")
 
-    def test_provider_fingerprint_changes_without_persisting_token_plaintext(self) -> None:
-        secret = "sensitive-token-" + "x" * 40
-        with mock.patch.dict(os.environ, {"EVAVO_3D_AGENT_EXECUTION_TOKEN": secret, "EVAVO_AUDIO_PROVIDER_ARGV": '["python","worker.py"]'}, clear=False):
+    def test_provider_fingerprint_tracks_token_rotation_without_persisting_plaintext(self) -> None:
+        first_secret = "sensitive-token-a-" + "x" * 40
+        second_secret = "sensitive-token-b-" + "y" * 40
+        with mock.patch.dict(
+            os.environ,
+            {"EVAVO_3D_AGENT_EXECUTION_TOKEN": first_secret, "EVAVO_AUDIO_PROVIDER_ARGV": '["python","worker.py"]'},
+            clear=False,
+        ):
             first = manager.provider_configuration_fingerprint()
-            os.environ["EVAVO_AUDIO_PROVIDER_ARGV"] = '["python","worker-v2.py"]'
+            os.environ["EVAVO_3D_AGENT_EXECUTION_TOKEN"] = second_secret
             second = manager.provider_configuration_fingerprint()
         self.assertRegex(first, r"^[0-9a-f]{64}$")
+        self.assertRegex(second, r"^[0-9a-f]{64}$")
         self.assertNotEqual(first, second)
-        self.assertNotIn(secret, first)
-        self.assertNotIn(secret, second)
+        self.assertNotIn(first_secret, first)
+        self.assertNotIn(second_secret, second)
+
+        state = {"gateway": {"managed": True, "pid": 1234, "provider_fingerprint": second}}
+        manager.save_state(state)
+        persisted = manager.STATE_FILE.read_text(encoding="utf-8")
+        self.assertIn(second, persisted)
+        self.assertNotIn(first_secret, persisted)
+        self.assertNotIn(second_secret, persisted)
+        self.assertNotIn("3d_token", persisted.lower())
 
     def test_managed_gateway_restarts_when_provider_fingerprint_changes(self) -> None:
         manager.GATEWAY_SCRIPT.write_text("# gateway fixture\n", encoding="utf-8")
@@ -146,12 +160,64 @@ class ProviderServiceManagerTests(unittest.TestCase):
             mock.patch.object(manager, "comfyui_health", return_value={"healthy": True}),
             mock.patch.object(manager, "gateway_health", return_value={"healthy": True, "gateway_alive": True}),
             mock.patch.object(manager, "gateway_services", return_value=providers),
+            mock.patch.object(manager, "manager_state_health", return_value={"healthy": True, "status": "missing"}),
             mock.patch.object(manager, "audio_provider_status", return_value={"configured": False}),
             mock.patch.object(manager, "three_d_health", return_value={"healthy": False}),
         ):
             health = manager.full_health()
         self.assertEqual(health["status"], "healthy")
+        self.assertTrue(health["core_ready"])
         self.assertEqual(health["providers"], providers)
+
+    def test_corrupt_manager_state_degrades_health_and_is_not_rewritten(self) -> None:
+        manager.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        corrupt = "{not valid json\n"
+        manager.STATE_FILE.write_text(corrupt, encoding="utf-8")
+        with (
+            mock.patch.object(manager, "comfyui_health", return_value={"healthy": True}),
+            mock.patch.object(manager, "gateway_health", return_value={"healthy": True, "gateway_alive": True}),
+            mock.patch.object(manager, "gateway_services", return_value={"image": {"ready": True}}),
+            mock.patch.object(manager, "audio_provider_status", return_value={"configured": False}),
+            mock.patch.object(manager, "three_d_health", return_value={"healthy": False}),
+        ):
+            health = manager.full_health()
+        self.assertTrue(health["core_ready"])
+        self.assertEqual(health["status"], "degraded")
+        self.assertFalse(health["manager_state"]["healthy"])
+        self.assertEqual(health["manager_state"]["status"], "corrupt")
+        self.assertIn("SERVICE_MANAGER_STATE_CORRUPT", health["manager_state"]["error"])
+        self.assertEqual(manager.STATE_FILE.read_text(encoding="utf-8"), corrupt)
+
+    def test_corrupt_manager_state_blocks_stop_before_any_process_mutation(self) -> None:
+        manager.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        manager.STATE_FILE.write_text("{broken", encoding="utf-8")
+        with (
+            mock.patch.object(manager, "terminate_pid") as terminate,
+            mock.patch.object(manager, "stop_managed_comfyui") as stop_native,
+        ):
+            with self.assertRaises(RuntimeError) as context:
+                manager.stop_services()
+        self.assertIn("SERVICE_MANAGER_STATE_CORRUPT", str(context.exception))
+        terminate.assert_not_called()
+        stop_native.assert_not_called()
+        self.assertTrue(manager.STATE_FILE.is_file())
+
+    def test_corrupt_manager_state_blocks_start_before_provider_or_backend_mutation(self) -> None:
+        manager.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        manager.STATE_FILE.write_text("{broken", encoding="utf-8")
+        with (
+            mock.patch.object(manager, "configure_audio_provider") as configure_audio,
+            mock.patch.object(manager, "ensure_3d_worker_service") as ensure_3d,
+            mock.patch.object(manager, "ensure_comfyui_service") as ensure_comfy,
+            mock.patch.object(manager, "ensure_gateway_service") as ensure_gateway,
+        ):
+            with self.assertRaises(RuntimeError) as context:
+                manager.start_services()
+        self.assertIn("SERVICE_MANAGER_STATE_CORRUPT", str(context.exception))
+        configure_audio.assert_not_called()
+        ensure_3d.assert_not_called()
+        ensure_comfy.assert_not_called()
+        ensure_gateway.assert_not_called()
 
     def test_managed_3d_token_is_strong_and_stable(self) -> None:
         token, source = manager.ensure_3d_token(allow_create=True)
