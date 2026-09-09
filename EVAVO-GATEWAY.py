@@ -85,13 +85,7 @@ class RequestBodyLimitMiddleware:
                 await self._reject(scope, receive, send, 400, "invalid Content-Length header")
                 return
             if content_length > self.max_bytes:
-                await self._reject(
-                    scope,
-                    receive,
-                    send,
-                    413,
-                    f"request exceeds EVAVO gateway limit of {self.max_bytes} bytes",
-                )
+                await self._reject(scope, receive, send, 413, f"request exceeds EVAVO gateway limit of {self.max_bytes} bytes")
                 return
 
         buffered: list[Dict[str, Any]] = []
@@ -106,13 +100,7 @@ class RequestBodyLimitMiddleware:
             body = message.get("body", b"")
             total += len(body) if isinstance(body, (bytes, bytearray)) else 0
             if total > self.max_bytes:
-                await self._reject(
-                    scope,
-                    receive,
-                    send,
-                    413,
-                    f"request exceeds EVAVO gateway limit of {self.max_bytes} bytes",
-                )
+                await self._reject(scope, receive, send, 413, f"request exceeds EVAVO gateway limit of {self.max_bytes} bytes")
                 return
             if not message.get("more_body", False):
                 break
@@ -178,19 +166,20 @@ class TaskStore:
         with _interprocess_lock(self.lock_path):
             self._tasks = self._read_unlocked()
 
-    def max_task_suffixes(self) -> Dict[str, int]:
-        maxima: Dict[str, int] = {}
-        for task_id in self._tasks:
+    @staticmethod
+    def _next_id(prefix: str, tasks: Dict[str, Dict[str, Any]]) -> str:
+        previous = 0
+        for task_id in tasks:
             match = TASK_ID_RE.fullmatch(task_id)
-            if not match:
+            if not match or match.group(1) != prefix:
                 continue
             try:
-                suffix = int(task_id.split("_", 1)[1])
+                previous = max(previous, int(task_id.split("_", 1)[1]))
             except (IndexError, ValueError):
                 continue
-            prefix = match.group(1)
-            maxima[prefix] = max(maxima.get(prefix, 0), suffix)
-        return maxima
+        now = int(time.time())
+        value = now if now > previous else previous + 1
+        return f"{prefix}_{value}"
 
     def _write_unlocked(self, tasks: Dict[str, Dict[str, Any]]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -208,6 +197,21 @@ class TaskStore:
             except OSError:
                 pass
             raise
+
+    def _create_sync(self, prefix: str, task: Dict[str, Any]) -> Dict[str, Any]:
+        with _interprocess_lock(self.lock_path):
+            tasks = self._read_unlocked()
+            task_id = self._next_id(prefix, tasks)
+            created = dict(task)
+            created["task_id"] = task_id
+            tasks[task_id] = created
+            self._write_unlocked(tasks)
+            self._tasks = tasks
+            return dict(created)
+
+    async def create(self, prefix: str, task: Dict[str, Any]) -> Dict[str, Any]:
+        async with self._lock:
+            return await asyncio.to_thread(self._create_sync, prefix, dict(task))
 
     def _put_sync(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_id = str(task["task_id"])
@@ -287,21 +291,12 @@ class TaskStore:
 
 STORE = TaskStore(TASK_STATE_FILE)
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
-_LAST_EPOCH_BY_PREFIX: Dict[str, int] = STORE.max_task_suffixes()
 
 
 def _iso_now() -> str:
     from datetime import datetime
 
     return datetime.now().astimezone().isoformat()
-
-
-def _next_task_id(prefix: str) -> str:
-    now = int(time.time())
-    previous = _LAST_EPOCH_BY_PREFIX.get(prefix, 0)
-    value = now if now > previous else previous + 1
-    _LAST_EPOCH_BY_PREFIX[prefix] = value
-    return f"{prefix}_{value}"
 
 
 def _public_task(task: Dict[str, Any]) -> Dict[str, Any]:
@@ -373,13 +368,7 @@ async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
             workflow_path=str(workflow_path) if workflow_path else None,
         )
         backend_task_id = str(queued["task_id"])
-        await STORE.update(
-            task_id,
-            progress=25,
-            backend_task_id=backend_task_id,
-            backend_mode="native-comfyui",
-            checkpoint=queued.get("checkpoint"),
-        )
+        await STORE.update(task_id, progress=25, backend_task_id=backend_task_id, backend_mode="native-comfyui", checkpoint=queued.get("checkpoint"))
         target = (RESULT_DIR / task_id).resolve()
         paths = await asyncio.to_thread(
             backend.wait_and_download,
@@ -410,7 +399,6 @@ async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
 
 async def _provider_worker(task_id: str, kind: str, request: Dict[str, Any]) -> None:
     """Delegate non-image modalities to their governed Studio execution surfaces."""
-
     try:
         from evavo_local_image_generator.provider_runner import ProviderError
 
@@ -466,24 +454,20 @@ async def _queue(prefix: str, kind: str, request: GenerationRequest) -> TaskQueu
     if len(encoded) > MAX_REQUEST_BYTES:
         raise HTTPException(status_code=413, detail=f"request exceeds EVAVO gateway limit of {MAX_REQUEST_BYTES} bytes")
 
-    task_id = _next_task_id(prefix)
-    task = {
-        "task_id": task_id,
-        "type": kind,
-        "status": "queued",
-        "progress": 0,
-        "prompt": prompt,
-        "project_name": project_name,
-        "created_at": _iso_now(),
-        "updated_at": _iso_now(),
-        "request": payload,
-    }
-    try:
-        await STORE.put(task)
-    except RuntimeError as exc:
-        if str(exc).startswith("GATEWAY_TASK_ID_COLLISION:"):
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        raise
+    task = await STORE.create(
+        prefix,
+        {
+            "type": kind,
+            "status": "queued",
+            "progress": 0,
+            "prompt": prompt,
+            "project_name": project_name,
+            "created_at": _iso_now(),
+            "updated_at": _iso_now(),
+            "request": payload,
+        },
+    )
+    task_id = str(task["task_id"])
     await _track_add(task)
     _launch(_image_worker(task_id, payload) if kind == "image" else _provider_worker(task_id, kind, payload))
     return TaskQueuedResponse(task_id=task_id)
@@ -511,8 +495,7 @@ def _configured_cors_origins() -> list[str]:
     invalid = [origin for origin in origins if origin == "*" or not LOOPBACK_ORIGIN_RE.fullmatch(origin)]
     if invalid:
         raise RuntimeError(
-            "EVAVO_GATEWAY_CORS_ORIGINS accepts only explicit loopback http/https origins; invalid: "
-            + ", ".join(invalid)
+            "EVAVO_GATEWAY_CORS_ORIGINS accepts only explicit loopback http/https origins; invalid: " + ", ".join(invalid)
         )
     return list(dict.fromkeys(origins))
 
