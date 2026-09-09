@@ -20,6 +20,7 @@ TRUE_VALUES = {"1", "true", "yes", "on"}
 _WINDOWS_DRIVE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 DEFAULT_COMFYUI_ENDPOINT = "http://127.0.0.1:8188"
+DEFAULT_TASK_HISTORY = REPO_ROOT / "task_history.json"
 
 
 def _truthy(name: str) -> bool:
@@ -67,12 +68,7 @@ def _existing_file(value: str | Path, *, label: str) -> Path:
 
 
 def _split_roots(raw: str) -> list[str]:
-    """Split owner root lists without breaking Windows drive-letter paths.
-
-    Windows uses semicolons for multiple roots. POSIX commonly uses ``:``. A
-    copied single Windows path such as ``D:\\Renders`` must remain one value
-    even when this validator is executed on a POSIX test/automation host.
-    """
+    """Split owner root lists without breaking Windows drive-letter paths."""
     text = raw.strip()
     if not text:
         return []
@@ -83,43 +79,63 @@ def _split_roots(raw: str) -> list[str]:
     return [item.strip() for item in text.split(os.pathsep) if item.strip()]
 
 
-def _creatable_output_root(value: str | Path, *, label: str) -> Path:
-    """Validate a default output root without creating it.
-
-    The default EVAVO output directory may legitimately not exist yet. In that
-    case validate the nearest existing ancestor and require it to be writable.
-    Explicit *additional* MCP roots must already exist and be writable.
-    """
-    lexical = _lexical_absolute(value)
-    if lexical.exists() or lexical.is_symlink():
-        return _existing_directory(lexical, label=label, writable=True)
-
-    ancestor = lexical.parent
+def _writable_existing_ancestor(lexical: Path, *, label: str) -> Path:
+    """Return the nearest ordinary writable directory ancestor without mutation."""
+    ancestor = lexical
     while ancestor != ancestor.parent and not ancestor.exists() and not ancestor.is_symlink():
         ancestor = ancestor.parent
     if ancestor.is_symlink():
         raise ValueError(f"{label} parent path must not traverse a symlink: {ancestor}")
     try:
-        resolved_ancestor = ancestor.resolve(strict=True)
+        resolved = ancestor.resolve(strict=True)
     except OSError as exc:
         raise ValueError(f"{label} has no usable existing parent: {lexical}") from exc
-    if not _same_path(ancestor, resolved_ancestor):
+    if not _same_path(ancestor, resolved):
         raise ValueError(f"{label} parent path traverses a symlink or redirected path")
-    if not resolved_ancestor.is_dir():
-        raise ValueError(f"{label} parent must be a directory: {resolved_ancestor}")
-    if not os.access(resolved_ancestor, os.W_OK):
-        raise ValueError(f"{label} parent is not writable: {resolved_ancestor}")
+    if not resolved.is_dir():
+        raise ValueError(f"{label} existing ancestor must be a directory: {resolved}")
+    if not os.access(resolved, os.W_OK):
+        raise ValueError(f"{label} existing ancestor is not writable: {resolved}")
+    return resolved
+
+
+def _creatable_output_root(value: str | Path, *, label: str) -> Path:
+    """Validate a default output root without creating it."""
+    lexical = _lexical_absolute(value)
+    if lexical.exists() or lexical.is_symlink():
+        return _existing_directory(lexical, label=label, writable=True)
+    _writable_existing_ancestor(lexical.parent, label=label)
+    return lexical
+
+
+def _creatable_history_file(value: str | Path, *, label: str) -> Path:
+    """Validate atomic JSON-history write authority without creating anything."""
+    lexical = _lexical_absolute(value)
+    if lexical.is_symlink():
+        raise ValueError(f"{label} must not be a symlink")
+    if lexical.exists():
+        try:
+            resolved = lexical.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"{label} cannot be resolved: {lexical}") from exc
+        if not _same_path(lexical, resolved):
+            raise ValueError(f"{label} traverses a symlink or redirected parent path")
+        if not resolved.is_file():
+            raise ValueError(f"{label} must be an ordinary file when it exists")
+        # TaskTracker writes a sibling temporary file and atomically replaces the
+        # JSON, so directory write authority is required even if the old file is
+        # itself writable.
+        parent = resolved.parent
+        if not os.access(parent, os.W_OK):
+            raise ValueError(f"{label} parent directory is not writable: {parent}")
+        return resolved
+
+    _writable_existing_ancestor(lexical.parent, label=label)
     return lexical
 
 
 def _validated_comfyui_endpoint() -> tuple[str, list[str]]:
-    """Return the canonical local ComfyUI endpoint allowed for production MCP.
-
-    Production Claude/ChatGPT MCP is a local image-generation service. Prompt
-    traffic must not silently leave the workstation because an inherited env var
-    points at a remote host. Library/testing code may instantiate backends
-    directly when a different network contract is intentionally required.
-    """
+    """Return the canonical local ComfyUI endpoint allowed for production MCP."""
     warnings: list[str] = []
     canonical = os.getenv("COMFYUI_ENDPOINT", "").strip()
     legacy = os.getenv("EVAVO_COMFYUI_ENDPOINT", "").strip()
@@ -173,6 +189,16 @@ def validate_environment() -> dict[str, Any]:
         details["default_output_root"] = str(validated_default)
     except ValueError as exc:
         errors.append(str(exc))
+        details["default_output_root"] = None
+
+    task_history_raw = os.getenv("EVAVO_TASK_HISTORY", "").strip()
+    task_history = task_history_raw or str(DEFAULT_TASK_HISTORY)
+    try:
+        validated_history = _creatable_history_file(task_history, label="EVAVO_TASK_HISTORY")
+        details["task_history_file"] = str(validated_history)
+    except ValueError as exc:
+        errors.append(str(exc))
+        details["task_history_file"] = None
 
     additional_raw = os.getenv("EVAVO_MCP_OUTPUT_ROOTS", "").strip()
     additional: list[str] = []
@@ -187,11 +213,10 @@ def validate_environment() -> dict[str, Any]:
     owner_workflow_raw = os.getenv("EVAVO_COMFYUI_WORKFLOW", "").strip()
     if owner_workflow_raw:
         try:
-            details["owner_workflow"] = str(
-                _existing_file(owner_workflow_raw, label="EVAVO_COMFYUI_WORKFLOW")
-            )
+            details["owner_workflow"] = str(_existing_file(owner_workflow_raw, label="EVAVO_COMFYUI_WORKFLOW"))
         except ValueError as exc:
             errors.append(str(exc))
+            details["owner_workflow"] = None
     else:
         details["owner_workflow"] = None
 
@@ -200,24 +225,18 @@ def validate_environment() -> dict[str, Any]:
     workflow_root_raw = os.getenv("EVAVO_MCP_WORKFLOW_ROOT", "").strip()
     if tool_workflows_allowed:
         if not workflow_root_raw:
-            errors.append(
-                "EVAVO_MCP_WORKFLOW_ROOT is required when EVAVO_MCP_ALLOW_WORKFLOW_PATHS is enabled"
-            )
+            errors.append("EVAVO_MCP_WORKFLOW_ROOT is required when EVAVO_MCP_ALLOW_WORKFLOW_PATHS is enabled")
             details["tool_workflow_root"] = None
         else:
             try:
-                details["tool_workflow_root"] = str(
-                    _existing_directory(workflow_root_raw, label="EVAVO_MCP_WORKFLOW_ROOT")
-                )
+                details["tool_workflow_root"] = str(_existing_directory(workflow_root_raw, label="EVAVO_MCP_WORKFLOW_ROOT"))
             except ValueError as exc:
                 errors.append(str(exc))
                 details["tool_workflow_root"] = None
     else:
         details["tool_workflow_root"] = None
         if workflow_root_raw:
-            warnings.append(
-                "EVAVO_MCP_WORKFLOW_ROOT is configured but tool workflow paths are disabled; the root grants no tool authority"
-            )
+            warnings.append("EVAVO_MCP_WORKFLOW_ROOT is configured but tool workflow paths are disabled; the root grants no tool authority")
 
     return {
         "ok": not errors,
