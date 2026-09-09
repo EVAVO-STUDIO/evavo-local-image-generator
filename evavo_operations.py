@@ -25,6 +25,19 @@ SERVICE_NAME = "evavo-local-image-generator"
 PROTOCOL_VERSION = 1
 HISTORY_FILE = Path(os.environ.get("EVAVO_TASK_HISTORY", str(ROOT / "task_history.json"))).expanduser().resolve()
 VALID_STATUSES = {"queued", "running", "completed", "failed", "cancelled", "unknown"}
+TASK_STRING_FIELDS = {
+    "error_code",
+    "error_message",
+    "output_uri",
+    "backend_mode",
+    "checkpoint",
+    "workflow_path",
+    "output_dir",
+    "cancel_requested_at",
+    "cancelled_at",
+    "cancel_method",
+    "backend_status",
+}
 
 
 def now_iso() -> str:
@@ -295,6 +308,10 @@ class TaskTracker:
         workflow_path: Optional[str] = None,
         output_dir: Optional[str] = None,
         output_uris: Optional[List[str]] = None,
+        cancel_requested_at: Optional[str] = None,
+        cancelled_at: Optional[str] = None,
+        cancel_method: Optional[str] = None,
+        backend_status: Optional[str] = None,
     ) -> Dict[str, Any]:
         if not isinstance(task_id, str) or not task_id.strip():
             raise ValueError("task_id must be a non-empty string")
@@ -314,6 +331,10 @@ class TaskTracker:
             "checkpoint": checkpoint,
             "workflow_path": workflow_path,
             "output_dir": output_dir,
+            "cancel_requested_at": cancel_requested_at,
+            "cancelled_at": cancelled_at,
+            "cancel_method": cancel_method,
+            "backend_status": backend_status,
         }
         for key, value in optional_strings.items():
             if value is not None and str(value):
@@ -344,15 +365,7 @@ class TaskTracker:
             target["status"] = normalize_status(status)
             target["updated"] = now_iso()
 
-            for key in (
-                "error_code",
-                "error_message",
-                "output_uri",
-                "backend_mode",
-                "checkpoint",
-                "workflow_path",
-                "output_dir",
-            ):
+            for key in TASK_STRING_FIELDS:
                 if key in fields and fields[key] is not None:
                     target[key] = str(fields[key])
 
