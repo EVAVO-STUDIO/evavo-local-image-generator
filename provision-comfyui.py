@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision an isolated local ComfyUI runtime for EVAVO.
+"""Provision an isolated local ComfyUI runtime and explicit checkpoints for EVAVO.
 
 Runtime provisioning is automatic. Checkpoint provisioning is intentionally
 opt-in: a local file or explicit URL must be supplied by the operator because
@@ -59,6 +59,17 @@ def default_target() -> Path:
     return (ROOT.parent / "ComfyUI").resolve()
 
 
+def resolve_app_root(target: Path) -> Path:
+    """Resolve either a source checkout root or Windows portable container."""
+    target = target.expanduser().resolve()
+    if (target / "main.py").is_file():
+        return target
+    portable = target / "ComfyUI"
+    if (portable / "main.py").is_file():
+        return portable
+    raise RuntimeError(f"COMFYUI_TARGET_CONFLICT:{target} does not contain main.py or ComfyUI/main.py")
+
+
 def venv_python(target: Path) -> Path:
     if os.name == "nt":
         return target / ".venv" / "Scripts" / "python.exe"
@@ -79,7 +90,7 @@ def ensure_checkout(target: Path, repository: str, update: bool) -> Dict[str, An
 
     main_py = target / "main.py"
     if not main_py.is_file():
-        raise RuntimeError(f"COMFYUI_TARGET_CONFLICT:{target} exists but does not contain main.py")
+        raise RuntimeError(f"COMFYUI_TARGET_CONFLICT:{target} exists but is not a source checkout with main.py")
 
     if not (target / ".git").exists() or not update:
         return {"status": "existing", "repository": repository}
@@ -120,6 +131,8 @@ def install_runtime(target: Path, python: Path, *, install_pytorch: bool, torch_
 
     nvidia = nvidia_available()
     if nvidia and install_pytorch:
+        # Match ComfyUI's documented stable NVIDIA installation path. ComfyUI
+        # currently recommends the CUDA wheel source as an extra index.
         result = run(
             [
                 str(python),
@@ -239,8 +252,8 @@ def download_checkpoint(url: str, destination_dir: Path, *, expected_sha256: Opt
         raise
 
 
-def provision_checkpoint(target: Path, args: argparse.Namespace) -> Optional[Dict[str, Any]]:
-    destination_dir = target / "models" / "checkpoints"
+def provision_checkpoint(app_root: Path, args: argparse.Namespace) -> Optional[Dict[str, Any]]:
+    destination_dir = app_root / "models" / "checkpoints"
     checkpoint_file = args.checkpoint_file or os.getenv("EVAVO_CHECKPOINT_FILE")
     checkpoint_url = args.checkpoint_url or os.getenv("EVAVO_CHECKPOINT_URL")
     checkpoint_sha256 = args.checkpoint_sha256 or os.getenv("EVAVO_CHECKPOINT_SHA256")
@@ -252,6 +265,12 @@ def provision_checkpoint(target: Path, args: argparse.Namespace) -> Optional[Dic
     if checkpoint_url:
         return download_checkpoint(checkpoint_url, destination_dir, expected_sha256=checkpoint_sha256, name=checkpoint_name, allow_http=args.allow_http_checkpoint)
     return None
+
+
+def list_checkpoint_files(app_root: Path) -> List[str]:
+    checkpoints = app_root / "models" / "checkpoints"
+    checkpoints.mkdir(parents=True, exist_ok=True)
+    return sorted(path.name for path in checkpoints.iterdir() if path.is_file() and path.suffix.lower() in MODEL_EXTENSIONS)
 
 
 def verify_runtime(target: Path, python: Path) -> Dict[str, Any]:
@@ -271,15 +290,13 @@ def verify_runtime(target: Path, python: Path) -> Dict[str, Any]:
     if not main_py.is_file():
         raise RuntimeError(f"COMFYUI_VERIFY_FAILED:missing {main_py}")
 
-    checkpoints = target / "models" / "checkpoints"
-    checkpoints.mkdir(parents=True, exist_ok=True)
-    existing_models = [path.name for path in checkpoints.iterdir() if path.is_file() and path.suffix.lower() in MODEL_EXTENSIONS]
+    checkpoint_files = list_checkpoint_files(target)
     return {
         "main_py": str(main_py),
         "python": str(python),
         "torch": torch_info,
-        "checkpoint_directory": str(checkpoints),
-        "checkpoint_files": sorted(existing_models),
+        "checkpoint_directory": str(target / "models" / "checkpoints"),
+        "checkpoint_files": checkpoint_files,
     }
 
 
@@ -292,21 +309,46 @@ def save_state(payload: Dict[str, Any]) -> None:
 
 def provision(args: argparse.Namespace) -> Dict[str, Any]:
     target = Path(args.target).expanduser().resolve() if args.target else default_target()
+
+    if args.checkpoint_only:
+        app_root = resolve_app_root(target)
+        checkpoint = provision_checkpoint(app_root, args)
+        if checkpoint is None:
+            raise RuntimeError("CHECKPOINT_SOURCE_REQUIRED:set EVAVO_CHECKPOINT_FILE or EVAVO_CHECKPOINT_URL")
+        checkpoint_files = list_checkpoint_files(app_root)
+        payload = {
+            "ok": True,
+            "status": "checkpoint_provisioned",
+            "timestamp": now_iso(),
+            "target": str(target),
+            "app_root": str(app_root),
+            "checkpoint": checkpoint,
+            "verification": {
+                "checkpoint_directory": str(app_root / "models" / "checkpoints"),
+                "checkpoint_files": checkpoint_files,
+            },
+            "model_required": not bool(checkpoint_files),
+        }
+        save_state(payload)
+        return payload
+
     checkout = ensure_checkout(target, args.repository, not args.skip_update)
-    python = ensure_venv(target)
+    app_root = resolve_app_root(target)
+    python = ensure_venv(app_root)
     install = install_runtime(
-        target,
+        app_root,
         python,
         install_pytorch=not args.skip_pytorch,
         torch_index_url=args.torch_index_url,
     )
-    checkpoint = provision_checkpoint(target, args)
-    verification = verify_runtime(target, python)
+    checkpoint = provision_checkpoint(app_root, args)
+    verification = verify_runtime(app_root, python)
     payload = {
         "ok": True,
         "status": "provisioned",
         "timestamp": now_iso(),
         "target": str(target),
+        "app_root": str(app_root),
         "checkout": checkout,
         "install": install,
         "checkpoint": checkpoint,
@@ -323,11 +365,12 @@ def provision(args: argparse.Namespace) -> Dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Provision official ComfyUI for EVAVO")
-    parser.add_argument("--target", help="ComfyUI installation directory; defaults to a sibling ComfyUI repository")
+    parser.add_argument("--target", help="ComfyUI source root or Windows portable container; defaults to sibling ComfyUI")
     parser.add_argument("--repository", default=os.getenv("EVAVO_COMFYUI_REPOSITORY", OFFICIAL_COMFYUI_REPOSITORY))
-    parser.add_argument("--skip-update", action="store_true", help="Do not git pull an existing clean checkout")
+    parser.add_argument("--skip-update", action="store_true", help="Do not git pull an existing clean source checkout")
     parser.add_argument("--skip-pytorch", action="store_true", help="Do not perform NVIDIA-specific PyTorch install before ComfyUI requirements")
     parser.add_argument("--torch-index-url", default=os.getenv("EVAVO_TORCH_INDEX_URL", DEFAULT_NVIDIA_TORCH_INDEX))
+    parser.add_argument("--checkpoint-only", action="store_true", help="Only provision the configured checkpoint into an existing source/portable install")
     parser.add_argument("--checkpoint-file", help="Explicit local checkpoint to copy into ComfyUI models/checkpoints")
     parser.add_argument("--checkpoint-url", help="Explicit checkpoint HTTPS URL to download")
     parser.add_argument("--checkpoint-sha256", help="Optional expected SHA-256 for the configured checkpoint")
@@ -352,14 +395,17 @@ def main() -> int:
         print("EVAVO ComfyUI provisioner")
         print("=" * 72)
         print(f"Target:      {payload['target']}")
-        print(f"Checkout:    {payload['checkout']['status']}")
-        print(f"Python:      {payload['verification']['python']}")
-        print(f"Torch:       {payload['verification']['torch']['torch_version']}")
-        print(f"CUDA:        {payload['verification']['torch']['cuda_available']}")
-        print(f"Checkpoints: {len(payload['verification']['checkpoint_files'])}")
-        if payload["checkpoint"]:
+        print(f"App root:    {payload.get('app_root', payload['target'])}")
+        if payload.get("checkout"):
+            print(f"Checkout:    {payload['checkout']['status']}")
+        if payload.get("verification", {}).get("python"):
+            print(f"Python:      {payload['verification']['python']}")
+            print(f"Torch:       {payload['verification']['torch']['torch_version']}")
+            print(f"CUDA:        {payload['verification']['torch']['cuda_available']}")
+        print(f"Checkpoints: {len(payload.get('verification', {}).get('checkpoint_files', []))}")
+        if payload.get("checkpoint"):
             print(f"Model:       {payload['checkpoint']['status']} -> {payload['checkpoint']['path']}")
-        if payload["model_required"]:
+        if payload.get("model_required"):
             print("A diffusion checkpoint is still required before real generation can pass readiness checks.")
             print("Configure EVAVO_CHECKPOINT_FILE or EVAVO_CHECKPOINT_URL, then rerun this provisioner.")
         print("=" * 72)
