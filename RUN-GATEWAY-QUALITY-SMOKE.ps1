@@ -92,12 +92,22 @@ if (-not (Test-GatewayQualityContract $GatewayBase)) {
     }
 }
 
+$outputPath = if ([System.IO.Path]::IsPathRooted($Output)) {
+    [System.IO.Path]::GetFullPath($Output)
+} else {
+    [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $Output))
+}
+$outputParent = Split-Path -Parent $outputPath
+if ($outputParent) {
+    New-Item -ItemType Directory -Force -Path $outputParent | Out-Null
+}
+
 $args = @(
     ".\gateway-smoke-test.py",
     "--base", $GatewayBase,
     "--profile", $Profile,
     "--seed", "$Seed",
-    "--output", $Output
+    "--output", $outputPath
 )
 if (-not [string]::IsNullOrWhiteSpace($Lora)) {
     $args += @("--lora", $Lora, "--lora-strength", "$LoraStrength")
@@ -110,4 +120,4 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Gateway image-quality boundary passed." -ForegroundColor Green
-Write-Host "Artifact: $([System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot $Output)))"
+Write-Host "Artifact: $outputPath"
