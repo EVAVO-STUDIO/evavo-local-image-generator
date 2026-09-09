@@ -2,7 +2,7 @@
   "contractVersion": "evavo_repository_capabilities_v1",
   "repository": "EVAVO-STUDIO/evavo-local-image-generator",
   "authority": "local-image-generation-control-plane",
-  "summary": "EVAVO's Windows-first local ComfyUI image-generation control plane and agent transport layer. It owns native ComfyUI discovery/provisioning/health, model inventory, live workflow preflight, real prompt submission/completion/output collection, bounded batch execution, shared task history, MCP delivery to local hosts and secure ChatGPT tunnelling. Its optional hardened loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. Each gateway task-state file has one live gateway owner at a time; a second process fails closed instead of creating split-brain recovery semantics. The deterministic mock is test infrastructure only; Local Image Generator is not Art Studio, does not provide creative approval and cannot claim real image generation without a healthy native ComfyUI backend.",
+  "summary": "EVAVO's Windows-first local ComfyUI image-generation control plane and agent transport layer. It owns native ComfyUI discovery/provisioning/health, model inventory, live workflow preflight, real prompt submission/completion/output collection, bounded batch execution, shared task history, MCP delivery to local hosts and secure ChatGPT tunnelling. MCP file access is owner-confined: arbitrary output directories and arbitrary workflow JSON are not model powers, and generated images must remain ordinary files with valid image signatures. Its optional hardened loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. Each gateway task-state file has one live gateway owner at a time; a second process fails closed instead of creating split-brain recovery semantics. The deterministic mock is test infrastructure only; Local Image Generator is not Art Studio, does not provide creative approval and cannot claim real image generation without a healthy native ComfyUI backend.",
   "capabilities": [
     {
       "id": "local-image.backend.discover-health",
@@ -37,41 +37,41 @@
     {
       "id": "local-image.workflow.preflight",
       "title": "Preflight custom ComfyUI workflows without rendering",
-      "description": "Render the same template substitutions as generation and validate live node classes, required inputs and literal model/loader choices against the active backend without queueing a prompt or writing task history.",
+      "description": "Render the same template substitutions as generation and validate live node classes, required inputs and literal model/loader choices against the active backend without queueing a prompt or writing task history. MCP tool-supplied workflow files are disabled by default and, when explicitly enabled, remain confined to an owner-selected workflow root.",
       "interfaces": ["cli", "mcp", "library", "automation"],
       "effects": ["read", "compute", "network"],
       "entrypoints": ["workflow_preflight", "python evavo.py verify --full"],
-      "tags": ["image", "comfyui", "workflow", "preflight", "read-only"],
-      "requires": ["Healthy ComfyUI backend", "Custom workflow template"]
+      "tags": ["image", "comfyui", "workflow", "preflight", "read-only", "owner-confined"],
+      "requires": ["Healthy ComfyUI backend", "Owner-authorized custom workflow template"]
     },
     {
       "id": "local-image.generate",
       "title": "Generate images through real native ComfyUI",
-      "description": "Submit standard or preflighted custom workflows to native ComfyUI, retain real prompt IDs, wait on history when requested and collect authorized output files atomically. Real generation cannot be satisfied by the deterministic EVAVO mock.",
+      "description": "Submit standard or preflighted custom workflows to native ComfyUI, retain real prompt IDs, wait on history when requested and collect authorized output files atomically. Real generation cannot be satisfied by the deterministic EVAVO mock. MCP output paths remain under EVAVO_GENERATION_OUTPUT_DIR or additional owner-configured EVAVO_MCP_OUTPUT_ROOTS.",
       "interfaces": ["cli", "mcp", "automation", "library"],
       "effects": ["read", "compute", "network", "execute", "write"],
       "entrypoints": ["python evavo.py generate", "generate_image", "generation_status", "collect_generation"],
-      "tags": ["image", "generation", "comfyui", "txt2img", "workflow"],
+      "tags": ["image", "generation", "comfyui", "txt2img", "workflow", "owner-confined"],
       "requires": ["Healthy native ComfyUI", "Compatible selected workflow/model resources"]
     },
     {
       "id": "local-image.generate-batch",
       "title": "Run bounded-concurrency image batches",
-      "description": "Run multiple generation requests with bounded concurrency, shared lock-protected task history and per-generation status/output evidence rather than launching unbounded renderer work.",
+      "description": "Run multiple generation requests with bounded concurrency, shared lock-protected task history and per-generation status/output evidence rather than launching unbounded renderer work. Invalid file/wait policies are rejected before backend startup or queue submission.",
       "interfaces": ["cli", "mcp", "automation"],
       "effects": ["read", "compute", "network", "execute", "write"],
       "entrypoints": ["python evavo.py generate", "generate_batch", "task_history", "task_statistics"],
-      "tags": ["image", "batch", "generation", "concurrency", "tasks"],
+      "tags": ["image", "batch", "generation", "concurrency", "tasks", "preflight"],
       "requires": ["Healthy native ComfyUI", "Bounded batch request"]
     },
     {
       "id": "local-image.generation.collect-inspect",
       "title": "Track, collect and expose generated outputs for inspection",
-      "description": "Track prompt completion, collect outputs through native /view, atomically download authorized files and return generated images as native MCP image content so host models can inspect the actual result rather than only a Windows path.",
+      "description": "Track prompt completion, collect outputs through native /view, atomically download authorized files and return generated images as native MCP image content. Image reads reject symlinks/redirected parent paths and require PNG/JPEG/GIF/WebP signatures rather than trusting filename extensions alone.",
       "interfaces": ["cli", "mcp", "library"],
       "effects": ["read", "compute", "network", "write"],
       "entrypoints": ["generation_status", "collect_generation", "read_output_image"],
-      "tags": ["image", "output", "mcp", "inspection", "history"],
+      "tags": ["image", "output", "mcp", "inspection", "history", "file-identity", "signature"],
       "requires": ["Authorized completed generation output"]
     },
     {
@@ -87,11 +87,11 @@
     {
       "id": "local-image.mcp.serve",
       "title": "Expose local image-generation MCP services",
-      "description": "Serve MCP v2 over stdio and private loopback Streamable HTTP, configure Claude Desktop and optionally start the private HTTP MCP at Windows login without making the loopback endpoint public directly.",
+      "description": "Serve MCP v2 over stdio and private loopback Streamable HTTP, configure Claude Desktop and optionally start the private HTTP MCP at Windows login without making the loopback endpoint public. Persistent profiles carry only non-secret owner path policy; tool-supplied workflows/output destinations do not become arbitrary filesystem authority.",
       "interfaces": ["mcp", "cli", "automation"],
       "effects": ["read", "compute", "execute", "write", "network"],
       "entrypoints": ["INSTALL-CLAUDE-MCP.ps1", "http://127.0.0.1:8765/mcp", "UPDATE-AND-VERIFY-EVAVO.ps1"],
-      "tags": ["image", "mcp", "claude", "localhost", "agent"],
+      "tags": ["image", "mcp", "claude", "localhost", "agent", "file-policy"],
       "requires": ["Trusted local host", "Configured MCP client/runtime"]
     },
     {
@@ -107,21 +107,21 @@
     {
       "id": "local-image.gateway.private-contract",
       "title": "Expose a hardened private loopback compatibility gateway",
-      "description": "Expose REST/WebSocket compatibility only on loopback with CORS disabled by default, structured configuration validation, pre-parse request-body caps including chunked bodies, bounded project/timeout fields, default-denied and owner-root-confined per-request workflow paths, atomic task persistence, fail-closed corrupt state and a lifetime instance lock that permits exactly one live gateway owner per task-state file. A competing process fails with GATEWAY_STATE_IN_USE instead of producing split-brain recovery behavior.",
+      "description": "Expose REST/WebSocket compatibility only on loopback with CORS disabled by default, structured configuration validation, pre-parse request-body caps including chunked bodies, bounded project/timeout fields, default-denied and owner-root-confined per-request workflow paths, ordinary-file result identity checks, atomic task persistence, fail-closed corrupt state and a lifetime instance lock that permits exactly one live gateway owner per task-state file. A competing process fails with GATEWAY_STATE_IN_USE instead of producing split-brain recovery behavior.",
       "interfaces": ["http-gateway", "automation", "testing"],
       "effects": ["read", "compute", "network", "execute", "write"],
-      "entrypoints": ["GET /health", "GET /tasks", "GET /tasks/{task_id}/status", "WS /ws/progress/{task_id}", "GATEWAY-INTEGRATION-GUIDE.md"],
-      "tags": ["gateway", "loopback", "cors", "request-limit", "workflow-safety", "task-state", "locking", "single-owner"],
+      "entrypoints": ["GET /health", "GET /tasks", "GET /tasks/{task_id}/status", "GET /results/{task_id}", "WS /ws/progress/{task_id}", "GATEWAY-INTEGRATION-GUIDE.md"],
+      "tags": ["gateway", "loopback", "cors", "request-limit", "workflow-safety", "result-safety", "task-state", "locking", "single-owner"],
       "requires": ["Trusted local host", "Native ComfyUI for healthy owned image generation", "Unique task-state file per simultaneously running gateway instance"]
     },
     {
       "id": "local-image.gateway.aux-provider-delegation",
       "title": "Delegate optional gateway media to governed sibling Studio providers",
-      "description": "Keep image ownership in this repository while allowing the loopback compatibility gateway to delegate video, audio and 3D tasks only to readiness-checked sibling providers. Provider execution is fail-closed, receipt-backed, timeout-bounded, output-confined and digest-verified when a receipt supplies a hash; unavailable providers produce structured failures rather than fake completion.",
+      "description": "Keep image ownership in this repository while allowing the loopback compatibility gateway to delegate video, audio and 3D tasks only to readiness-checked sibling providers. Provider execution is fail-closed, receipt-backed, timeout-bounded, output-confined, rejects symlinked/redirected provider artifacts and destinations, and digest-verifies artifacts when a receipt supplies a hash; unavailable providers produce structured failures rather than fake completion.",
       "interfaces": ["http-gateway", "automation"],
       "effects": ["read", "compute", "network", "execute", "write"],
       "entrypoints": ["GET /services", "GET /capabilities", "POST /generate/video", "POST /generate/audio", "POST /generate/3d", "GATEWAY-AUX-PROVIDERS.md"],
-      "tags": ["gateway", "delegation", "video", "audio", "3d", "providers", "fail-closed", "digest"],
+      "tags": ["gateway", "delegation", "video", "audio", "3d", "providers", "fail-closed", "digest", "file-identity"],
       "requires": ["Loopback gateway", "Explicitly ready reviewed provider for the requested delegated modality"]
     },
     {
@@ -138,7 +138,7 @@
   "brain": {
     "consult": true,
     "sanityCheck": true,
-    "topics": ["local image generation", "ComfyUI readiness", "model inventory", "workflow preflight", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "hardened private gateway", "single-owner task state", "governed gateway provider delegation"]
+    "topics": ["local image generation", "ComfyUI readiness", "model inventory", "workflow preflight", "owner-confined MCP file policy", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "hardened private gateway", "single-owner task state", "governed gateway provider delegation"]
   },
-  "reviewedAt": "2026-09-09T17:50:00+10:00"
+  "reviewedAt": "2026-09-09T18:28:00+10:00"
 }
