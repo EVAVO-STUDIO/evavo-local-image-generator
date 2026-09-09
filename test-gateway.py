@@ -62,6 +62,19 @@ def request_json(url: str, *, method: str = "GET", payload: Dict[str, Any] | Non
     return status, parsed
 
 
+def wait_terminal(base: str, task_id: str, timeout: float = 20.0) -> Dict[str, Any]:
+    deadline = time.monotonic() + timeout
+    latest: Dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        status, latest = request_json(base + f"/tasks/{task_id}/status")
+        if status != 200:
+            raise AssertionError((status, latest))
+        if latest.get("status") in {"completed", "failed", "cancelled"}:
+            return latest
+        time.sleep(0.15)
+    raise AssertionError(f"task {task_id} did not reach a terminal state: {latest}")
+
+
 class GatewayIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -83,6 +96,10 @@ class GatewayIntegrationTests(unittest.TestCase):
         env["EVAVO_GATEWAY_PORT"] = str(GATEWAY_PORT)
         env["EVAVO_GATEWAY_STATE_DIR"] = str(cls.state_dir)
         env["EVAVO_TASK_HISTORY"] = str(cls.task_history)
+        env.pop("EVAVO_GATEWAY_CORS_ORIGINS", None)
+        env.pop("EVAVO_VIDEO_PROVIDER_ARGV", None)
+        env.pop("EVAVO_AUDIO_PROVIDER_ARGV", None)
+        env.pop("EVAVO_3D_AGENT_EXECUTION_TOKEN", None)
         cls.env = env
         cls.gateway = subprocess.Popen(
             [sys.executable, str(ROOT / "EVAVO-GATEWAY.py")],
@@ -105,18 +122,30 @@ class GatewayIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload, {"status": "healthy", "gateway": "ok", "comfyui": "ok"})
 
-    def test_capabilities_are_truthful(self) -> None:
-        status, payload = request_json(self.base + "/capabilities")
+    def test_services_and_capabilities_report_auxiliary_readiness_truthfully(self) -> None:
+        status, services = request_json(self.base + "/services")
         self.assertEqual(status, 200)
-        self.assertTrue(payload["image"]["ready"])
-        for kind in ("video", "audio", "3d"):
-            self.assertFalse(payload[kind]["ready"])
-            self.assertIn("not part of", payload[kind]["reason"])
+        self.assertTrue(services["image"]["ready"])
 
-    def test_unsupported_modalities_fail_before_queueing(self) -> None:
+        status, capabilities = request_json(self.base + "/capabilities")
+        self.assertEqual(status, 200)
+        self.assertTrue(capabilities["image"]["ready"])
         for kind in ("video", "audio", "3d"):
-            status, payload = request_json(self.base + f"/generate/{kind}", method="POST", payload={"prompt": "test"})
-            self.assertEqual(status, 501, (kind, payload))
+            self.assertIn(kind, services)
+            self.assertIn(kind, capabilities)
+            self.assertFalse(bool(capabilities[kind]["ready"]), (kind, capabilities[kind]))
+
+    def test_unavailable_auxiliary_providers_fail_closed_after_queueing(self) -> None:
+        prefixes = {"video": "vid_", "audio": "aud_", "3d": "3d_"}
+        for kind, prefix in prefixes.items():
+            status, queued = request_json(self.base + f"/generate/{kind}", method="POST", payload={"prompt": "test"})
+            self.assertEqual(status, 202, (kind, queued))
+            task_id = str(queued.get("task_id", ""))
+            self.assertTrue(task_id.startswith(prefix), (kind, queued))
+            terminal = wait_terminal(self.base, task_id)
+            self.assertEqual(terminal.get("status"), "failed", (kind, terminal))
+            self.assertFalse(terminal.get("result_ready"), (kind, terminal))
+            self.assertTrue(str(terminal.get("error_code", "")).startswith("PROVIDER_"), (kind, terminal))
 
     def test_image_generation_completes_and_downloads(self) -> None:
         status, queued = request_json(
@@ -128,14 +157,7 @@ class GatewayIntegrationTests(unittest.TestCase):
         task_id = str(queued.get("task_id", ""))
         self.assertTrue(task_id.startswith("img_"), queued)
 
-        deadline = time.monotonic() + 20
-        latest: Dict[str, Any] = {}
-        while time.monotonic() < deadline:
-            status, latest = request_json(self.base + f"/tasks/{task_id}/status")
-            self.assertEqual(status, 200)
-            if latest.get("status") in {"completed", "failed"}:
-                break
-            time.sleep(0.15)
+        latest = wait_terminal(self.base, task_id)
         self.assertEqual(latest.get("status"), "completed", latest)
         self.assertEqual(latest.get("progress"), 100, latest)
         self.assertTrue(latest.get("result_ready"), latest)
@@ -145,6 +167,12 @@ class GatewayIntegrationTests(unittest.TestCase):
             body = response.read()
             self.assertEqual(int(getattr(response, "status", 200)), 200)
         self.assertGreater(len(body), 0)
+
+    def test_cors_is_disabled_by_default(self) -> None:
+        request = urllib.request.Request(self.base + "/health", headers={"Origin": "https://example.com"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            self.assertEqual(int(getattr(response, "status", 200)), 200)
+            self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
 
     def test_service_manager_reports_same_native_health(self) -> None:
         result = subprocess.run(
@@ -174,6 +202,21 @@ class GatewayIntegrationTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("restricted to loopback", result.stderr + result.stdout)
+
+    def test_wildcard_cors_configuration_is_rejected(self) -> None:
+        env = self.env.copy()
+        env["EVAVO_GATEWAY_CORS_ORIGINS"] = "*"
+        env["EVAVO_GATEWAY_PORT"] = "18213"
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "EVAVO-GATEWAY.py")],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("accepts only explicit loopback", result.stderr + result.stdout)
 
 
 if __name__ == "__main__":
