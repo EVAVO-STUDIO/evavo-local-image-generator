@@ -15,7 +15,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from evavo_local_image_generator.provider_runner import ProviderError, ProviderRouter, _generic_3d_brief
+from evavo_local_image_generator.provider_runner import ProviderError, ProviderRouter, _copy_verified, _generic_3d_brief
 
 
 GENERIC_WORKER = r'''import argparse,json,pathlib
@@ -109,6 +109,27 @@ class ProviderRouterTests(unittest.TestCase):
             with self.assertRaises(ProviderError) as context:
                 asyncio.run(self.router.generate('audio','aud_1234567891',{'prompt':'hello'}))
         self.assertEqual(context.exception.code,'PROVIDER_OUTPUT_INVALID')
+
+    def test_copy_verified_rejects_source_symlink(self):
+        task_root=self.base/'task';task_root.mkdir();source=task_root/'real.bin';source.write_bytes(b'real')
+        link=task_root/'link.bin'
+        try: link.symlink_to(source)
+        except (OSError,NotImplementedError) as exc: self.skipTest(f'symlinks unavailable: {exc}')
+        with self.assertRaises(ProviderError) as context:
+            _copy_verified(link,self.results/'copied.bin',admitted_root=task_root)
+        self.assertEqual(context.exception.code,'PROVIDER_OUTPUT_INVALID')
+        self.assertIn('symlink',str(context.exception).lower())
+
+    def test_copy_verified_rejects_destination_symlink_without_touching_target(self):
+        task_root=self.base/'task2';task_root.mkdir();source=task_root/'real.bin';source.write_bytes(b'real-provider-data')
+        self.results.mkdir(parents=True,exist_ok=True);external=self.base/'external.bin';external.write_bytes(b'do-not-overwrite')
+        destination=self.results/'copied.bin'
+        try: destination.symlink_to(external)
+        except (OSError,NotImplementedError) as exc: self.skipTest(f'symlinks unavailable: {exc}')
+        with self.assertRaises(ProviderError) as context:
+            _copy_verified(source,destination,admitted_root=task_root)
+        self.assertEqual(context.exception.code,'PROVIDER_OUTPUT_INVALID')
+        self.assertEqual(external.read_bytes(),b'do-not-overwrite')
 
     def test_video_override_uses_same_bounded_contract(self):
         argv=json.dumps([sys.executable,str(self.worker),'--request','{request_json}','--output-dir','{output_dir}','--name','video.mp4'])
