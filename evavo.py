@@ -32,6 +32,7 @@ LOG_FILE = STATE_DIR / "mock-service.log"
 SERVER = ROOT / "mock-comfyui-server.py"
 REQUIRED_FILES = [
     "evavo.py",
+    "verify-evavo.py",
     "evavo_operations.py",
     "evavo-wrapper.py",
     "mock-comfyui-server.py",
@@ -42,7 +43,19 @@ REQUIRED_FILES = [
     "agent-doctor.py",
     "test-agent-integration.py",
     "test-provisioning.py",
+    "test-backend-automation.py",
+    "test-chatgpt-tunnel.py",
     "provision-comfyui.py",
+    "UPDATE-AND-VERIFY-EVAVO.ps1",
+    "INSTALL-CLAUDE-MCP.ps1",
+    "START-AGENT-MCP.ps1",
+    "INSTALL-AGENT-MCP-AUTOSTART.ps1",
+    "INSTALL-CHATGPT-MCP-TUNNEL.ps1",
+    "SAVE-CHATGPT-TUNNEL-KEY.ps1",
+    "START-CHATGPT-MCP-TUNNEL.ps1",
+    "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
+    "CHATGPT-TUNNEL-DOCTOR.ps1",
+    "CHATGPT-TUNNEL.md",
     "evavo_local_image_generator/backends/comfyui_backend.py",
     "evavo_local_image_generator/comfyui_runtime.py",
     "evavo_local_image_generator/mcp_server.py",
@@ -350,6 +363,7 @@ def bootstrap(endpoint: str, skip_pull: bool = False) -> int:
     controller = str(ROOT / "evavo.py")
     steps = [
         [sys.executable, controller, "doctor", "--endpoint", endpoint],
+        [sys.executable, controller, "verify"],
         [sys.executable, controller, "test"],
         [sys.executable, controller, "start", "--endpoint", endpoint],
         [sys.executable, controller, "status", "--endpoint", endpoint],
@@ -382,7 +396,12 @@ def main() -> int:
     doctor_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     doctor_parser.add_argument("--json", action="store_true")
 
-    bootstrap_parser = subparsers.add_parser("bootstrap", help="Sync main, test, start and verify EVAVO")
+    verify_parser = subparsers.add_parser("verify", help="Run read-only structural/Python/PowerShell contract verification")
+    verify_parser.add_argument("--full", action="store_true", help="Also run all Python safety/integration suites")
+    verify_parser.add_argument("--require-powershell", action="store_true", help="Fail if PowerShell is unavailable")
+    verify_parser.add_argument("--json", action="store_true")
+
+    bootstrap_parser = subparsers.add_parser("bootstrap", help="Sync main, verify, test, start and verify backend health")
     bootstrap_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     bootstrap_parser.add_argument("--skip-pull", action="store_true")
 
@@ -420,12 +439,21 @@ def main() -> int:
         return status_service(args.endpoint.rstrip("/"))
     if args.command == "doctor":
         return doctor(args.endpoint, args.json)
+    if args.command == "verify":
+        forwarded: List[str] = []
+        if args.full:
+            forwarded.append("--full")
+        if args.require_powershell:
+            forwarded.append("--require-powershell")
+        if args.json:
+            forwarded.append("--json")
+        return run_passthrough("verify-evavo.py", forwarded)
     if args.command == "bootstrap":
         return bootstrap(args.endpoint, args.skip_pull)
     if args.command == "sync":
         return sync_main()
     if args.command == "generate":
-        forwarded: List[str] = ["--project", args.project, "--concurrency", str(args.concurrency), "--endpoint", args.endpoint]
+        forwarded = ["--project", args.project, "--concurrency", str(args.concurrency), "--endpoint", args.endpoint]
         if args.prompts:
             forwarded.extend(["--prompts", *args.prompts])
         elif args.examples:
