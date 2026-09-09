@@ -2,7 +2,7 @@
   "contractVersion": "evavo_repository_capabilities_v1",
   "repository": "EVAVO-STUDIO/evavo-local-image-generator",
   "authority": "local-image-generation-control-plane",
-  "summary": "EVAVO's Windows-first local ComfyUI image-generation control plane and agent transport layer. It owns native ComfyUI discovery/provisioning/health, model inventory, live workflow preflight, real prompt submission/completion/output collection, bounded batch execution, shared task history, MCP delivery to local hosts and secure ChatGPT tunnelling. Its optional hardened loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. The deterministic mock is test infrastructure only; Local Image Generator is not Art Studio, does not provide creative approval and cannot claim real image generation without a healthy native ComfyUI backend.",
+  "summary": "EVAVO's Windows-first local ComfyUI image-generation control plane and agent transport layer. It owns native ComfyUI discovery/provisioning/health, model inventory, live workflow preflight, real prompt submission/completion/output collection, bounded batch execution, shared task history, MCP delivery to local hosts and secure ChatGPT tunnelling. Its optional hardened loopback gateway may delegate video/audio/3D work to separately governed sibling Studio providers without making those modalities owned MCP/package capabilities. Each gateway task-state file has one live gateway owner at a time; a second process fails closed instead of creating split-brain recovery semantics. The deterministic mock is test infrastructure only; Local Image Generator is not Art Studio, does not provide creative approval and cannot claim real image generation without a healthy native ComfyUI backend.",
   "capabilities": [
     {
       "id": "local-image.backend.discover-health",
@@ -107,12 +107,12 @@
     {
       "id": "local-image.gateway.private-contract",
       "title": "Expose a hardened private loopback compatibility gateway",
-      "description": "Expose REST/WebSocket compatibility only on loopback with CORS disabled by default, pre-parse request-body caps including chunked bodies, bounded project/timeout fields, default-denied per-request workflow file paths, atomic cross-process task persistence, interprocess task-ID allocation and fail-closed corrupt-state handling.",
+      "description": "Expose REST/WebSocket compatibility only on loopback with CORS disabled by default, structured configuration validation, pre-parse request-body caps including chunked bodies, bounded project/timeout fields, default-denied and owner-root-confined per-request workflow paths, atomic task persistence, fail-closed corrupt state and a lifetime instance lock that permits exactly one live gateway owner per task-state file. A competing process fails with GATEWAY_STATE_IN_USE instead of producing split-brain recovery behavior.",
       "interfaces": ["http-gateway", "automation", "testing"],
       "effects": ["read", "compute", "network", "execute", "write"],
       "entrypoints": ["GET /health", "GET /tasks", "GET /tasks/{task_id}/status", "WS /ws/progress/{task_id}", "GATEWAY-INTEGRATION-GUIDE.md"],
-      "tags": ["gateway", "loopback", "cors", "request-limit", "workflow-safety", "task-state", "locking"],
-      "requires": ["Trusted local host", "Native ComfyUI for healthy owned image generation"]
+      "tags": ["gateway", "loopback", "cors", "request-limit", "workflow-safety", "task-state", "locking", "single-owner"],
+      "requires": ["Trusted local host", "Native ComfyUI for healthy owned image generation", "Unique task-state file per simultaneously running gateway instance"]
     },
     {
       "id": "local-image.gateway.aux-provider-delegation",
@@ -138,7 +138,7 @@
   "brain": {
     "consult": true,
     "sanityCheck": true,
-    "topics": ["local image generation", "ComfyUI readiness", "model inventory", "workflow preflight", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "hardened private gateway", "governed gateway provider delegation"]
+    "topics": ["local image generation", "ComfyUI readiness", "model inventory", "workflow preflight", "batch rendering", "generation evidence", "MCP image delivery", "secure workstation tunnelling", "hardened private gateway", "single-owner task state", "governed gateway provider delegation"]
   },
-  "reviewedAt": "2026-09-09T17:18:00+10:00"
+  "reviewedAt": "2026-09-09T17:50:00+10:00"
 }
