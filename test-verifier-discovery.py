@@ -32,6 +32,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "test-comfyui-repair-safety.py",
             "test-comfyui-status.py",
             "test-comfyui-terminal-wait.py",
+            "test-dependency-contract.py",
             "test-gateway.py",
             "test-gateway-config-safety.py",
             "test-gateway-config-security.py",
