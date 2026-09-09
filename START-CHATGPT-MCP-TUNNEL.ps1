@@ -4,7 +4,7 @@
 
 param(
     [string]$Profile,
-    [int]$McpPort = 8765,
+    [int]$McpPort = 0,
     [switch]$SkipDoctor,
     [switch]$SkipLocalMcpStart
 )
@@ -26,9 +26,29 @@ catch {
 if (-not $Profile) {
     $Profile = [string]$state.profile
 }
-if (-not $Profile) {
-    throw "Tunnel profile is missing from state. Re-run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
+if (-not $Profile -or $Profile -notmatch '^[A-Za-z0-9._-]+$') {
+    throw "Tunnel profile is missing or invalid. Re-run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
 }
+
+# Unless explicitly overridden, start/check the exact private MCP port stored in
+# the tunnel profile. This keeps custom-port installs correct across reboot.
+if ($McpPort -eq 0) {
+    $savedMcpUrl = [string]$state.mcp_server_url
+    try {
+        $savedMcpUri = [uri]$savedMcpUrl
+    }
+    catch {
+        throw "Saved tunnel MCP URL is invalid. Re-run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
+    }
+    if ($savedMcpUri.Scheme -ne "http" -or $savedMcpUri.Host -notin @("127.0.0.1", "localhost", "::1")) {
+        throw "Saved tunnel MCP URL is not a private loopback HTTP endpoint. Re-run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
+    }
+    $McpPort = [int]$savedMcpUri.Port
+}
+if ($McpPort -lt 1 -or $McpPort -gt 65535) {
+    throw "MCP port must be between 1 and 65535."
+}
+
 $binary = [string]$state.tunnel_client
 if (-not $binary -or -not (Test-Path $binary)) {
     $binary = Join-Path $PSScriptRoot ".evavo\tools\tunnel-client.exe"
@@ -59,7 +79,9 @@ if ($actualBinaryHash -ne $expectedBinaryHash) {
     throw "Tunnel-client executable SHA-256 does not match the verified-install record. Refusing to run; re-run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
 }
 
-# Load the runtime key. Environment wins so operators can use ephemeral keys.
+# Load the runtime key. A caller-supplied environment key is preserved. Only a
+# key temporarily decrypted by this script is cleared on exit.
+$loadedFromDpapi = $false
 if (-not $env:CONTROL_PLANE_API_KEY) {
     if (-not $env:LOCALAPPDATA) {
         throw "CONTROL_PLANE_API_KEY is not set and LOCALAPPDATA is unavailable for DPAPI key storage."
@@ -72,6 +94,7 @@ if (-not $env:CONTROL_PLANE_API_KEY) {
         $secure = Get-Content $keyPath -Raw | ConvertTo-SecureString
         $credential = New-Object System.Management.Automation.PSCredential("evavo-tunnel", $secure)
         $env:CONTROL_PLANE_API_KEY = $credential.GetNetworkCredential().Password
+        $loadedFromDpapi = [bool]$env:CONTROL_PLANE_API_KEY
     }
     catch {
         throw "The stored tunnel key could not be decrypted for this Windows user. Re-run SAVE-CHATGPT-TUNNEL-KEY.ps1."
@@ -93,42 +116,49 @@ function Get-ListenerOwner([int]$Port) {
     }
 }
 
-if (-not $SkipLocalMcpStart) {
-    $owner = Get-ListenerOwner $McpPort
-    if ($owner -and $owner.CommandLine -notmatch "evavo_local_image_generator\.mcp_server") {
-        throw "Port $McpPort is already owned by PID $($owner.Pid), which is not EVAVO MCP."
-    }
-    if (-not $owner) {
-        $starter = Join-Path $PSScriptRoot "START-AGENT-MCP.ps1"
-        $quotedStarter = '"' + $starter.Replace('"', '\"') + '"'
-        $args = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $quotedStarter -Port $McpPort -SkipValidation"
-        Start-Process -FilePath "powershell.exe" -ArgumentList $args -WorkingDirectory $PSScriptRoot -WindowStyle Hidden | Out-Null
-
-        $deadline = (Get-Date).AddSeconds(30)
-        do {
-            Start-Sleep -Milliseconds 300
-            $owner = Get-ListenerOwner $McpPort
-        } while (-not $owner -and (Get-Date) -lt $deadline)
+try {
+    if (-not $SkipLocalMcpStart) {
+        $owner = Get-ListenerOwner $McpPort
+        if ($owner -and $owner.CommandLine -notmatch "evavo_local_image_generator\.mcp_server") {
+            throw "Port $McpPort is already owned by PID $($owner.Pid), which is not EVAVO MCP."
+        }
         if (-not $owner) {
-            throw "EVAVO MCP did not start on port $McpPort within 30 seconds."
-        }
-        if ($owner.CommandLine -notmatch "evavo_local_image_generator\.mcp_server") {
-            throw "Port $McpPort became occupied by PID $($owner.Pid), which is not EVAVO MCP."
+            $starter = Join-Path $PSScriptRoot "START-AGENT-MCP.ps1"
+            $quotedStarter = '"' + $starter.Replace('"', '\"') + '"'
+            $args = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File $quotedStarter -Port $McpPort -SkipValidation"
+            Start-Process -FilePath "powershell.exe" -ArgumentList $args -WorkingDirectory $PSScriptRoot -WindowStyle Hidden | Out-Null
+
+            $deadline = (Get-Date).AddSeconds(30)
+            do {
+                Start-Sleep -Milliseconds 300
+                $owner = Get-ListenerOwner $McpPort
+            } while (-not $owner -and (Get-Date) -lt $deadline)
+            if (-not $owner) {
+                throw "EVAVO MCP did not start on port $McpPort within 30 seconds."
+            }
+            if ($owner.CommandLine -notmatch "evavo_local_image_generator\.mcp_server") {
+                throw "Port $McpPort became occupied by PID $($owner.Pid), which is not EVAVO MCP."
+            }
         }
     }
-}
 
-if (-not $SkipDoctor) {
-    Write-Host "Running OpenAI tunnel-client doctor for '$Profile'..." -ForegroundColor Cyan
-    & $binary doctor --profile $Profile --explain
-    if ($LASTEXITCODE -ne 0) {
-        throw "OpenAI tunnel-client doctor reported a blocking problem."
+    if (-not $SkipDoctor) {
+        Write-Host "Running OpenAI tunnel-client doctor for '$Profile'..." -ForegroundColor Cyan
+        & $binary doctor --profile $Profile --explain
+        if ($LASTEXITCODE -ne 0) {
+            throw "OpenAI tunnel-client doctor reported a blocking problem."
+        }
+    }
+
+    Write-Host "Connecting EVAVO to OpenAI Secure MCP Tunnel using profile '$Profile'..." -ForegroundColor Green
+    Write-Host "The tunnel is outbound-only; the EVAVO MCP server remains private on localhost:$McpPort." -ForegroundColor Green
+    & $binary run --profile $Profile
+    $code = $LASTEXITCODE
+}
+finally {
+    if ($loadedFromDpapi) {
+        $env:CONTROL_PLANE_API_KEY = $null
+        $credential = $null
     }
 }
-
-Write-Host "Connecting EVAVO to OpenAI Secure MCP Tunnel using profile '$Profile'..." -ForegroundColor Green
-Write-Host "The tunnel is outbound-only; the EVAVO MCP server remains private on localhost." -ForegroundColor Green
-& $binary run --profile $Profile
-$code = $LASTEXITCODE
-$env:CONTROL_PLANE_API_KEY = $null
 exit $code
