@@ -4,6 +4,7 @@ param(
     [string]$Python = "python",
     [string]$ComfyEndpoint = "http://127.0.0.1:8188",
     [string]$KokoroEndpoint = "http://127.0.0.1:8880",
+    [string]$KokoroRoot = "C:\AI\Kokoro-FastAPI",
     [string]$GatewayEndpoint = "http://127.0.0.1:8000",
     [string]$AtmosphereRoot = "C:\GitRepos\atmosphere-studio",
     [string]$ThreeDRoot = "C:\GitRepos\evavo-3d-studio",
@@ -24,6 +25,9 @@ $Failures = New-Object System.Collections.Generic.List[string]
 $Started = Get-Date
 $ResultRoot = Join-Path $PSScriptRoot ".evavo\quality-results\release-gates\$($Started.ToString('yyyyMMdd-HHmmss'))"
 New-Item -ItemType Directory -Force -Path $ResultRoot | Out-Null
+$KokoroRuntimeEvidence = Join-Path $ResultRoot "kokoro-runtime.json"
+$ThreeDRuntimeEvidence = Join-Path $ResultRoot "3d-runtime.json"
+$AtmosphereRuntimeEvidence = Join-Path $ResultRoot "atmosphere-runtime.json"
 
 function Invoke-Gate {
     param(
@@ -149,6 +153,15 @@ if (-not $SkipKokoro) {
         "--texts", $texts,
         "--output", (Join-Path $ResultRoot "kokoro")
     ) | Out-Null
+    if ($Mode -eq "full") {
+        Invoke-Gate "kokoro-runtime-attestation" $PSScriptRoot $Python @(
+            "kokoro-runtime-snapshot.py",
+            "--root", $KokoroRoot,
+            "--endpoint", $KokoroEndpoint,
+            "--output", $KokoroRuntimeEvidence,
+            "--require-complete"
+        ) | Out-Null
+    }
 }
 
 if (-not $Skip3D) {
@@ -176,6 +189,17 @@ if (-not $Skip3D) {
         }
         if ($Mode -eq "full") {
             Invoke-Gate "3d-studio-regression-suite" $ThreeDRoot $Python @("scripts\check.py") | Out-Null
+            $snapshotArgs = @(
+                "studio-runtime-snapshot.py", "3d",
+                "--root", $ThreeDRoot,
+                "--python", $Python,
+                "--output", $ThreeDRuntimeEvidence,
+                "--require-complete"
+            )
+            if ($Require3DExecution) {
+                $snapshotArgs += @("--worker-endpoint", $ThreeDWorkerEndpoint)
+            }
+            Invoke-Gate "3d-runtime-attestation" $PSScriptRoot $Python $snapshotArgs | Out-Null
         }
         if ($Require3DExecution) {
             if (-not (Test-LoopbackHttpEndpoint $ThreeDWorkerEndpoint)) {
@@ -235,19 +259,26 @@ if (-not $SkipAtmosphere) {
             Invoke-Gate "atmosphere-production-safety" $AtmosphereRoot $npm @("run", "safety:production") | Out-Null
             Invoke-Gate "atmosphere-production-tests" $AtmosphereRoot $npm @("run", "test:production") | Out-Null
             Invoke-Gate "atmosphere-build" $AtmosphereRoot $npm @("run", "build") | Out-Null
+            Invoke-Gate "atmosphere-runtime-attestation" $PSScriptRoot $Python @(
+                "studio-runtime-snapshot.py", "atmosphere",
+                "--root", $AtmosphereRoot,
+                "--output", $AtmosphereRuntimeEvidence,
+                "--require-complete"
+            ) | Out-Null
         }
     }
 }
 
 $Finished = Get-Date
 $Summary = [ordered]@{
-    schemaVersion = 4
+    schemaVersion = 5
     mode = $Mode
     startedAt = $Started.ToString("o")
     finishedAt = $Finished.ToString("o")
     durationSeconds = [math]::Round(($Finished - $Started).TotalSeconds, 3)
     comfyEndpoint = $ComfyEndpoint
     kokoroEndpoint = $KokoroEndpoint
+    kokoroRoot = $KokoroRoot
     gatewayEndpoint = $GatewayEndpoint
     requireGateway = [bool]$RequireGateway
     atmosphereRoot = $AtmosphereRoot
@@ -255,11 +286,16 @@ $Summary = [ordered]@{
     threeDWorkerEndpoint = $ThreeDWorkerEndpoint
     require3DExecution = [bool]$Require3DExecution
     threeDAuthorityContractChecked = [bool]$Require3DExecution
+    runtimeEvidence = [ordered]@{
+        kokoro = if ($Mode -eq "full" -and -not $SkipKokoro) { $KokoroRuntimeEvidence } else { $null }
+        threeD = if ($Mode -eq "full" -and -not $Skip3D) { $ThreeDRuntimeEvidence } else { $null }
+        atmosphere = if ($Mode -eq "full" -and -not $SkipAtmosphere) { $AtmosphereRuntimeEvidence } else { $null }
+    }
     resultRoot = $ResultRoot
     ok = ($Failures.Count -eq 0)
     failures = @($Failures)
 }
-$Summary | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ResultRoot "release-gate.json") -Encoding UTF8
+$Summary | ConvertTo-Json -Depth 6 | Set-Content -Path (Join-Path $ResultRoot "release-gate.json") -Encoding UTF8
 
 Write-Host ""
 Write-Host "Results: $ResultRoot"
