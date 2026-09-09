@@ -9,7 +9,7 @@ cd C:\Gitrepos\evavo-local-image-generator
 
 For a stale clean checkout first run `git pull --ff-only origin main`.
 
-The updater safely fast-forwards `main`, installs dependencies, runs all discovered verifier suites, configures Claude/private MCP, provisions or repairs native ComfyUI when allowed, validates the real generation contract and conditionally configures the ChatGPT Secure MCP Tunnel.
+The updater safely fast-forwards `main`, installs dependencies, runs all discovered verifier suites, prepares/provisions native ComfyUI when allowed, and runs strict doctor. If doctor fails, it may make one evidence-gated core dependency-repair attempt unless `-SkipComfyUIDependencyRepair` is supplied, then reruns strict doctor. After bootstrap and agent configuration it performs one **real native generation smoke proof**; setup does not report success unless the active workflow produces a downloaded, signature-validated image. ChatGPT Secure MCP Tunnel configuration follows when its external tunnel identity/key are available.
 
 ## Verification / readiness
 
@@ -18,10 +18,11 @@ python evavo.py verify
 python evavo.py verify --full
 python evavo.py verify --full --require-powershell
 python agent-doctor.py --repair --provision
+python real-generation-smoke.py --json
 .\AGENT-STATUS.ps1
 ```
 
-The deterministic mock cannot satisfy strict production readiness.
+The deterministic mock/native-only simulator can validate repository contracts, but neither satisfies the canonical workstation's **real production readiness proof**. The updater uses the actual configured native ComfyUI for its final smoke render.
 
 ## Claude
 
@@ -86,7 +87,13 @@ last_startup_failure
 -> real generation proof
 ```
 
-`repair_backend_dependencies` uses only the selected ComfyUI checkout's own requirements + selected interpreter. MCP does not accept arbitrary package/module/Python/ComfyUI path arguments for repair, does not use a shell, and refuses to treat a `custom_node_dependency` failure as permission to sync core requirements.
+`repair_backend_dependencies` uses the **exact diagnosed ComfyUI workdir/interpreter** when structured evidence contains it, otherwise the canonical discovered runtime. MCP does not accept arbitrary package/module/Python/ComfyUI path arguments for repair, does not use a shell, and refuses to treat a `custom_node_dependency` failure as permission to sync core requirements.
+
+Forced requirements sync is separately owner-gated and is never enabled by the updater:
+
+```powershell
+$env:EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR = "1"
+```
 
 ### Generation status
 
@@ -172,7 +179,7 @@ python evavo.py tasks --limit 20
 python evavo.py stats
 ```
 
-CLI/MCP share atomic lock-protected task history including failed and cancelled reconciliation.
+CLI/MCP share atomic lock-protected task history including failed/cancelled reconciliation. The setup smoke proof also records its real prompt ID and validated output under project `setup-smoke`.
 
 ## Optional HTTP gateway
 
