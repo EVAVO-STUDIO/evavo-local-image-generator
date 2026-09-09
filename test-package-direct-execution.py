@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent
 PACKAGE_TESTS = (
     ROOT / "evavo_local_image_generator" / "tests" / "test_backends.py",
     ROOT / "evavo_local_image_generator" / "tests" / "test_generators.py",
+    ROOT / "evavo_local_image_generator" / "tests" / "test_unsupported_modalities.py",
 )
 
 
