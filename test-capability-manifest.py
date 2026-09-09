@@ -13,6 +13,8 @@ MANIFEST_PATH = ROOT / "EVAVO-CAPABILITIES.json"
 REPOSITORY_CAPABILITIES_PATH = ROOT / ".evavo" / "capabilities.json"
 MCP_PATH = ROOT / "evavo_local_image_generator" / "mcp_server.py"
 GATEWAY_PATH = ROOT / "EVAVO-GATEWAY.py"
+MANAGER_PATH = ROOT / "EVAVO-SERVICE-MANAGER.py"
+OPERATIONS_PATH = ROOT / "evavo_operations.py"
 PROVIDER_PATH = ROOT / "evavo_local_image_generator" / "provider_runner.py"
 
 
@@ -82,25 +84,33 @@ class CapabilityManifestTests(unittest.TestCase):
 
     def test_gateway_request_boundary_matches_manifest(self) -> None:
         gateway = self.manifest["interfaces"]["http_gateway"]
+        self.assertTrue(gateway["structured_config_errors"])
         self.assertEqual(gateway["max_request_bytes_default"], 1024 * 1024)
         self.assertEqual(gateway["max_request_bytes_hard_cap"], 16 * 1024 * 1024)
         self.assertEqual(gateway["max_project_chars_default"], 128)
         self.assertFalse(gateway["request_workflow_path_default_allowed"])
+        self.assertTrue(gateway["request_workflow_path_requires_root"])
         source = GATEWAY_PATH.read_text(encoding="utf-8")
         self.assertIn("class RequestBodyLimitMiddleware", source)
+        self.assertIn("GATEWAY_CONFIG_INVALID", source)
         self.assertIn("EVAVO_GATEWAY_MAX_REQUEST_BYTES", source)
         self.assertIn("more_body", source)
         self.assertIn("EVAVO_GATEWAY_MAX_PROJECT_CHARS", source)
         self.assertIn("EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS", source)
+        self.assertIn("EVAVO_GATEWAY_WORKFLOW_ROOT", source)
+        self.assertIn("outside EVAVO_GATEWAY_WORKFLOW_ROOT", source)
         self.assertIn("per-request workflow_path is disabled", source)
 
-    def test_gateway_task_state_safety_matches_manifest(self) -> None:
+    def test_gateway_task_state_safety_matches_manifest_and_public_lock_api(self) -> None:
         gateway = self.manifest["interfaces"]["http_gateway"]
         self.assertTrue(gateway["task_state_cross_process_lock"])
         self.assertTrue(gateway["task_id_allocation_interprocess_atomic"])
         self.assertTrue(gateway["corrupt_task_state_fail_closed"])
         source = GATEWAY_PATH.read_text(encoding="utf-8")
-        self.assertIn("_interprocess_lock", source)
+        operations = OPERATIONS_PATH.read_text(encoding="utf-8")
+        self.assertIn("from evavo_operations import TaskTracker, interprocess_lock", source)
+        self.assertIn("def interprocess_lock", operations)
+        self.assertIn("_interprocess_lock = interprocess_lock", operations)
         self.assertIn("def _create_sync", source)
         self.assertIn("GATEWAY_TASK_STATE_CORRUPT", source)
         self.assertIn("await STORE.create(", source)
@@ -139,6 +149,17 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertIn("PROVIDER_OUTPUT_INVALID", source)
         self.assertIn("sha256", source.lower())
 
+    def test_service_manager_state_and_secret_contract_is_fail_closed(self) -> None:
+        security = self.manifest["security"]
+        self.assertTrue(security["service_manager_state_corruption_fail_closed"])
+        self.assertFalse(security["service_manager_provider_secret_plaintext_in_state"])
+        source = MANAGER_PATH.read_text(encoding="utf-8")
+        self.assertIn("SERVICE_MANAGER_STATE_CORRUPT", source)
+        self.assertIn("manager_state_health", source)
+        self.assertIn("3d_token_sha256", source)
+        self.assertNotIn('"3d_token": token', source)
+        self.assertIn("state file must not be a symlink", source)
+
     def test_brain_capabilities_expose_hardened_gateway_without_claiming_mcp_ownership(self) -> None:
         self.assertEqual(self.repository_capabilities["authority"], "local-image-generation-control-plane")
         capabilities = {item.get("id"): item for item in self.repository_capabilities.get("capabilities", []) if isinstance(item, dict)}
@@ -158,8 +179,12 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertTrue(security["gateway_request_preparse_size_limit"])
         self.assertTrue(security["gateway_chunked_request_limit"])
         self.assertFalse(security["gateway_request_workflow_path_default_allowed"])
+        self.assertTrue(security["gateway_request_workflow_root_confinement"])
+        self.assertTrue(security["gateway_structured_config_errors"])
         self.assertTrue(security["gateway_task_state_corruption_fail_closed"])
         self.assertTrue(security["gateway_task_id_interprocess_atomic"])
+        self.assertTrue(security["service_manager_state_corruption_fail_closed"])
+        self.assertFalse(security["service_manager_provider_secret_plaintext_in_state"])
         self.assertFalse(security["broad_python_process_kill"])
         self.assertTrue(security["managed_process_identity_verification"])
         self.assertTrue(security["chatgpt_tunnel_executable_sha256_verification"])
