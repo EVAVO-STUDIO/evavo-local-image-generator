@@ -143,7 +143,7 @@ def main() -> int:
     run_dir = Path(args.output).expanduser().resolve() / now_stamp()
     run_dir.mkdir(parents=True, exist_ok=False)
     manifest: Dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "started_at": datetime.now().astimezone().isoformat(),
         "endpoint": backend.endpoint,
         "health": health,
@@ -204,13 +204,23 @@ def main() -> int:
                     f"QUALITY_OUTPUT_DIMENSION_MISMATCH:expected {expected_width}x{expected_height}, got {actual}"
                 )
 
+            submitted_seed = queued.get("seed")
+            if submitted_seed is not None and int(submitted_seed) != int(item["seed"]):
+                raise RuntimeError(
+                    f"QUALITY_SEED_MISMATCH:requested {item['seed']}, submitted {submitted_seed}"
+                )
             result = {
                 **item,
                 "status": "completed",
                 "elapsed_s": round(elapsed, 3),
+                "submitted_seed": submitted_seed,
+                "checkpoint": queued.get("checkpoint"),
+                "workflow_sha256": queued.get("workflow_sha256"),
+                "workflow_node_count": queued.get("workflow_node_count"),
                 "quality": queued.get("quality"),
                 "quality_applied": queued.get("quality_applied"),
                 "render_passes": queued.get("render_passes"),
+                "lora": queued.get("lora"),
                 "expected_output_width": expected_width,
                 "expected_output_height": expected_height,
                 "dimension_checked": dimension_checked,
