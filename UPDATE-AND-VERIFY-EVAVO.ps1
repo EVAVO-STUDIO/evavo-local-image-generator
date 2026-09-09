@@ -83,11 +83,33 @@ if ($LASTEXITCODE -ne 0) {
     Fail "Full repository verification failed. No agent configuration has been changed." 3
 }
 
-Write-Host "Bootstrapping the verified generation backend..." -ForegroundColor Cyan
+# Prepare the real renderer before strict bootstrap. A healthy externally
+# started ComfyUI is reused even when its filesystem install is not discoverable.
+# Provisioning is attempted only when requested and actually needed.
+Write-Host "Preparing and validating the native ComfyUI generation contract..." -ForegroundColor Cyan
+$backendDoctorArgs = @(
+    (Join-Path $PSScriptRoot "agent-doctor.py"),
+    "--repair",
+    "--skip-tests",
+    "--mcp-port",
+    "$McpPort"
+)
+if (-not $SkipComfyUIProvision) {
+    $backendDoctorArgs += "--provision"
+}
+& $python @backendDoctorArgs
+if ($LASTEXITCODE -ne 0) {
+    if ($SkipComfyUIProvision) {
+        Fail "Native ComfyUI generation readiness failed while provisioning was disabled. Start/configure the real renderer or rerun without -SkipComfyUIProvision." 3
+    }
+    Fail "Native ComfyUI provisioning/repair or active generation-contract validation failed. Configure any required owner-controlled model/workflow source and rerun." 3
+}
+
+Write-Host "Bootstrapping the verified native generation backend..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "evavo.py") bootstrap --skip-pull --skip-verify
 $code = $LASTEXITCODE
 if ($code -ne 0) {
-    Fail "EVAVO bootstrap failed with exit code $code. Review doctor output and .evavo logs." $code
+    Fail "EVAVO strict native bootstrap failed with exit code $code. Review doctor output and .evavo logs." $code
 }
 
 if (-not $SkipAgentConfiguration) {
@@ -104,14 +126,20 @@ if (-not $SkipAgentConfiguration) {
     }
 }
 
-Write-Host "Running final agent doctor with safe repair enabled..." -ForegroundColor Cyan
-$doctorArgs = @((Join-Path $PSScriptRoot "agent-doctor.py"), "--repair", "--skip-tests", "--mcp-port", "$McpPort")
-if (-not $SkipComfyUIProvision) {
-    $doctorArgs += "--provision"
-}
-& $python @doctorArgs
+# Recheck after configuration changes. Provisioning has already happened above;
+# this final pass is deliberately repair/status only so setup has one provisioning
+# decision point and cannot silently alter model/runtime sources late in the run.
+Write-Host "Running final agent doctor..." -ForegroundColor Cyan
+$finalDoctorArgs = @(
+    (Join-Path $PSScriptRoot "agent-doctor.py"),
+    "--repair",
+    "--skip-tests",
+    "--mcp-port",
+    "$McpPort"
+)
+& $python @finalDoctorArgs
 if ($LASTEXITCODE -ne 0) {
-    Fail "Agent doctor found a blocking generation-contract problem. Configure the required workflow/model source/shared model root, then rerun." 3
+    Fail "Agent doctor found a blocking generation-contract problem after agent configuration." 3
 }
 
 Write-Host "Running final backend status..." -ForegroundColor Cyan
@@ -214,15 +242,16 @@ Write-Host "EVAVO workstation setup completed." -ForegroundColor Green
 Write-Host "  Authoritative full verifier: passed" -ForegroundColor Green
 Write-Host "  Python sources + PowerShell scripts: parsed successfully" -ForegroundColor Green
 Write-Host "  All registered safety/integration suites: passed" -ForegroundColor Green
-Write-Host "  Generation backend bootstrap: passed" -ForegroundColor Green
+Write-Host "  Native generation contract preparation: passed" -ForegroundColor Green
+Write-Host "  Strict native generation bootstrap: passed" -ForegroundColor Green
 if (-not $SkipAgentConfiguration) {
     Write-Host "  Claude stdio MCP: installed/updated" -ForegroundColor Green
     Write-Host "  Private HTTP MCP autostart: installed and started" -ForegroundColor Green
 }
 if (-not $SkipComfyUIProvision) {
-    Write-Host "  ComfyUI provisioning: enabled when missing" -ForegroundColor Green
+    Write-Host "  ComfyUI provisioning: enabled only when native runtime/model repair was needed" -ForegroundColor Green
 }
-Write-Host "  Agent doctor: active generation contract + shared roots + model inventory checked" -ForegroundColor Green
+Write-Host "  Final agent doctor: active generation contract + shared roots + model inventory checked" -ForegroundColor Green
 if (-not $SkipChatGPTTunnel) {
     Write-Host "  ChatGPT Secure MCP Tunnel: $chatGptTunnelStatus" -ForegroundColor $(if ($chatGptTunnelStatus -match "running") { "Green" } else { "Yellow" })
 }
