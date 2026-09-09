@@ -18,9 +18,11 @@ from typing import Any, Dict, List, Tuple
 from evavo_operations import DEFAULT_ENDPOINT, ROOT, now_iso, request_json, validate_health
 from evavo_local_image_generator.backends import ComfyUIBackend
 from evavo_local_image_generator.comfyui_runtime import (
+    _stop_managed_mock as stop_managed_mock,
     discover_comfyui,
     ensure_comfyui,
     load_state as load_native_state,
+    native_health,
     stop_managed_comfyui,
 )
 
@@ -37,6 +39,10 @@ REQUIRED_FILES = [
     "monitor-evavo.py",
     "task-tracker.py",
     "test-operations.py",
+    "agent-doctor.py",
+    "test-agent-integration.py",
+    "test-provisioning.py",
+    "provision-comfyui.py",
     "evavo_local_image_generator/backends/comfyui_backend.py",
     "evavo_local_image_generator/comfyui_runtime.py",
     "evavo_local_image_generator/mcp_server.py",
@@ -98,6 +104,7 @@ def clear_state() -> None:
 
 
 def terminate_pid(pid: int) -> None:
+    """Terminate a PID that was just created by this process (startup rollback only)."""
     if pid <= 0:
         return
     if os.name == "nt":
@@ -117,7 +124,12 @@ def _start_mock(endpoint: str, wait_seconds: float) -> int:
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     log_handle = LOG_FILE.open("ab", buffering=0)
-    kwargs: Dict[str, Any] = {"cwd": str(ROOT), "stdin": subprocess.DEVNULL, "stdout": log_handle, "stderr": subprocess.STDOUT}
+    kwargs: Dict[str, Any] = {
+        "cwd": str(ROOT),
+        "stdin": subprocess.DEVNULL,
+        "stdout": log_handle,
+        "stderr": subprocess.STDOUT,
+    }
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     else:
@@ -156,20 +168,35 @@ def start_service(endpoint: str, wait_seconds: float = 90.0, allow_mock: bool = 
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
 
-    try:
-        health = service_health(endpoint)
-        print(json.dumps({"ok": True, "status": "already_running", "endpoint": endpoint, "health": health}, indent=2))
+    # Native ComfyUI wins. native_health explicitly rejects the deterministic
+    # EVAVO mock even though the simulator exposes native-like routes for tests.
+    current_native = native_health(endpoint)
+    if current_native:
+        try:
+            result = ensure_comfyui(endpoint, wait_seconds=wait_seconds, allow_start=True)
+        except RuntimeError as exc:
+            print(f"ERROR: native ComfyUI is present but its managed configuration could not be reconciled: {exc}", file=sys.stderr)
+            return 3
+        print(json.dumps({"ok": True, **result}, indent=2))
         return 0
-    except RuntimeError:
-        pass
 
-    # Prefer real local ComfyUI. If it is installed, own the lifecycle automatically.
+    # Try to discover/start real ComfyUI before accepting or starting a mock.
     try:
         result = ensure_comfyui(endpoint, wait_seconds=wait_seconds, allow_start=True)
         print(json.dumps({"ok": True, **result}, indent=2))
         return 0
     except RuntimeError as exc:
         native_error = str(exc)
+
+    # On non-default isolated test ports native auto-start is intentionally not
+    # supported. If a healthy EVAVO mock already owns that endpoint, reuse it.
+    try:
+        existing = service_health(endpoint)
+        if existing.get("mode") == "mock" and allow_mock:
+            print(json.dumps({"ok": True, "status": "already_running_mock", "endpoint": endpoint, "health": existing}, indent=2))
+            return 0
+    except RuntimeError:
+        pass
 
     if not allow_mock:
         print(f"ERROR: native ComfyUI could not be started: {native_error}", file=sys.stderr)
@@ -179,22 +206,19 @@ def start_service(endpoint: str, wait_seconds: float = 90.0, allow_mock: bool = 
 
 
 def stop_service() -> int:
-    stopped: Dict[str, Any] = {"native": stop_managed_comfyui(), "mock": {"status": "not_managed", "stopped": False}}
-    state = load_state()
-    pid = state.get("pid")
-    if isinstance(pid, int) and pid > 0:
-        try:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True, timeout=10)
-            else:
-                try:
-                    os.killpg(pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-            stopped["mock"] = {"status": "stopped", "stopped": True, "pid": pid}
-        finally:
+    native_result = stop_managed_comfyui()
+    mock_state = load_state()
+    mock_pid = mock_state.get("pid")
+    mock_result: Dict[str, Any] = {"status": "not_managed", "stopped": False}
+    if isinstance(mock_pid, int) and mock_pid > 0:
+        if stop_managed_mock():
+            mock_result = {"status": "stopped", "stopped": True, "pid": mock_pid}
+        else:
+            # Never trust a stale/reused PID. Clearing EVAVO's stale state is safe;
+            # killing an unrelated process is not.
             clear_state()
-    print(json.dumps({"ok": True, "status": "stopped", "components": stopped}, indent=2))
+            mock_result = {"status": "stale_or_identity_mismatch", "stopped": False, "pid": mock_pid}
+    print(json.dumps({"ok": True, "status": "stopped", "components": {"native": native_result, "mock": mock_result}}, indent=2))
     return 0
 
 
@@ -227,6 +251,7 @@ def git_value(*arguments: str) -> str | None:
 
 def doctor(endpoint: str, json_output: bool = False) -> int:
     checks: List[Dict[str, Any]] = []
+
     def add(name: str, ok: bool, detail: str, severity: str = "error") -> None:
         checks.append({"name": name, "ok": ok, "severity": severity, "detail": detail})
 
@@ -264,6 +289,16 @@ def doctor(endpoint: str, json_output: bool = False) -> int:
     try:
         health = service_health(normalized_endpoint)
         add("service", True, f"ready ({health.get('mode', 'unknown')}) at {normalized_endpoint}", severity="info")
+        if health.get("mode") == "native-comfyui":
+            try:
+                inventory = ComfyUIBackend(normalized_endpoint).model_inventory(20)
+                categories = inventory.get("categories", {})
+                populated = []
+                if isinstance(categories, dict):
+                    populated = [f"{name}={entry.get('count', 0)}" for name, entry in categories.items() if isinstance(entry, dict) and entry.get("available")]
+                add("model_inventory", True, ", ".join(populated) if populated else "no loader inventories reported", severity="info")
+            except RuntimeError as exc:
+                add("model_inventory", False, str(exc), severity="warning")
     except RuntimeError as exc:
         add("service", False, str(exc), severity="warning")
 
@@ -338,12 +373,12 @@ def main() -> int:
     start.add_argument("--wait", type=float, default=90.0, help="Native ComfyUI readiness timeout")
     start.add_argument("--no-mock", action="store_true", help="Fail instead of starting the deterministic mock fallback")
 
-    subparsers.add_parser("stop", help="Stop only EVAVO-managed native/mock processes")
+    subparsers.add_parser("stop", help="Stop only identity-verified EVAVO-managed native/mock processes")
 
     status = subparsers.add_parser("status", help="Check the generation backend")
     status.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
 
-    doctor_parser = subparsers.add_parser("doctor", help="Diagnose Python, files, Git, ComfyUI install and backend")
+    doctor_parser = subparsers.add_parser("doctor", help="Diagnose Python, files, Git, ComfyUI install/backend and model inventory")
     doctor_parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     doctor_parser.add_argument("--json", action="store_true")
 
