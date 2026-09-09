@@ -41,6 +41,8 @@ REQUIRED_FILES = [
     "monitor-evavo.py",
     "task-tracker.py",
     "test-operations.py",
+    "test-bootstrap-production.py",
+    "test-updater-order.py",
     "agent-doctor.py",
     "test-agent-integration.py",
     "test-provisioning.py",
@@ -77,18 +79,27 @@ REQUIRED_FILES = [
     "evavo_local_image_generator/backends/comfyui_backend.py",
     "evavo_local_image_generator/comfyui_runtime.py",
     "evavo_local_image_generator/mcp_server.py",
+    "evavo_local_image_generator/tests/test_unsupported_modalities.py",
 ]
 
 
 def service_health(endpoint: str) -> Dict[str, Any]:
-    """Return health for EVAVO compatibility service or native ComfyUI."""
+    """Return health plus render capability for compatibility/native backends."""
     endpoint = endpoint.rstrip("/")
     try:
         health = validate_health(request_json(f"{endpoint}/system", timeout=2.0))
-        return {"healthy": True, "service": health.get("service"), "mode": health.get("mode", "mock"), **health}
+        mode = str(health.get("mode", "mock"))
+        return {
+            "healthy": True,
+            "render_capable": mode != "mock",
+            "service": health.get("service"),
+            "mode": mode,
+            **health,
+        }
     except RuntimeError as evavo_error:
         try:
-            return ComfyUIBackend(endpoint).health()
+            health = ComfyUIBackend(endpoint).health()
+            return {**health, "render_capable": True}
         except RuntimeError as native_error:
             raise RuntimeError(f"BACKEND_UNAVAILABLE:EVAVO={evavo_error}; ComfyUI={native_error}") from native_error
 
@@ -250,10 +261,28 @@ def status_service(endpoint: str) -> int:
     endpoint = endpoint.rstrip("/")
     try:
         health = service_health(endpoint)
-        print(json.dumps({"ok": True, "status": "operational", "endpoint": endpoint, "health": health, "managed_mock": load_state(), "managed_native": load_native_state()}, indent=2))
+        render_capable = bool(health.get("render_capable"))
+        status = "operational" if render_capable else "test_only_mock"
+        print(json.dumps({
+            "ok": True,
+            "status": status,
+            "render_capable": render_capable,
+            "endpoint": endpoint,
+            "health": health,
+            "managed_mock": load_state(),
+            "managed_native": load_native_state(),
+        }, indent=2))
         return 0
     except RuntimeError as exc:
-        print(json.dumps({"ok": False, "status": "offline", "endpoint": endpoint, "error": str(exc), "managed_mock": load_state(), "managed_native": load_native_state()}, indent=2))
+        print(json.dumps({
+            "ok": False,
+            "status": "offline",
+            "render_capable": False,
+            "endpoint": endpoint,
+            "error": str(exc),
+            "managed_mock": load_state(),
+            "managed_native": load_native_state(),
+        }, indent=2))
         return 3
 
 
@@ -307,13 +336,17 @@ def doctor(endpoint: str, json_output: bool = False) -> int:
         dirty = git_value("status", "--porcelain")
         add("git_branch", branch == "main", branch or "unknown")
         if head and upstream:
-            add("git_sync", head == upstream, f"HEAD={head[:12]} upstream={upstream[:12]}", severity="warning")
+            add("git_sync", head == upstream, f"cached upstream ref: HEAD={head[:12]} upstream={upstream[:12]}; bootstrap/safe Git helper fetch before mutation", severity="warning")
         add("git_worktree", dirty == "", "clean" if dirty == "" else "local changes present", severity="warning")
 
     try:
         health = service_health(normalized_endpoint)
-        add("service", True, f"ready ({health.get('mode', 'unknown')}) at {normalized_endpoint}", severity="info")
-        if health.get("mode") == "native-comfyui":
+        mode = str(health.get("mode", "unknown"))
+        if health.get("render_capable"):
+            add("service", True, f"render-capable native backend ready ({mode}) at {normalized_endpoint}", severity="info")
+        else:
+            add("service", False, f"healthy deterministic mock at {normalized_endpoint}; test-only and not render-capable", severity="warning")
+        if mode == "native-comfyui":
             try:
                 inventory = ComfyUIBackend(normalized_endpoint).model_inventory(20)
                 categories = inventory.get("categories", {})
@@ -403,7 +436,7 @@ def main() -> int:
 
     subparsers.add_parser("stop", help="Stop only identity-verified EVAVO-managed native/mock processes")
 
-    status = subparsers.add_parser("status", help="Check the generation backend")
+    status = subparsers.add_parser("status", help="Check backend health and whether it can render real images")
     status.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
 
     doctor_parser = subparsers.add_parser("doctor", help="Diagnose Python, files, Git, ComfyUI install/backend and model inventory")
