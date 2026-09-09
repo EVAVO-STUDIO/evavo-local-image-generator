@@ -14,6 +14,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
@@ -341,6 +342,76 @@ class GatewayIntegrationTests(unittest.TestCase):
             self.assertEqual(old_task.get("task_id"), existing_id)
         finally:
             stop_process(process)
+
+    def test_shared_task_file_allocates_unique_ids_across_gateway_processes(self) -> None:
+        ports = (18215, 18216)
+        state_dir = Path(self.temp.name) / "shared-state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        processes: list[subprocess.Popen[Any]] = []
+        bases: list[str] = []
+        try:
+            for index, port in enumerate(ports):
+                env = self.env.copy()
+                env["EVAVO_GATEWAY_PORT"] = str(port)
+                env["EVAVO_GATEWAY_STATE_DIR"] = str(state_dir)
+                env["EVAVO_TASK_HISTORY"] = str(Path(self.temp.name) / f"shared-history-{index}.json")
+                process = subprocess.Popen(
+                    [sys.executable, str(ROOT / "EVAVO-GATEWAY.py")],
+                    cwd=str(ROOT),
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                processes.append(process)
+                wait_port(port)
+                bases.append(f"http://127.0.0.1:{port}")
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [
+                    pool.submit(request_json, base + "/generate/audio", method="POST", payload={"prompt": f"shared {index}"})
+                    for index, base in enumerate(bases)
+                ]
+                results = [future.result(timeout=15) for future in futures]
+            self.assertTrue(all(status == 202 for status, _ in results), results)
+            ids = [str(payload.get("task_id", "")) for _, payload in results]
+            self.assertEqual(len(set(ids)), 2, ids)
+            self.assertTrue(all(task_id.startswith("aud_") for task_id in ids), ids)
+
+            status, listing = request_json(bases[0] + "/tasks")
+            self.assertEqual(status, 200)
+            listed = {str(item.get("task_id")) for item in listing.get("tasks", [])}
+            self.assertTrue(set(ids).issubset(listed), (ids, listed))
+        finally:
+            for process in processes:
+                stop_process(process)
+
+    def test_corrupt_task_state_fails_closed_without_overwrite(self) -> None:
+        port = 18217
+        state_dir = Path(self.temp.name) / "corrupt-state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        task_file = state_dir / "tasks.json"
+        corrupt = "{this is not valid json\n"
+        task_file.write_text(corrupt, encoding="utf-8")
+        env = self.env.copy()
+        env["EVAVO_GATEWAY_PORT"] = str(port)
+        env["EVAVO_GATEWAY_STATE_DIR"] = str(state_dir)
+        env["EVAVO_TASK_HISTORY"] = str(Path(self.temp.name) / "corrupt-history.json")
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "EVAVO-GATEWAY.py")],
+            cwd=str(ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            stop_process(process)
+            self.fail("gateway unexpectedly stayed running with corrupt task state")
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("GATEWAY_TASK_STATE_CORRUPT", stdout + stderr)
+        self.assertEqual(task_file.read_text(encoding="utf-8"), corrupt)
 
 
 if __name__ == "__main__":
