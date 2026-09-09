@@ -38,6 +38,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "test-service-manager-config-safety.py",
             "test-mcp-cancel-integration.py",
             "test-mcp-output-security.py",
+            "test-mcp-policy-parity.py",
             "test-mcp-profile-policy.py",
             "test-mcp-recovery-parity.py",
             "test-mcp-request-validation.py",
