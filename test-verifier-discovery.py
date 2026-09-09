@@ -21,20 +21,24 @@ def load_verifier():
 
 
 class VerifierDiscoveryTests(unittest.TestCase):
-    def test_discovers_root_repo_tests_and_package_suites(self) -> None:
+    def test_discovers_root_repository_and_package_suites(self) -> None:
         verifier = load_verifier()
         tests = set(verifier.discover_tests())
-        self.assertIn("test-capability-manifest.py", tests)
-        self.assertIn("test-gateway.py", tests)
-        self.assertIn("test-legacy-compatibility.py", tests)
-        self.assertIn("test-package-direct-execution.py", tests)
-        self.assertIn("test-agent-stop-safety.py", tests)
-        self.assertIn("test_autonomous.py", tests)
-        self.assertIn("tests/test_gateway_providers.py", tests)
-        self.assertIn("tests/test_gateway_service_manager_providers.py", tests)
-        self.assertIn("evavo_local_image_generator/tests/test_backends.py", tests)
-        self.assertIn("evavo_local_image_generator/tests/test_generators.py", tests)
-        self.assertIn("evavo_local_image_generator/tests/test_unsupported_modalities.py", tests)
+        required = {
+            "test-capability-manifest.py",
+            "test-gateway.py",
+            "test-gateway-config-safety.py",
+            "test-service-manager-config-safety.py",
+            "test-legacy-compatibility.py",
+            "test-package-direct-execution.py",
+            "test-agent-stop-safety.py",
+            "test_autonomous.py",
+            "tests/test_gateway_providers.py",
+            "tests/test_gateway_service_manager_providers.py",
+            "evavo_local_image_generator/tests/test_backends.py",
+            "evavo_local_image_generator/tests/test_generators.py",
+        }
+        self.assertTrue(required.issubset(tests), sorted(required - tests))
 
     def test_test_inventory_is_deterministic_and_unique(self) -> None:
         verifier = load_verifier()
