@@ -7,30 +7,47 @@ This command is intentionally narrower than a general package installer:
 - syncs the local checkout's requirements.txt only when repair is required;
 - verifies pip metadata and the requested import afterwards;
 - never starts, stops, or kills ComfyUI/Python processes.
-
-It is designed for EVAVO workstation agents as well as direct CLI use.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
 from typing import Any, Iterable, Sequence
 
-
 ROOT = Path(__file__).resolve().parent
 DEFAULT_COMFY_HOME = Path(r"C:\AI\ComfyUI")
 DEFAULT_MODULE = "comfy_aimdo"
 DEFAULT_TIMEOUT_SECONDS = 900.0
+MAX_TIMEOUT_SECONDS = 3600.0
+_MODULE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+def _validated_timeout(value: Any) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("timeout must be a number") from exc
+    if not math.isfinite(timeout) or timeout <= 0 or timeout > MAX_TIMEOUT_SECONDS:
+        raise ValueError(f"timeout must be finite, greater than 0 and at most {MAX_TIMEOUT_SECONDS:g} seconds")
+    return timeout
+
+
+def _validated_module(value: Any) -> str:
+    module = str(value or "").strip()
+    if not _MODULE_PATTERN.fullmatch(module):
+        raise ValueError("module must be a dotted Python import name containing only letters, digits and underscores")
+    return module
 
 
 def _candidate_homes(explicit: str | None = None) -> Iterable[Path]:
-    """Yield source/portable ComfyUI workdirs using the same practical search space as runtime discovery."""
     seen: set[str] = set()
     home = Path.home()
     repo_parent = ROOT.parent
@@ -68,8 +85,6 @@ def _candidate_homes(explicit: str | None = None) -> Iterable[Path]:
             continue
         candidate = Path(raw).expanduser()
         workdirs = [candidate]
-        # Windows portable packages commonly keep the real checkout one level
-        # below the portable root while the embedded Python lives beside it.
         if candidate.name.lower() != "comfyui":
             workdirs.append(candidate / "ComfyUI")
         for workdir in workdirs:
@@ -143,13 +158,12 @@ def _select_python(comfy_home: Path, explicit: str | None = None) -> Path:
 def _python_prefix(python_exe: Path) -> list[str]:
     prefix = [str(python_exe)]
     if _is_portable_python(python_exe):
-        # Keep package inspection/repair isolated from the user's site-packages,
-        # matching the portable launcher's isolation intent.
         prefix.append("-s")
     return prefix
 
 
 def _module_probe_command(python_exe: Path, module: str) -> list[str]:
+    module = _validated_module(module)
     code = (
         "import importlib, json, sys; "
         f"m=importlib.import_module({module!r}); "
@@ -164,27 +178,15 @@ def _pip_version_command(python_exe: Path) -> list[str]:
 
 
 def _pip_install_command(python_exe: Path, requirements: Path) -> list[str]:
-    return [
-        *_python_prefix(python_exe),
-        "-m",
-        "pip",
-        "install",
-        "--disable-pip-version-check",
-        "-r",
-        str(requirements),
-    ]
+    return [*_python_prefix(python_exe), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)]
 
 
 def _pip_check_command(python_exe: Path) -> list[str]:
     return [*_python_prefix(python_exe), "-m", "pip", "check"]
 
 
-def _run(
-    command: Sequence[str],
-    *,
-    cwd: Path,
-    timeout: float,
-) -> dict[str, Any]:
+def _run(command: Sequence[str], *, cwd: Path, timeout: float) -> dict[str, Any]:
+    timeout = _validated_timeout(timeout)
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -196,6 +198,7 @@ def _run(
             errors="replace",
             timeout=timeout,
             check=False,
+            shell=False,
         )
         return {
             "command": list(command),
@@ -219,9 +222,7 @@ def _run(
 
 
 def _trim(value: str, limit: int = 12000) -> str:
-    if len(value) <= limit:
-        return value
-    return value[-limit:]
+    return value if len(value) <= limit else value[-limit:]
 
 
 def _public_result(step: dict[str, Any]) -> dict[str, Any]:
@@ -255,6 +256,8 @@ def repair_dependencies(
     force_sync: bool = False,
     verify_only: bool = False,
 ) -> tuple[int, dict[str, Any]]:
+    timeout = _validated_timeout(timeout)
+    module = _validated_module(module)
     home = _discover_home(comfy_home)
     python_path = _select_python(home, python_exe)
     requirements = home / "requirements.txt"
@@ -338,30 +341,36 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--comfy-home", help=r"Explicit ComfyUI workdir containing main.py + requirements.txt")
     parser.add_argument("--python", dest="python_exe", help="Explicit ComfyUI Python interpreter")
     parser.add_argument("--module", default=DEFAULT_MODULE, help=f"Import used to decide whether repair is needed (default: {DEFAULT_MODULE})")
-    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="Maximum seconds for requirements synchronization")
-    parser.add_argument("--force-sync", action="store_true", help="Run pip install -r requirements.txt even when the module already imports")
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help=f"Maximum seconds for requirements synchronization (1-{MAX_TIMEOUT_SECONDS:g})")
+    parser.add_argument("--force-sync", action="store_true", help="Explicit operator action: sync requirements even when the module already imports")
     parser.add_argument("--verify-only", action="store_true", help="Verify module + pip check without modifying packages")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    if args.timeout <= 0:
-        print(json.dumps({"ok": False, "status": "invalid_arguments", "message": "--timeout must be > 0"}, indent=2))
+    try:
+        timeout = _validated_timeout(args.timeout)
+        module = _validated_module(args.module)
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "status": "invalid_arguments", "message": str(exc)}, indent=2))
         return 64
     try:
         exit_code, payload = repair_dependencies(
             comfy_home=args.comfy_home,
             python_exe=args.python_exe,
-            module=args.module,
-            timeout=args.timeout,
+            module=module,
+            timeout=timeout,
             force_sync=args.force_sync,
             verify_only=args.verify_only,
         )
     except (FileNotFoundError, OSError) as exc:
         exit_code = 2
         payload = {"ok": False, "status": "discovery_failed", "message": str(exc)}
-    except Exception as exc:  # keep the workstation receipt structured even for unexpected faults
+    except ValueError as exc:
+        exit_code = 64
+        payload = {"ok": False, "status": "invalid_arguments", "message": str(exc)}
+    except Exception as exc:
         exit_code = 70
         payload = {"ok": False, "status": "repair_exception", "message": f"{type(exc).__name__}: {exc}"}
 
