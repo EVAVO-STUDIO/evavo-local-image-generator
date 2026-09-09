@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -18,17 +19,18 @@ from typing import Iterable, Sequence
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_MESSAGE = "chore(repo): update local EVAVO image-generator changes"
+EXPECTED_ORIGIN_RE = re.compile(
+    r"(?:github\.com[:/])EVAVO-STUDIO/evavo-local-image-generator(?:\.git)?$",
+    re.IGNORECASE,
+)
 
 # Runtime/generated paths that should never be swept into a generic local commit.
 # .evavo/capabilities.json is an intentional checked-in repository capability
-# manifest; other .evavo files are runtime state and remain excluded.
+# manifest; all other .evavo files are runtime state and remain excluded.
 FORBIDDEN_PREFIXES = (
     ".git/",
     ".git.",
-    ".evavo/outputs/",
-    ".evavo/logs/",
-    ".evavo/gateway/",
-    ".evavo/tools/",
+    ".evavo/",
     "evavo-images/",
     "evavo-videos/",
     "evavo-audio/",
@@ -76,7 +78,7 @@ def _lines(args: Sequence[str]) -> list[str]:
     return [line.strip() for line in _run(args).stdout.splitlines() if line.strip()]
 
 
-def _assert_repository() -> None:
+def _assert_repository() -> str:
     actual = Path(_run(["rev-parse", "--show-toplevel"]).stdout.strip()).resolve()
     if os.path.normcase(str(actual)) != os.path.normcase(str(ROOT.resolve())):
         raise GitSafetyError(f"script root is not the active Git worktree root: {actual}")
@@ -86,6 +88,9 @@ def _assert_repository() -> None:
     remote = _run(["remote", "get-url", "origin"]).stdout.strip()
     if not remote:
         raise GitSafetyError("origin remote is not configured")
+    if not EXPECTED_ORIGIN_RE.search(remote):
+        raise GitSafetyError(f"origin points to an unexpected repository: {remote}")
+    return remote
 
 
 def _refresh_origin() -> tuple[int, int]:
@@ -113,14 +118,12 @@ def _status_paths() -> list[str]:
     while index < len(records):
         record = records[index]
         index += 1
-        if not record:
-            continue
-        if len(record) < 4:
+        if not record or len(record) < 4:
             continue
         status = record[:2]
         path = record[3:]
-        # Rename/copy records include a second NUL-separated path. The first path
-        # is still safety-checked, then the destination is checked as well.
+        # Rename/copy records include a second NUL-separated path. Check both
+        # names because either side could target a protected runtime path.
         paths.append(path.replace("\\", "/"))
         if "R" in status or "C" in status:
             if index < len(records) and records[index]:
@@ -129,9 +132,15 @@ def _status_paths() -> list[str]:
     return paths
 
 
+def _normalize_repo_path(path: str) -> str:
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
 def _forbidden_path(path: str) -> bool:
-    normalized = path.strip().replace("\\", "/").lstrip("./")
-    lowered = normalized.lower()
+    lowered = _normalize_repo_path(path).lower()
     if lowered == ".evavo/capabilities.json":
         return False
     if any(lowered.startswith(prefix.lower()) for prefix in FORBIDDEN_PREFIXES):
@@ -142,7 +151,7 @@ def _forbidden_path(path: str) -> bool:
 
 
 def _assert_safe_changes(paths: Iterable[str]) -> list[str]:
-    unique = sorted({path for path in paths if path})
+    unique = sorted({_normalize_repo_path(path) for path in paths if path})
     unsafe = [path for path in unique if _forbidden_path(path)]
     if unsafe:
         raise GitSafetyError(
@@ -164,7 +173,6 @@ def _run_verifier(skip_verify: bool) -> None:
 
 def _stage_and_commit(message: str, paths: list[str]) -> str | None:
     if not paths:
-        print("Working tree is clean; nothing to commit.")
         return None
     _run(["add", "-A", "--", "."])
     staged = _lines(["diff", "--cached", "--name-only", "--diff-filter=ACDMRTUXB"])
@@ -195,9 +203,10 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        _assert_repository()
+        remote = _assert_repository()
         ahead, _ = _refresh_origin()
         paths = _assert_safe_changes(_status_paths())
+        print(f"origin: {remote}")
         print(f"main is {ahead} commit(s) ahead of origin/main before local changes; changed paths: {len(paths)}")
         for path in paths[:100]:
             print(f"  {path}")
@@ -205,13 +214,22 @@ def main() -> int:
             print(f"  ... {len(paths) - 100} more")
         if args.dry_run:
             return 0
-        if not paths:
+
+        commit_sha: str | None = None
+        if paths:
+            _run_verifier(args.skip_verify)
+            commit_sha = _stage_and_commit(args.message.strip() or DEFAULT_MESSAGE, paths)
+            if commit_sha:
+                print(f"Created commit {commit_sha}")
+        elif ahead:
+            commit_sha = _run(["rev-parse", "HEAD"]).stdout.strip()
+            print(f"Working tree is clean; {ahead} reviewed local commit(s) are ready to push.")
+        else:
+            print("Working tree is clean and main already matches origin/main.")
             return 0
-        _run_verifier(args.skip_verify)
-        commit_sha = _stage_and_commit(args.message.strip() or DEFAULT_MESSAGE, paths)
+
         if not commit_sha:
             return 0
-        print(f"Created commit {commit_sha}")
         if args.no_push:
             print("Push skipped by request.")
             return 0
