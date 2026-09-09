@@ -90,7 +90,7 @@ if ($binaryExists -and (Test-Path $metadataPath)) {
         $binaryIntegrityDetail = "unable to validate executable integrity: $($_.Exception.Message)"
     }
 }
-elif ($binaryExists) {
+elseif ($binaryExists) {
     $binaryIntegrityDetail = "verified-install metadata missing; rerun INSTALL-CHATGPT-MCP-TUNNEL.ps1"
 }
 Add-Check "tunnel_client_integrity" $binaryIntegrityOk $binaryIntegrityDetail
