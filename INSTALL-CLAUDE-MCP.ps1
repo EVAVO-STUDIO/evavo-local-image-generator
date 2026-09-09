@@ -27,8 +27,10 @@ if ($LASTEXITCODE -ne 0) { throw "MCP production policy is invalid. Claude confi
 try { $policyResult = ($policyOutput -join "`n") | ConvertFrom-Json }
 catch { throw "MCP production policy returned invalid JSON. Claude configuration was not changed." }
 $generationOutputDir = [string]$policyResult.policy.default_output_root
+$taskHistoryFile = [string]$policyResult.policy.task_history_file
 $comfyEndpoint = [string]$policyResult.policy.comfyui_endpoint
 if (-not $generationOutputDir) { throw "MCP production policy did not return a validated default output root. Claude configuration was not changed." }
+if (-not $taskHistoryFile) { throw "MCP production policy did not return a validated task-history path. Claude configuration was not changed." }
 if (-not $comfyEndpoint) { throw "MCP production policy did not return a validated loopback ComfyUI endpoint. Claude configuration was not changed." }
 
 $configDir = Join-Path $env:APPDATA "Claude"
@@ -54,6 +56,7 @@ $environment = [ordered]@{
     "PYTHONUNBUFFERED" = "1"
     "COMFYUI_ENDPOINT" = $comfyEndpoint
     "EVAVO_GENERATION_OUTPUT_DIR" = $generationOutputDir
+    "EVAVO_TASK_HISTORY" = $taskHistoryFile
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
     "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
 }
@@ -83,7 +86,6 @@ $nonSecretEnvironment = @(
     "EVAVO_CHECKPOINT_SHA256",
     "EVAVO_CHECKPOINT_NAME",
     "EVAVO_COMFYUI_CHECKPOINT",
-    "EVAVO_TASK_HISTORY",
     "EVAVO_TORCH_INDEX_URL"
 )
 foreach ($name in $nonSecretEnvironment) {
@@ -104,6 +106,7 @@ Write-Host "Claude Desktop MCP configuration installed: $configPath" -Foreground
 Write-Host "Python: $python" -ForegroundColor Green
 Write-Host "ComfyUI endpoint: $comfyEndpoint (policy-validated loopback)" -ForegroundColor Green
 Write-Host "Generation output root: $generationOutputDir" -ForegroundColor Green
+Write-Host "Task history: $taskHistoryFile" -ForegroundColor Green
 Write-Host "MCP launch and persisted authority are policy-validated." -ForegroundColor Green
 if ($env:EVAVO_CHECKPOINT_URL) { Write-Host "EVAVO_CHECKPOINT_URL was not persisted because URLs may contain secrets." -ForegroundColor Yellow }
 Write-Host "Restart Claude Desktop so it reloads MCP configuration." -ForegroundColor Yellow
