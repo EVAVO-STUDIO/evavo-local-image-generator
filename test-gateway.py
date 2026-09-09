@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import socket
@@ -96,8 +97,12 @@ class GatewayIntegrationTests(unittest.TestCase):
         env["EVAVO_GATEWAY_PORT"] = str(GATEWAY_PORT)
         env["EVAVO_GATEWAY_STATE_DIR"] = str(cls.state_dir)
         env["EVAVO_TASK_HISTORY"] = str(cls.task_history)
+        env["EVAVO_GATEWAY_MAX_REQUEST_BYTES"] = "8192"
+        env["EVAVO_GATEWAY_MAX_PROJECT_CHARS"] = "32"
         for name in (
             "EVAVO_GATEWAY_CORS_ORIGINS",
+            "EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS",
+            "EVAVO_COMFYUI_WORKFLOW",
             "EVAVO_VIDEO_PROVIDER_ARGV",
             "EVAVO_VIDEO_STUDIO_DIR",
             "EVAVO_VIDEO_PYTHON",
@@ -181,6 +186,62 @@ class GatewayIntegrationTests(unittest.TestCase):
             self.assertEqual(int(getattr(response, "status", 200)), 200)
         self.assertGreater(len(body), 0)
 
+    def test_per_request_workflow_path_is_denied_by_default(self) -> None:
+        status, payload = request_json(
+            self.base + "/generate/image",
+            method="POST",
+            payload={"prompt": "workflow boundary", "workflow_path": "C:\\private\\workflow.json"},
+        )
+        self.assertEqual(status, 403, payload)
+        self.assertIn("per-request workflow_path is disabled", str(payload.get("detail", "")))
+
+    def test_project_name_is_bounded_before_task_persistence(self) -> None:
+        project = "p" * 200
+        status, queued = request_json(
+            self.base + "/generate/audio",
+            method="POST",
+            payload={"prompt": "project bound", "project_name": project},
+        )
+        self.assertEqual(status, 202, queued)
+        task_id = str(queued["task_id"])
+        status, persisted = request_json(self.base + f"/tasks/{task_id}/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(persisted.get("project_name"), "p" * 32)
+
+    def test_declared_oversized_request_is_rejected_before_queueing(self) -> None:
+        status, before = request_json(self.base + "/tasks")
+        self.assertEqual(status, 200)
+        before_ids = {str(item.get("task_id")) for item in before.get("tasks", [])}
+        status, payload = request_json(
+            self.base + "/generate/audio",
+            method="POST",
+            payload={"prompt": "oversized", "blob": "x" * 9000},
+        )
+        self.assertEqual(status, 413, payload)
+        status, after = request_json(self.base + "/tasks")
+        self.assertEqual(status, 200)
+        after_ids = {str(item.get("task_id")) for item in after.get("tasks", [])}
+        self.assertEqual(after_ids, before_ids)
+
+    def test_chunked_oversized_request_is_rejected_before_parsing(self) -> None:
+        connection = http.client.HTTPConnection("127.0.0.1", GATEWAY_PORT, timeout=10)
+        chunks = [b'{"prompt":"chunked","blob":"', b"x" * 9000, b'"}']
+        try:
+            connection.request(
+                "POST",
+                "/generate/audio",
+                body=iter(chunks),
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                encode_chunked=True,
+            )
+            response = connection.getresponse()
+            raw = response.read()
+            self.assertEqual(response.status, 413, raw)
+            payload = json.loads(raw.decode("utf-8", errors="replace"))
+            self.assertIn("request exceeds EVAVO gateway limit", str(payload.get("detail", "")))
+        finally:
+            connection.close()
+
     def test_cors_is_disabled_by_default(self) -> None:
         request = urllib.request.Request(self.base + "/health", headers={"Origin": "https://example.com"})
         with urllib.request.urlopen(request, timeout=10) as response:
@@ -230,6 +291,56 @@ class GatewayIntegrationTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("accepts only explicit loopback", result.stderr + result.stdout)
+
+    def test_persisted_task_suffix_prevents_restart_id_reuse(self) -> None:
+        port = 18214
+        state_dir = Path(self.temp.name) / "restart-id-state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        existing_id = "aud_9999999999"
+        (state_dir / "tasks.json").write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "tasks": {
+                        existing_id: {
+                            "task_id": existing_id,
+                            "type": "audio",
+                            "status": "failed",
+                            "progress": 0,
+                            "prompt": "old task",
+                            "project_name": "restart-test",
+                            "created_at": "2026-09-09T00:00:00+00:00",
+                            "updated_at": "2026-09-09T00:00:00+00:00",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        env = self.env.copy()
+        env["EVAVO_GATEWAY_PORT"] = str(port)
+        env["EVAVO_GATEWAY_STATE_DIR"] = str(state_dir)
+        env["EVAVO_TASK_HISTORY"] = str(Path(self.temp.name) / "restart-id-history.json")
+        process = subprocess.Popen(
+            [sys.executable, str(ROOT / "EVAVO-GATEWAY.py")],
+            cwd=str(ROOT),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            wait_port(port)
+            base = f"http://127.0.0.1:{port}"
+            status, queued = request_json(base + "/generate/audio", method="POST", payload={"prompt": "new task"})
+            self.assertEqual(status, 202, queued)
+            new_id = str(queued.get("task_id", ""))
+            self.assertTrue(new_id.startswith("aud_"), queued)
+            self.assertGreater(int(new_id.split("_", 1)[1]), 9_999_999_999)
+            status, old_task = request_json(base + f"/tasks/{existing_id}/status")
+            self.assertEqual(status, 200)
+            self.assertEqual(old_task.get("task_id"), existing_id)
+        finally:
+            stop_process(process)
 
 
 if __name__ == "__main__":
