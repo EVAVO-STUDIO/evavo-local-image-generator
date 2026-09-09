@@ -82,6 +82,7 @@ provision_backend
 ensure_backend
 diagnose_backend
 last_startup_failure
+repair_backend_dependencies
 health_check
 discover_backends
 list_checkpoints
@@ -101,6 +102,17 @@ stop_managed_backend
 `generate_image` / `generate_batch` auto-start native ComfyUI and wait by default. Invalid file/wait policy is rejected **before backend startup and before queueing**, so a rejected preflight does not create a fake task.
 
 `diagnose_backend` runs a bounded startup diagnostic. `last_startup_failure` returns the last structured startup failure without changing process state.
+
+When a structured startup failure is `missing_dependency`, `repair_backend_dependencies` can synchronize the **selected ComfyUI checkout's own requirements** with its selected Python runtime. The MCP tool does not accept arbitrary package names, Python paths, ComfyUI paths or URLs, does not use a shell, and does not treat custom-node dependency failures as permission to mutate core ComfyUI. Normal recovery is:
+
+```text
+last_startup_failure
+-> diagnose_backend
+-> repair_backend_dependencies   # only for proven core missing_dependency
+-> diagnose_backend
+-> ensure_backend
+-> real generation proof
+```
 
 `generation_status` prefers current ComfyUI jobs and falls back to legacy history/queue, normalizing:
 
