@@ -93,7 +93,7 @@ def validate_health(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @contextmanager
-def _interprocess_lock(lock_path: Path, timeout: float = 10.0) -> Iterator[None]:
+def interprocess_lock(lock_path: Path, timeout: float = 10.0) -> Iterator[None]:
     """Acquire a tiny cross-platform advisory lock using only stdlib APIs."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(lock_path, "a+b")
@@ -118,7 +118,7 @@ def _interprocess_lock(lock_path: Path, timeout: float = 10.0) -> Iterator[None]
         except (OSError, BlockingIOError):
             if time.monotonic() >= deadline:
                 handle.close()
-                raise TimeoutError(f"Timed out acquiring task-history lock: {lock_path}")
+                raise TimeoutError(f"Timed out acquiring EVAVO interprocess lock: {lock_path}")
             time.sleep(0.05)
 
     try:
@@ -136,6 +136,11 @@ def _interprocess_lock(lock_path: Path, timeout: float = 10.0) -> Iterator[None]
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
             handle.close()
+
+
+# Compatibility alias for older in-repository callers. New code should import
+# the public name so the shared lock is an explicit operational API.
+_interprocess_lock = interprocess_lock
 
 
 def _clean_string_list(value: Any) -> List[str]:
@@ -189,7 +194,7 @@ class TaskTracker:
             raise
 
     def load_history(self) -> List[Dict[str, Any]]:
-        with _interprocess_lock(self.lock_file):
+        with interprocess_lock(self.lock_file):
             self.tasks = self._read_unlocked()
         return list(self.tasks)
 
@@ -235,7 +240,7 @@ class TaskTracker:
             record["output_uris"] = cleaned_outputs
             record["output_uri"] = cleaned_outputs[0]
 
-        with _interprocess_lock(self.lock_file):
+        with interprocess_lock(self.lock_file):
             tasks = self._read_unlocked()
             existing = next((item for item in tasks if item.get("task_id") == record["task_id"]), None)
             if existing is None:
@@ -248,7 +253,7 @@ class TaskTracker:
         return dict(record)
 
     def update_task(self, task_id: str, status: str, **fields: Any) -> Dict[str, Any]:
-        with _interprocess_lock(self.lock_file):
+        with interprocess_lock(self.lock_file):
             tasks = self._read_unlocked()
             target = next((item for item in tasks if item.get("task_id") == task_id), None)
             if target is None:
@@ -300,6 +305,6 @@ class TaskTracker:
         return {"total_tasks": len(self.tasks), **stats}
 
     def clear_history(self) -> None:
-        with _interprocess_lock(self.lock_file):
+        with interprocess_lock(self.lock_file):
             self._write_unlocked([])
             self.tasks = []
