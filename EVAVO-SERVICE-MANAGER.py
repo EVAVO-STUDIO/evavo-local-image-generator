@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""EVAVO gateway service manager for Windows/Linux local workstations.
+"""Manage the optional EVAVO HTTP compatibility gateway.
 
-Starts and monitors the fixed Gateway (8000) and ComfyUI (8188) contract.
-Only processes started by EVAVO are stopped automatically.
+The manager shares the canonical native-ComfyUI lifecycle used by CLI/MCP.
+It never starts the deterministic mock as a production renderer and only stops
+processes whose identity proves EVAVO owns them.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -22,33 +24,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from evavo_local_image_generator.comfyui_runtime import ensure_comfyui, native_health, stop_managed_comfyui
+
 ROOT = Path(__file__).resolve().parent
-STATE_DIR = ROOT / "evavo-state"
+STATE_DIR = Path(os.getenv("EVAVO_GATEWAY_STATE_DIR", str(ROOT / ".evavo" / "gateway"))).expanduser().resolve()
 STATE_FILE = STATE_DIR / "service-manager.json"
 LOG_DIR = STATE_DIR / "logs"
 GATEWAY_SCRIPT = ROOT / "EVAVO-GATEWAY.py"
-MOCK_SCRIPT = ROOT / "mock-comfyui-server.py"
-GATEWAY_HOST = "127.0.0.1"
-GATEWAY_PORT = 8000
-COMFYUI_HOST = "127.0.0.1"
-COMFYUI_PORT = 8188
+GATEWAY_HOST = os.getenv("EVAVO_GATEWAY_HOST", "127.0.0.1")
+GATEWAY_PORT = int(os.getenv("EVAVO_GATEWAY_PORT", "8000"))
+COMFYUI_URL = (os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
 GATEWAY_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}"
-COMFYUI_URL = f"http://{COMFYUI_HOST}:{COMFYUI_PORT}"
 
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-def truthy(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def http_json(url: str, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
-    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "EVAVO-Service-Manager/1"})
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Manager/2"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -69,37 +63,19 @@ def gateway_health() -> Dict[str, Any]:
     started = time.perf_counter()
     payload = http_json(f"{GATEWAY_URL}/health")
     latency = round((time.perf_counter() - started) * 1000, 1)
-    healthy = payload == {"status": "healthy", "gateway": "ok", "comfyui": "ok"}
     gateway_alive = isinstance(payload, dict) and payload.get("gateway") == "ok"
+    healthy = payload == {"status": "healthy", "gateway": "ok", "comfyui": "ok"}
     return {"healthy": healthy, "gateway_alive": gateway_alive, "latency_ms": latency, "response": payload}
 
 
 def comfyui_health() -> Dict[str, Any]:
     started = time.perf_counter()
-    # EVAVO's deterministic simulator intentionally also implements /system_stats,
-    # so check its identity route first to avoid misreporting a mock as native.
-    system = http_json(f"{COMFYUI_URL}/system")
-    if isinstance(system, dict) and system.get("service") == "evavo-local-image-generator":
-        healthy = system.get("status") in {"ready", "ok"}
-        return {
-            "healthy": healthy,
-            "mode": str(system.get("mode", "mock")),
-            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "response": system,
-        }
-    stats = http_json(f"{COMFYUI_URL}/system_stats")
-    if isinstance(stats, dict) and isinstance(stats.get("system"), dict):
-        return {
-            "healthy": True,
-            "mode": "native-comfyui",
-            "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-            "response": stats,
-        }
+    health = native_health(COMFYUI_URL)
     return {
-        "healthy": False,
-        "mode": "offline",
+        "healthy": bool(health),
+        "mode": "native-comfyui" if health else "offline_or_not_native",
         "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-        "response": None,
+        "response": health,
     }
 
 
@@ -126,7 +102,20 @@ def load_state() -> Dict[str, Any]:
 
 def save_state(state: Dict[str, Any]) -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    fd, temp_name = tempfile.mkstemp(prefix=STATE_FILE.name + ".", suffix=".tmp", dir=str(STATE_DIR))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(state, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, STATE_FILE)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
 
 
 def command_line(pid: int) -> Optional[str]:
@@ -172,14 +161,19 @@ def terminate_pid(pid: int) -> None:
             return
 
 
-def process_kwargs(log_path: Path) -> tuple[Dict[str, Any], Any]:
+def spawn_gateway() -> subprocess.Popen[Any]:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    handle = log_path.open("ab", buffering=0)
+    handle = (LOG_DIR / "gateway.log").open("ab", buffering=0)
+    env = os.environ.copy()
+    env["EVAVO_GATEWAY_HOST"] = GATEWAY_HOST
+    env["EVAVO_GATEWAY_PORT"] = str(GATEWAY_PORT)
+    env["COMFYUI_ENDPOINT"] = COMFYUI_URL
     kwargs: Dict[str, Any] = {
         "cwd": str(ROOT),
         "stdin": subprocess.DEVNULL,
         "stdout": handle,
         "stderr": subprocess.STDOUT,
+        "env": env,
     }
     if os.name == "nt":
         flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
@@ -188,13 +182,8 @@ def process_kwargs(log_path: Path) -> tuple[Dict[str, Any], Any]:
         kwargs["creationflags"] = flags
     else:
         kwargs["start_new_session"] = True
-    return kwargs, handle
-
-
-def spawn(command: list[str], log_name: str) -> subprocess.Popen[Any]:
-    kwargs, handle = process_kwargs(LOG_DIR / log_name)
     try:
-        return subprocess.Popen(command, **kwargs)
+        return subprocess.Popen([sys.executable, str(GATEWAY_SCRIPT)], **kwargs)
     finally:
         handle.close()
 
@@ -208,42 +197,15 @@ def wait_for(predicate, timeout: float, label: str) -> None:
     raise RuntimeError(f"{label} did not become ready within {timeout:g}s")
 
 
-def ensure_comfyui_service(state: Dict[str, Any]) -> Dict[str, Any]:
-    health = comfyui_health()
-    if health["healthy"]:
-        return {"status": "already_running", "mode": health["mode"]}
-
-    # Prefer a real installed ComfyUI through the repository's hardened runtime.
-    try:
-        from evavo_local_image_generator.comfyui_runtime import ensure_comfyui
-
-        result = ensure_comfyui(COMFYUI_URL, wait_seconds=float(os.getenv("EVAVO_GATEWAY_COMFYUI_START_TIMEOUT", "90")), allow_start=True)
-        state["comfyui"] = {
-            "kind": "native",
-            "managed": bool(result.get("started")),
-            "pid": result.get("pid"),
-            "started_at": now_iso(),
-        }
-        save_state(state)
-        return result
-    except Exception as native_error:
-        if not truthy("EVAVO_GATEWAY_ALLOW_MOCK_COMFYUI", default=True):
-            raise RuntimeError(f"Native ComfyUI is unavailable and mock fallback is disabled: {native_error}") from native_error
-
-    if not MOCK_SCRIPT.is_file():
-        raise RuntimeError(f"Mock ComfyUI fallback not found: {MOCK_SCRIPT}")
-    if port_open(COMFYUI_HOST, COMFYUI_PORT):
-        raise RuntimeError("Port 8188 is occupied by an unknown/unhealthy process; refusing to replace it")
-    process = spawn([sys.executable, str(MOCK_SCRIPT), "--host", COMFYUI_HOST, "--port", str(COMFYUI_PORT)], "comfyui-mock.log")
-    state["comfyui"] = {"kind": "mock", "managed": True, "pid": process.pid, "started_at": now_iso()}
-    save_state(state)
-    try:
-        wait_for(lambda: bool(comfyui_health()["healthy"]), 15.0, "ComfyUI mock")
-    except Exception:
-        if process.poll() is None:
-            terminate_pid(process.pid)
-        raise
-    return {"status": "started", "mode": "mock", "pid": process.pid}
+def ensure_comfyui_service() -> Dict[str, Any]:
+    result = ensure_comfyui(
+        COMFYUI_URL,
+        wait_seconds=float(os.getenv("EVAVO_GATEWAY_COMFYUI_START_TIMEOUT", "120")),
+        allow_start=True,
+    )
+    if not native_health(COMFYUI_URL):
+        raise RuntimeError("Native ComfyUI did not become ready; mock backends are not accepted by the production gateway")
+    return result
 
 
 def ensure_gateway_service(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -251,64 +213,53 @@ def ensure_gateway_service(state: Dict[str, Any]) -> Dict[str, Any]:
     if existing["gateway_alive"]:
         return {"status": "already_running", "healthy": existing["healthy"]}
     if port_open(GATEWAY_HOST, GATEWAY_PORT):
-        raise RuntimeError(
-            "Port 8000 is occupied by another process. Gateway must remain on 8000; "
-            "move Kokoro or any other service to a different port (recommended Kokoro: 8880)."
-        )
+        raise RuntimeError(f"Port {GATEWAY_PORT} is occupied by another process; refusing to replace it")
     if not GATEWAY_SCRIPT.is_file():
         raise RuntimeError(f"Gateway script not found: {GATEWAY_SCRIPT}")
-    process = spawn([sys.executable, str(GATEWAY_SCRIPT)], "gateway.log")
-    state["gateway"] = {"kind": "gateway", "managed": True, "pid": process.pid, "started_at": now_iso()}
+    process = spawn_gateway()
+    state["gateway"] = {"managed": True, "pid": process.pid, "started_at": now_iso()}
     save_state(state)
     try:
-        wait_for(lambda: bool(gateway_health()["gateway_alive"]), 20.0, "EVAVO Gateway")
+        wait_for(lambda: gateway_health()["gateway_alive"], 20.0, "EVAVO Gateway")
     except Exception:
-        if process.poll() is None:
+        if process.poll() is None and pid_matches(process.pid, GATEWAY_SCRIPT):
             terminate_pid(process.pid)
         raise
     return {"status": "started", "pid": process.pid, "healthy": gateway_health()["healthy"]}
 
 
 def start_services() -> Dict[str, Any]:
+    if GATEWAY_HOST not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError("Gateway manager is restricted to loopback")
+    if not 1 <= GATEWAY_PORT <= 65535:
+        raise RuntimeError("Gateway port must be between 1 and 65535")
     state = load_state()
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    comfy = ensure_comfyui_service(state)
+    comfy = ensure_comfyui_service()
     gateway = ensure_gateway_service(state)
     state["last_start"] = now_iso()
+    state["comfyui_endpoint"] = COMFYUI_URL
     save_state(state)
-    return {"ok": True, "comfyui": comfy, "gateway": gateway, "health": full_health()}
+    health = full_health()
+    if health["status"] != "healthy":
+        raise RuntimeError(f"Gateway stack started but is not healthy: {health}")
+    return {"ok": True, "comfyui": comfy, "gateway": gateway, "health": health}
 
 
 def stop_services() -> Dict[str, Any]:
     state = load_state()
     stopped: Dict[str, Any] = {"gateway": False, "comfyui": False}
-
     gateway = state.get("gateway") if isinstance(state.get("gateway"), dict) else {}
-    gateway_pid = gateway.get("pid")
-    if gateway.get("managed") and isinstance(gateway_pid, int) and pid_matches(gateway_pid, GATEWAY_SCRIPT):
-        terminate_pid(gateway_pid)
+    pid = gateway.get("pid")
+    if gateway.get("managed") and isinstance(pid, int) and pid_matches(pid, GATEWAY_SCRIPT):
+        terminate_pid(pid)
         stopped["gateway"] = True
-
-    comfy = state.get("comfyui") if isinstance(state.get("comfyui"), dict) else {}
-    if comfy.get("managed"):
-        if comfy.get("kind") == "mock":
-            pid = comfy.get("pid")
-            if isinstance(pid, int) and pid_matches(pid, MOCK_SCRIPT):
-                terminate_pid(pid)
-                stopped["comfyui"] = True
-        elif comfy.get("kind") == "native":
-            try:
-                from evavo_local_image_generator.comfyui_runtime import stop_managed_comfyui
-
-                stopped["comfyui"] = bool(stop_managed_comfyui().get("stopped"))
-            except Exception:
-                stopped["comfyui"] = False
-
+    native = stop_managed_comfyui()
+    stopped["comfyui"] = bool(native.get("stopped"))
     try:
         STATE_FILE.unlink()
     except OSError:
         pass
-    return {"ok": True, "stopped": stopped, "timestamp": now_iso()}
+    return {"ok": True, "stopped": stopped, "native": native, "timestamp": now_iso()}
 
 
 def monitor(interval: float) -> int:
@@ -317,24 +268,23 @@ def monitor(interval: float) -> int:
         while True:
             health = full_health()
             print(json.dumps(health, ensure_ascii=False), flush=True)
-            if not health["comfyui"]["healthy"] or not health["gateway"]["gateway_alive"]:
-                try:
-                    start_services()
-                except Exception as exc:
-                    print(json.dumps({"status": "restart_failed", "error": str(exc), "timestamp": now_iso()}), file=sys.stderr, flush=True)
+            if not health["comfyui"]["healthy"]:
+                ensure_comfyui_service()
+            if not health["gateway"]["gateway_alive"]:
+                ensure_gateway_service(load_state())
             time.sleep(interval)
     except KeyboardInterrupt:
         return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Manage EVAVO Unified Gateway services")
+    parser = argparse.ArgumentParser(description="Manage the EVAVO native-image HTTP gateway")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("start", help="Start required services")
-    subparsers.add_parser("stop", help="Stop EVAVO-managed services")
+    subparsers.add_parser("start", help="Start/ensure native ComfyUI and the loopback gateway")
+    subparsers.add_parser("stop", help="Stop only identity-verified EVAVO-managed components")
     subparsers.add_parser("health", help="Print health JSON")
     subparsers.add_parser("status", help="Alias for health")
-    monitor_parser = subparsers.add_parser("monitor", help="Start services and continuously monitor/restart EVAVO-managed components")
+    monitor_parser = subparsers.add_parser("monitor", help="Monitor and restore native ComfyUI/gateway health")
     monitor_parser.add_argument("--interval", type=float, default=5.0)
     args = parser.parse_args()
 
