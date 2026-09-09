@@ -29,9 +29,11 @@ def assert_profile_contract(test: unittest.TestCase, source: str) -> None:
     test.assertIn(POLICY_COMMAND, source)
     test.assertIn("MCP production policy is invalid", source)
     test.assertIn('$generationOutputDir = [string]$policyResult.policy.default_output_root', source)
+    test.assertIn('$taskHistoryFile = [string]$policyResult.policy.task_history_file', source)
     test.assertIn('$comfyEndpoint = [string]$policyResult.policy.comfyui_endpoint', source)
     test.assertIn("validated loopback ComfyUI endpoint", source)
     test.assertIn('"EVAVO_GENERATION_OUTPUT_DIR" = $generationOutputDir', source)
+    test.assertIn('"EVAVO_TASK_HISTORY" = $taskHistoryFile', source)
     test.assertNotIn('"EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path', source)
     test.assertIn('@($policyResult.policy.additional_output_roots)', source)
     test.assertIn('[string]$policyResult.policy.owner_workflow', source)
@@ -104,14 +106,19 @@ class McpProfilePolicyTests(unittest.TestCase):
                 self.assertNotIn('"EVAVO_MCP_WORKFLOW_ROOT"', block)
                 self.assertNotIn('"COMFYUI_ENDPOINT"', block)
                 self.assertNotIn('"EVAVO_COMFYUI_ENDPOINT"', block)
+                self.assertNotIn('"EVAVO_TASK_HISTORY"', block)
 
-    def test_root_mcp_profile_uses_validated_entry_and_canonical_loopback_endpoint(self) -> None:
+    def test_root_mcp_profile_bootstraps_to_validated_entry_and_keeps_canonical_loopback_endpoint(self) -> None:
         profile = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
         server = profile["mcpServers"]["evavo-local-image-generator"]
         environment = server["env"]
-        self.assertEqual(server["args"][:2], ["-m", VALIDATED_ENTRY])
+        self.assertEqual(server["command"], "python")
+        self.assertEqual(server["args"][:2], ["mcp-bootstrap.py", "--transport"])
         self.assertEqual(environment["COMFYUI_ENDPOINT"], "http://127.0.0.1:8188")
         self.assertNotIn("EVAVO_COMFYUI_ENDPOINT", environment)
+        bootstrap = (ROOT / "mcp-bootstrap.py").read_text(encoding="utf-8")
+        self.assertIn('"evavo_local_image_generator.mcp_entry"', bootstrap)
+        self.assertIn('ROOT / ".venv"', bootstrap)
 
     def test_mcp_server_enforces_workflow_and_output_roots(self) -> None:
         source = (ROOT / "evavo_local_image_generator" / "mcp_server.py").read_text(encoding="utf-8")
