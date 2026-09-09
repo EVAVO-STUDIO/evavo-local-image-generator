@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -43,7 +44,39 @@ async def preflight(endpoint: str, timeout: float = 5.0) -> Dict[str, Any]:
             raise RuntimeError(f"BACKEND_UNAVAILABLE:EVAVO={evavo_error}; ComfyUI={native_error}") from native_error
 
 
-async def queue_generation(prompt: str, project_name: str, endpoint: str, semaphore: asyncio.Semaphore, timeout: float, *, wait: bool = False, wait_timeout: float = 600.0, output_dir: str | None = None, workflow_path: str | None = None) -> Dict[str, Any]:
+async def preflight_custom_workflow(endpoint: str, workflow_path: str, sample_prompt: str) -> Dict[str, Any]:
+    """Render and validate a custom workflow once before a CLI batch queues work."""
+    backend = ComfyUIBackend(endpoint)
+    path = str(Path(workflow_path).expanduser().resolve())
+    workflow = await asyncio.to_thread(
+        backend.build_txt2img_workflow,
+        sample_prompt,
+        negative_prompt="",
+        width=1024,
+        height=1024,
+        steps=4,
+        cfg_scale=7.0,
+        seed=1,
+        workflow_path=path,
+        filename_prefix="EVAVO/batch-preflight",
+    )
+    result = await asyncio.to_thread(backend.preflight_workflow, workflow)
+    return {"workflow_path": path, **result}
+
+
+async def queue_generation(
+    prompt: str,
+    project_name: str,
+    endpoint: str,
+    semaphore: asyncio.Semaphore,
+    timeout: float,
+    *,
+    wait: bool = False,
+    wait_timeout: float = 600.0,
+    output_dir: str | None = None,
+    workflow_path: str | None = None,
+    workflow_preflight_already_done: bool = False,
+) -> Dict[str, Any]:
     async with semaphore:
         request_payload: Dict[str, Any] = {"prompt": prompt, "project_name": project_name}
         if wait:
@@ -55,8 +88,26 @@ async def queue_generation(prompt: str, project_name: str, endpoint: str, semaph
         payload = json.dumps(request_payload, ensure_ascii=False)
         process = None
         process_timeout = max(timeout, wait_timeout + 30.0) if wait else timeout
+        child_env = None
+        if workflow_path and workflow_preflight_already_done:
+            # The parent process has validated this workflow against the same
+            # endpoint. Disable only the redundant child check; never mutate the
+            # parent environment or other concurrently running commands.
+            child_env = os.environ.copy()
+            child_env["EVAVO_PREFLIGHT_CUSTOM_WORKFLOW"] = "0"
         try:
-            process = await asyncio.create_subprocess_exec(sys.executable, str(WRAPPER), "generate_image", payload, "--endpoint", endpoint, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, cwd=str(ROOT))
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                str(WRAPPER),
+                "generate_image",
+                payload,
+                "--endpoint",
+                endpoint,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(ROOT),
+                env=child_env,
+            )
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=process_timeout)
         except asyncio.TimeoutError:
             if process is not None:
@@ -96,9 +147,37 @@ async def queue_generation(prompt: str, project_name: str, endpoint: str, semaph
         return result
 
 
-async def batch_generate(prompts: List[str], project_name: str, endpoint: str, concurrency: int, timeout: float, *, wait: bool = False, wait_timeout: float = 600.0, output_dir: str | None = None, workflow_path: str | None = None) -> List[Dict[str, Any]]:
+async def batch_generate(
+    prompts: List[str],
+    project_name: str,
+    endpoint: str,
+    concurrency: int,
+    timeout: float,
+    *,
+    wait: bool = False,
+    wait_timeout: float = 600.0,
+    output_dir: str | None = None,
+    workflow_path: str | None = None,
+    workflow_preflight_already_done: bool = False,
+) -> List[Dict[str, Any]]:
     semaphore = asyncio.Semaphore(concurrency)
-    return await asyncio.gather(*(queue_generation(prompt, project_name, endpoint, semaphore, timeout, wait=wait, wait_timeout=wait_timeout, output_dir=output_dir, workflow_path=workflow_path) for prompt in prompts))
+    return await asyncio.gather(
+        *(
+            queue_generation(
+                prompt,
+                project_name,
+                endpoint,
+                semaphore,
+                timeout,
+                wait=wait,
+                wait_timeout=wait_timeout,
+                output_dir=output_dir,
+                workflow_path=workflow_path,
+                workflow_preflight_already_done=workflow_preflight_already_done,
+            )
+            for prompt in prompts
+        )
+    )
 
 
 def persist_results(results: List[Dict[str, Any]]) -> None:
@@ -145,6 +224,7 @@ def display_results(results: List[Dict[str, Any]]) -> None:
 
 async def async_main(args: argparse.Namespace, prompts: List[str]) -> int:
     endpoint = args.endpoint.rstrip("/")
+    health: Dict[str, Any] | None = None
     if not args.skip_preflight:
         try:
             health = await preflight(endpoint)
@@ -158,7 +238,50 @@ async def async_main(args: argparse.Namespace, prompts: List[str]) -> int:
                 print("Start ComfyUI or run: python evavo.py start", file=sys.stderr)
             return 3
 
-    results = await batch_generate(prompts, args.project, endpoint, args.concurrency, args.timeout, wait=args.wait, wait_timeout=args.wait_timeout, output_dir=args.output_dir, workflow_path=args.workflow)
+    workflow_preflight_done = False
+    if args.workflow and not args.skip_workflow_preflight:
+        if health is None:
+            try:
+                health = await preflight(endpoint)
+            except RuntimeError as exc:
+                message = f"custom workflow requires a healthy native ComfyUI backend: {exc}"
+                if args.json:
+                    print(json.dumps({"ok": False, "status": "failed", "error_code": "WORKFLOW_PREFLIGHT_FAILED", "message": message}, ensure_ascii=False))
+                else:
+                    print(f"ERROR: {message}", file=sys.stderr)
+                return 3
+        if health.get("mode") != "native-comfyui":
+            message = f"custom ComfyUI workflows require native ComfyUI; active backend mode is {health.get('mode', 'unknown')}"
+            if args.json:
+                print(json.dumps({"ok": False, "status": "failed", "error_code": "CUSTOM_WORKFLOW_REQUIRES_NATIVE", "message": message}, ensure_ascii=False))
+            else:
+                print(f"ERROR: {message}", file=sys.stderr)
+            return 3
+        try:
+            workflow_check = await preflight_custom_workflow(endpoint, args.workflow, prompts[0])
+            workflow_preflight_done = True
+            if not args.json:
+                classes = ", ".join(workflow_check.get("node_classes", []))
+                print(f"Workflow preflight OK: {workflow_check['workflow_path']} ({workflow_check.get('node_count', 0)} nodes; {classes})")
+        except (RuntimeError, OSError, ValueError) as exc:
+            if args.json:
+                print(json.dumps({"ok": False, "status": "failed", "error_code": "WORKFLOW_PREFLIGHT_FAILED", "message": str(exc), "workflow_path": str(Path(args.workflow).expanduser())}, ensure_ascii=False))
+            else:
+                print(f"ERROR: custom workflow preflight failed before queueing any task: {exc}", file=sys.stderr)
+            return 3
+
+    results = await batch_generate(
+        prompts,
+        args.project,
+        endpoint,
+        args.concurrency,
+        args.timeout,
+        wait=args.wait,
+        wait_timeout=args.wait_timeout,
+        output_dir=args.output_dir,
+        workflow_path=args.workflow,
+        workflow_preflight_already_done=workflow_preflight_done,
+    )
     try:
         persist_results(results)
     except Exception as exc:
@@ -192,6 +315,7 @@ def main() -> int:
     parser.add_argument("--output-dir", help="Directory for downloaded native ComfyUI outputs")
     parser.add_argument("--workflow", help="Custom ComfyUI API-format workflow JSON template")
     parser.add_argument("--skip-preflight", action="store_true", help="Skip backend identity/readiness preflight")
+    parser.add_argument("--skip-workflow-preflight", action="store_true", help="Skip one-time custom workflow compatibility preflight (child wrappers then use their normal per-prompt behavior)")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
     args = parser.parse_args()
     if args.concurrency < 1 or args.concurrency > 64:
