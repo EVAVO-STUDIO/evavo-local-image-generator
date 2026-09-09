@@ -10,9 +10,25 @@ The image-generator MCP exposes:
 ensure_backend
 diagnose_backend
 last_startup_failure
+repair_backend_dependencies
 ```
 
-For Claude, ChatGPT or another connected MCP agent, prefer `diagnose_backend(seconds=60, cpu=true)` before dropping to shell automation. The tool runs the same bounded owned-child diagnostic and returns structured failure evidence without exposing arbitrary shell authority. `last_startup_failure` is read-only and returns the most recently persisted startup failure.
+For Claude, ChatGPT or another connected MCP agent, prefer the shared MCP lifecycle before dropping to shell automation:
+
+```text
+last_startup_failure
+diagnose_backend(seconds=60, cpu=true)
+repair_backend_dependencies()  # only when category == missing_dependency
+diagnose_backend(seconds=60, cpu=true)
+ensure_backend
+real generation proof
+```
+
+`diagnose_backend` runs the same bounded owned-child diagnostic and returns structured failure evidence without exposing arbitrary shell authority. `last_startup_failure` is read-only and returns the most recently persisted startup failure.
+
+`repair_backend_dependencies` is the preferred agent repair surface. It does not accept arbitrary package names, Python paths or ComfyUI paths from MCP callers. Normal mutation is admitted only when the last structured startup failure is a core `missing_dependency`. It invokes the repository's bounded repair command without a shell, synchronizes only the discovered checkout's own `requirements.txt` into its selected ComfyUI Python, and returns a structured receipt.
+
+If the category is `custom_node_dependency`, the shared repair tool refuses to mutate core ComfyUI requirements. Isolate with `diagnose_backend(seconds=60, cpu=true, disable_all_custom_nodes=true)` and repair the reviewed custom node separately.
 
 Startup failures preserve a structured record at:
 
@@ -32,7 +48,15 @@ Source/venv installs do not receive portable-only flags.
 
 ## Dependency repair
 
-When the diagnostic category is `missing_dependency`, do not guess a PyPI version and do not install the package into a global/system Python. Repair the local ComfyUI environment from the requirements file that belongs to the checkout being launched:
+When the diagnostic category is `missing_dependency`, do not guess a PyPI version and do not install the package into a global/system Python. Prefer MCP:
+
+```text
+repair_backend_dependencies()
+```
+
+The MCP repair bridge derives the target import from the last structured `missing_dependency` failure, then invokes the bounded repository repair command. It is intentionally narrower than a package manager and never exposes arbitrary package installation authority to Claude or ChatGPT.
+
+When MCP is unavailable, the CLI fallback uses the same local checkout authority:
 
 ```powershell
 python .\repair-comfyui-dependencies.py --comfy-home C:\AI\ComfyUI
@@ -41,28 +65,36 @@ python .\repair-comfyui-dependencies.py --comfy-home C:\AI\ComfyUI
 The repair command:
 
 - selects the same local/embedded Python layout used by ComfyUI;
-- probes `comfy_aimdo` by default, or another module supplied through `--module`;
+- probes `comfy_aimdo` by default, or another explicitly supplied diagnostic module;
 - runs that interpreter's `pip install -r <ComfyUI>\requirements.txt` only when repair is required;
 - never adds `--upgrade` implicitly;
 - runs `pip check` and re-imports the target module afterwards;
 - persists the bounded result to `<ComfyUI>\.evavo\dependency-repair-last.json`;
 - never starts, stops, or kills Python/ComfyUI processes.
 
-For another missing module reported by diagnostics:
+For another missing core module reported by diagnostics, CLI fallback may use:
 
 ```powershell
 python .\repair-comfyui-dependencies.py --comfy-home C:\AI\ComfyUI --module <reported_module>
 ```
 
-If the failure indicates that the environment as a whole is incomplete rather than one target import, use the checkout as authority and synchronize its requirements deliberately:
+If the failure indicates that the environment as a whole is incomplete rather than one target import, an authorised operator may deliberately request a full checkout requirements sync:
+
+```text
+repair_backend_dependencies(force_sync=true)
+```
+
+or, without MCP:
 
 ```powershell
 python .\repair-comfyui-dependencies.py --comfy-home C:\AI\ComfyUI --force-sync
 ```
 
+`force_sync` is an explicit override, not the normal path.
+
 After a successful dependency repair, agents must re-run `diagnose_backend(seconds=60, cpu=true)`, then `ensure_backend`, then an actual generation smoke test. Package installation alone is not proof that the service is healthy.
 
-Agents with EVAVO Workstation Bridge/Operator execution authority should perform this repair themselves and wait for the terminal receipt. They should not hand routine PowerShell/Python execution back to the user merely because the operation is on Windows.
+Agents with EVAVO Workstation Bridge/Operator execution authority should perform needed fallback repair themselves and wait for the terminal receipt. They should not hand routine PowerShell/Python execution back to the user merely because the operation is on Windows.
 
 ## Bounded 60-second CLI probe
 
