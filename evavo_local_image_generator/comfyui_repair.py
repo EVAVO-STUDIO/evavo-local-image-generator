@@ -64,13 +64,14 @@ def _regular_file_mtime(path: Path) -> int:
         return -1
 
 
-def _diagnostic_log_evidence(path: Path = DIAGNOSTIC_OUTPUT_FILE) -> Dict[str, Any]:
+def _diagnostic_log_evidence(path: Optional[Path] = None) -> Dict[str, Any]:
     """Classify the latest bounded diagnostic log without trusting arbitrary paths."""
+    target = path or DIAGNOSTIC_OUTPUT_FILE
     try:
-        if path.is_symlink() or not path.is_file():
+        if target.is_symlink() or not target.is_file():
             return {}
-        size = path.stat().st_size
-        with path.open("rb") as handle:
+        size = target.stat().st_size
+        with target.open("rb") as handle:
             if size > _MAX_DIAGNOSTIC_BYTES:
                 handle.seek(max(0, size - _MAX_DIAGNOSTIC_BYTES))
             text = handle.read(_MAX_DIAGNOSTIC_BYTES).decode("utf-8", errors="replace")
@@ -86,7 +87,7 @@ def _diagnostic_log_evidence(path: Path = DIAGNOSTIC_OUTPUT_FILE) -> Dict[str, A
         port_was_open=False,
     )
     result["evidence_source"] = "bounded_diagnostic_log"
-    result["evidence_path"] = str(path)
+    result["evidence_path"] = str(target)
     return result
 
 
