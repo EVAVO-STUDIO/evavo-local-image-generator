@@ -35,6 +35,7 @@ CRITICAL_FILES: Sequence[str] = (
     "test-provisioning.py",
     "test-backend-automation.py",
     "test-agent-integration.py",
+    "test-agent-doctor-workflows.py",
     "test-chatgpt-tunnel.py",
     "UPDATE-AND-VERIFY-EVAVO.ps1",
     "INSTALL-CLAUDE-MCP.ps1",
@@ -71,6 +72,7 @@ FULL_TESTS: Sequence[str] = (
     "test-backend-automation.py",
     "test-chatgpt-tunnel.py",
     "test-agent-integration.py",
+    "test-agent-doctor-workflows.py",
     "test-operations.py",
 )
 
