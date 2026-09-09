@@ -75,6 +75,22 @@ function Test-JsonEndpoint {
     }
 }
 
+function Test-LoopbackHttpEndpoint {
+    param([string]$Url)
+    try {
+        $uri = [System.Uri]$Url
+        return (
+            $uri.Scheme -eq "http" -and
+            $uri.Host -in @("127.0.0.1", "localhost", "::1") -and
+            -not $uri.UserInfo -and
+            -not $uri.Query -and
+            -not $uri.Fragment
+        )
+    } catch {
+        return $false
+    }
+}
+
 # Offline gates first: fast and deterministic, no GPU/service dependency.
 Invoke-Gate "image-quality-profile-tests" $PSScriptRoot $Python @("test_quality_profiles.py") | Out-Null
 
@@ -139,10 +155,44 @@ if (-not $Skip3D) {
             Invoke-Gate "3d-studio-regression-suite" $ThreeDRoot $Python @("scripts\check.py") | Out-Null
         }
         if ($Require3DExecution) {
-            Test-JsonEndpoint "3d-studio-execution-worker" "$($ThreeDWorkerEndpoint.TrimEnd('/'))/api/v1/health" {
-                param($payload)
-                return ($payload.ok -eq $true -and $payload.executionEnabled -eq $true)
-            } | Out-Null
+            if (-not (Test-LoopbackHttpEndpoint $ThreeDWorkerEndpoint)) {
+                $Failures.Add("3D execution worker endpoint must be loopback HTTP: $ThreeDWorkerEndpoint")
+                Write-Host "[FAIL] 3D execution worker endpoint must be loopback HTTP" -ForegroundColor Red
+            } else {
+                $workerBase = $ThreeDWorkerEndpoint.TrimEnd('/')
+                Test-JsonEndpoint "3d-studio-execution-worker-health" "$workerBase/api/v1/health" {
+                    param($payload)
+                    return (
+                        $payload.ok -eq $true -and
+                        $payload.service -eq "evavo-3d-agent-worker" -and
+                        $payload.executionEnabled -eq $true -and
+                        $payload.authority -eq "token-gated-candidate-production-only"
+                    )
+                } | Out-Null
+
+                Test-JsonEndpoint "3d-studio-execution-worker-capabilities" "$workerBase/api/v1/capabilities" {
+                    param($payload)
+                    $requiredOperations = @(
+                        "pipeline.generate-candidates",
+                        "pipeline.finish-selected",
+                        "pipeline.full-candidate",
+                        "web-delivery.execute"
+                    )
+                    foreach ($operation in $requiredOperations) {
+                        if ($payload.operations -notcontains $operation) { return $false }
+                    }
+                    return (
+                        $payload.submit -eq $true -and
+                        $payload.status -eq $true -and
+                        $payload.automaticApproval -eq $false -and
+                        $payload.canonicalPromotion -eq $false -and
+                        $payload.gitMutation -eq $false -and
+                        $payload.deployment -eq $false -and
+                        $payload.publication -eq $false -and
+                        $payload.clientRelease -eq $false
+                    )
+                } | Out-Null
+            }
         }
     }
 }
@@ -168,7 +218,7 @@ if (-not $SkipAtmosphere) {
 
 $Finished = Get-Date
 $Summary = [ordered]@{
-    schemaVersion = 2
+    schemaVersion = 3
     mode = $Mode
     startedAt = $Started.ToString("o")
     finishedAt = $Finished.ToString("o")
@@ -179,6 +229,7 @@ $Summary = [ordered]@{
     threeDRoot = $ThreeDRoot
     threeDWorkerEndpoint = $ThreeDWorkerEndpoint
     require3DExecution = [bool]$Require3DExecution
+    threeDAuthorityContractChecked = [bool]$Require3DExecution
     resultRoot = $ResultRoot
     ok = ($Failures.Count -eq 0)
     failures = @($Failures)
