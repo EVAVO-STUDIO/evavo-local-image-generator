@@ -32,6 +32,7 @@ EXPECTED_TOOLS = {
     "generate_batch",
     "generation_status",
     "collect_generation",
+    "read_output_image",
     "task_history",
     "task_statistics",
     "stop_managed_backend",
@@ -147,7 +148,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
         anyio.run(exercise)
 
-    def test_mcp_streamable_http_generates_batch_and_persists_history(self) -> None:
+    def test_mcp_streamable_http_generates_batch_persists_history_and_returns_image_content(self) -> None:
         native_endpoint = f"http://127.0.0.1:{NATIVE_MCP_PORT}"
         native = subprocess.Popen(
             [sys.executable, str(ROOT / "mock-comfyui-server.py"), "--port", str(NATIVE_MCP_PORT), "--native-only"],
@@ -213,6 +214,15 @@ class AgentIntegrationTests(unittest.TestCase):
                         assert isinstance(single_payload, dict)
                         self.assertEqual(single_payload.get("status"), "completed")
                         self.assertTrue(single_payload.get("downloaded_files"))
+                        first_file = Path(str(single_payload["downloaded_files"][0]))
+                        self.assertTrue(first_file.is_file())
+
+                        image_result = await client.call_tool("read_output_image", {"path": str(first_file)})
+                        image_blocks = [block for block in image_result.content if getattr(block, "type", None) == "image"]
+                        self.assertEqual(len(image_blocks), 1, image_result.content)
+                        image_block = image_blocks[0]
+                        self.assertTrue(str(getattr(image_block, "mime_type", "")).startswith("image/"))
+                        self.assertTrue(getattr(image_block, "data", ""))
 
                         batch = await client.call_tool(
                             "generate_batch",
