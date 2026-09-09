@@ -58,6 +58,41 @@ evavo-particles/
 evavo-textures/
 evavo-state/
 evavo-logs/
+quality-results/
+benchmarks/
+reports/
+outputs/
+
+# Large AI/DCC model binaries stay outside ordinary Git. Track manifests + hashes instead.
+models/
+checkpoints/
+loras/
+vae/
+controlnet/
+upscale_models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.gguf
+*.onnx
+*.engine
+
+# Generated media masters also stay outside ordinary Git.
+*.wav
+*.flac
+*.mp3
+*.opus
+*.aac
+*.mp4
+*.mkv
+*.webm
+
+# Local secrets and configuration
+.env
+.env.local
+.env.*.local
 
 # Local state
 .evavo/
