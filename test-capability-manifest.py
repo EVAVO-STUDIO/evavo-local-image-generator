@@ -27,12 +27,7 @@ def registered_mcp_tools() -> set[str]:
         for decorator in node.decorator_list:
             call = decorator if isinstance(decorator, ast.Call) else None
             target = call.func if call else decorator
-            if (
-                isinstance(target, ast.Attribute)
-                and target.attr == "tool"
-                and isinstance(target.value, ast.Name)
-                and target.value.id == "mcp"
-            ):
+            if isinstance(target, ast.Attribute) and target.attr == "tool" and isinstance(target.value, ast.Name) and target.value.id == "mcp":
                 tools.add(node.name)
                 break
     return tools
@@ -105,12 +100,16 @@ class CapabilityManifestTests(unittest.TestCase):
         gateway = self.manifest["interfaces"]["http_gateway"]
         self.assertTrue(gateway["task_state_cross_process_lock"])
         self.assertTrue(gateway["task_id_allocation_interprocess_atomic"])
+        self.assertTrue(gateway["single_live_gateway_per_task_state"])
+        self.assertEqual(gateway["state_in_use_error"], "GATEWAY_STATE_IN_USE")
         self.assertTrue(gateway["corrupt_task_state_fail_closed"])
         source = GATEWAY_PATH.read_text(encoding="utf-8")
         operations = OPERATIONS_PATH.read_text(encoding="utf-8")
         self.assertIn("from evavo_operations import TaskTracker, interprocess_lock", source)
         self.assertIn("def interprocess_lock", operations)
         self.assertIn("_interprocess_lock = interprocess_lock", operations)
+        self.assertIn("GATEWAY_INSTANCE_LOCK", source)
+        self.assertIn("GATEWAY_STATE_IN_USE", source)
         self.assertIn("def _create_sync", source)
         self.assertIn("GATEWAY_TASK_STATE_CORRUPT", source)
         self.assertIn("await STORE.create(", source)
@@ -167,8 +166,10 @@ class CapabilityManifestTests(unittest.TestCase):
         delegation = capabilities.get("local-image.gateway.aux-provider-delegation")
         self.assertIsNotNone(private_gateway)
         self.assertIsNotNone(delegation)
-        self.assertIn("request", str(private_gateway.get("description", "")).lower())
-        self.assertIn("interprocess", str(private_gateway.get("description", "")).lower())
+        private_description = str(private_gateway.get("description", "")).lower()
+        self.assertIn("request", private_description)
+        self.assertIn("one live gateway owner", private_description)
+        self.assertIn("gateway_state_in_use", private_description)
         self.assertIn("fail-closed", str(delegation.get("description", "")).lower())
         self.assertNotIn("mcp", {str(value).lower() for value in delegation.get("interfaces", [])})
 
@@ -183,6 +184,7 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertTrue(security["gateway_structured_config_errors"])
         self.assertTrue(security["gateway_task_state_corruption_fail_closed"])
         self.assertTrue(security["gateway_task_id_interprocess_atomic"])
+        self.assertTrue(security["gateway_task_state_single_live_owner"])
         self.assertTrue(security["service_manager_state_corruption_fail_closed"])
         self.assertFalse(security["service_manager_provider_secret_plaintext_in_state"])
         self.assertFalse(security["broad_python_process_kill"])
