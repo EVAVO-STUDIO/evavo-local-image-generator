@@ -131,6 +131,10 @@ def _positive_int(value: Any, *, name: str, minimum: int, maximum: int) -> int:
     return number
 
 
+def _env_or_default(name: str, default: Any, *, use_environment: bool) -> Any:
+    return os.getenv(name, default) if use_environment else default
+
+
 def profile_names() -> list[str]:
     return sorted(QUALITY_PROFILES)
 
@@ -164,28 +168,31 @@ def resolve_quality_settings(
     second_pass_scheduler: Optional[str] = None,
     second_pass_denoise: Any = None,
     latent_upscale_method: Optional[str] = None,
+    use_environment: bool = True,
 ) -> ImageQualitySettings:
     """Resolve a render profile plus explicit/env overrides.
+
+    ``use_environment=True`` preserves normal EVAVO behavior and allows
+    workstation-level ``EVAVO_IMAGE_*`` overrides. Controlled benchmarks and
+    versioned job plans can pass ``use_environment=False`` so the named profile
+    plus explicit arguments fully determine the recipe.
 
     The previous canonical EVAVO call path always injected ``steps=24`` and
     ``cfg_scale=7`` even when a user supplied no quality settings. With
     ``EVAVO_UPGRADE_LEGACY_IMAGE_DEFAULTS`` enabled (the default), that exact
-    legacy pair is treated as "unset" so old gateway/wrapper callers inherit the
-    new production-quality profile. Use ``quality_profile="custom"`` to keep an
-    intentional 24/7 request.
-
-    The two-pass fields are intentionally independent from the first-pass fields.
-    They default to disabled for every profile except ``hero``. This keeps normal
-    production predictable while allowing a higher-resolution render to be
-    benchmarked and promoted per subject instead of becoming a hidden cost.
+    legacy pair is treated as "unset" only in environment-aware compatibility
+    mode so old gateway/wrapper callers inherit the production-quality profile.
+    Use ``quality_profile="custom"`` to keep an intentional 24/7 request.
     """
 
-    raw_profile = (quality_profile or os.getenv("EVAVO_IMAGE_QUALITY_PROFILE") or "quality").strip().lower()
+    env_profile = os.getenv("EVAVO_IMAGE_QUALITY_PROFILE") if use_environment else None
+    raw_profile = (quality_profile or env_profile or "quality").strip().lower()
     custom = raw_profile == "custom"
     base = get_quality_profile("quality" if custom else raw_profile)
 
     if (
-        not custom
+        use_environment
+        and not custom
         and _env_true("EVAVO_UPGRADE_LEGACY_IMAGE_DEFAULTS", True)
         and steps is not None
         and cfg_scale is not None
@@ -199,43 +206,46 @@ def resolve_quality_settings(
             cfg_scale = None
 
     if width is None:
-        width = os.getenv("EVAVO_IMAGE_WIDTH", base.width)
+        width = _env_or_default("EVAVO_IMAGE_WIDTH", base.width, use_environment=use_environment)
     if height is None:
-        height = os.getenv("EVAVO_IMAGE_HEIGHT", base.height)
+        height = _env_or_default("EVAVO_IMAGE_HEIGHT", base.height, use_environment=use_environment)
     if steps is None:
-        steps = os.getenv("EVAVO_IMAGE_STEPS", base.steps)
+        steps = _env_or_default("EVAVO_IMAGE_STEPS", base.steps, use_environment=use_environment)
     if cfg_scale is None:
-        cfg_scale = os.getenv("EVAVO_IMAGE_CFG", base.cfg_scale)
+        cfg_scale = _env_or_default("EVAVO_IMAGE_CFG", base.cfg_scale, use_environment=use_environment)
     if sampler_name is None:
-        sampler_name = os.getenv("EVAVO_IMAGE_SAMPLER", base.sampler_name)
+        sampler_name = _env_or_default("EVAVO_IMAGE_SAMPLER", base.sampler_name, use_environment=use_environment)
     if scheduler is None:
-        scheduler = os.getenv("EVAVO_IMAGE_SCHEDULER", base.scheduler)
+        scheduler = _env_or_default("EVAVO_IMAGE_SCHEDULER", base.scheduler, use_environment=use_environment)
     if denoise is None:
-        denoise = os.getenv("EVAVO_IMAGE_DENOISE", base.denoise)
+        denoise = _env_or_default("EVAVO_IMAGE_DENOISE", base.denoise, use_environment=use_environment)
 
     if upscale_factor is None:
-        upscale_factor = os.getenv("EVAVO_IMAGE_UPSCALE_FACTOR", base.upscale_factor)
+        upscale_factor = _env_or_default("EVAVO_IMAGE_UPSCALE_FACTOR", base.upscale_factor, use_environment=use_environment)
     if second_pass_steps is None:
-        second_pass_steps = os.getenv("EVAVO_IMAGE_SECOND_STEPS", base.second_pass_steps)
+        second_pass_steps = _env_or_default("EVAVO_IMAGE_SECOND_STEPS", base.second_pass_steps, use_environment=use_environment)
     if second_pass_cfg_scale is None:
-        second_pass_cfg_scale = os.getenv(
+        second_pass_cfg_scale = _env_or_default(
             "EVAVO_IMAGE_SECOND_CFG",
             base.second_pass_cfg_scale if base.second_pass_cfg_scale is not None else base.cfg_scale,
+            use_environment=use_environment,
         )
     if second_pass_sampler_name is None:
-        second_pass_sampler_name = os.getenv(
+        second_pass_sampler_name = _env_or_default(
             "EVAVO_IMAGE_SECOND_SAMPLER",
             base.second_pass_sampler_name or base.sampler_name,
+            use_environment=use_environment,
         )
     if second_pass_scheduler is None:
-        second_pass_scheduler = os.getenv(
+        second_pass_scheduler = _env_or_default(
             "EVAVO_IMAGE_SECOND_SCHEDULER",
             base.second_pass_scheduler or base.scheduler,
+            use_environment=use_environment,
         )
     if second_pass_denoise is None:
-        second_pass_denoise = os.getenv("EVAVO_IMAGE_SECOND_DENOISE", base.second_pass_denoise)
+        second_pass_denoise = _env_or_default("EVAVO_IMAGE_SECOND_DENOISE", base.second_pass_denoise, use_environment=use_environment)
     if latent_upscale_method is None:
-        latent_upscale_method = os.getenv("EVAVO_IMAGE_LATENT_UPSCALE_METHOD", base.latent_upscale_method)
+        latent_upscale_method = _env_or_default("EVAVO_IMAGE_LATENT_UPSCALE_METHOD", base.latent_upscale_method, use_environment=use_environment)
 
     resolved = replace(
         base,
