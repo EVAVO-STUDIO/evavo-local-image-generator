@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "capability_id": "evavo.local.image-generation",
+  "repository": "EVAVO-STUDIO/evavo-local-image-generator",
+  "production_contract": {
+    "modality": "image",
+    "backend": "native-comfyui",
+    "mock_is_renderer": false,
+    "default_comfyui_endpoint": "http://127.0.0.1:8188",
+    "canonical_endpoint_environment": "COMFYUI_ENDPOINT",
+    "legacy_endpoint_environment": "EVAVO_COMFYUI_ENDPOINT"
+  },
+  "interfaces": {
+    "cli": {
+      "controller": "evavo.py",
+      "verify": "python evavo.py verify --full",
+      "strict_windows_verify": "python evavo.py verify --full --require-powershell",
+      "repair": "python agent-doctor.py --repair --provision",
+      "generate": "python evavo.py generate --prompts \"your prompt\" --project demo --wait",
+      "status": "python evavo.py status"
+    },
+    "python": {
+      "backend": "evavo_local_image_generator.backends.ComfyUIBackend",
+      "wrapper": "evavo-wrapper.py"
+    },
+    "mcp": {
+      "sdk": "mcp[cli]>=2,<3",
+      "stdio": "python -m evavo_local_image_generator.mcp_server --transport stdio",
+      "streamable_http": {
+        "default_url": "http://127.0.0.1:8765/mcp",
+        "loopback_only": true,
+        "purpose": [
+          "local MCP clients",
+          "integration testing",
+          "private target for OpenAI Secure MCP Tunnel"
+        ]
+      },
+      "tools": [
+        "provision_backend",
+        "ensure_backend",
+        "health_check",
+        "discover_backends",
+        "list_checkpoints",
+        "model_inventory",
+        "workflow_preflight",
+        "generate_image",
+        "generate_batch",
+        "generation_status",
+        "collect_generation",
+        "read_output_image",
+        "task_history",
+        "task_statistics",
+        "stop_managed_backend"
+      ]
+    },
+    "chatgpt": {
+      "transport": "openai-secure-mcp-tunnel",
+      "direct_localhost_supported": false,
+      "runbook": "CHATGPT-TUNNEL.md",
+      "private_mcp_default": "http://127.0.0.1:8765/mcp"
+    },
+    "claude": {
+      "transport": "stdio-mcp",
+      "installer": "INSTALL-CLAUDE-MCP.ps1"
+    },
+    "http_gateway": {
+      "optional": true,
+      "default_url": "http://127.0.0.1:8000",
+      "loopback_only": true,
+      "image_endpoint": "/generate/image",
+      "unsupported_compatibility_routes": {
+        "/generate/video": 501,
+        "/generate/audio": 501,
+        "/generate/3d": 501
+      }
+    }
+  },
+  "native_comfyui_api": [
+    "GET /system_stats",
+    "GET /object_info[/<node>]",
+    "POST /prompt",
+    "GET /history/<prompt_id>",
+    "GET /view"
+  ],
+  "model_inventory_categories": [
+    "checkpoints",
+    "loras",
+    "vae",
+    "controlnet",
+    "diffusion_models",
+    "text_encoders",
+    "clip_vision",
+    "upscale_models"
+  ],
+  "automation": {
+    "windows_setup": ".\\UPDATE-AND-VERIFY-EVAVO.ps1",
+    "auto_discover_comfyui": true,
+    "auto_start_native_comfyui": true,
+    "optional_runtime_provisioning": true,
+    "optional_checkpoint_repair": true,
+    "shared_model_roots": true,
+    "custom_workflow_preflight": true,
+    "wait_and_download": true,
+    "shared_task_history": true,
+    "native_mcp_image_content": true
+  },
+  "security": {
+    "public_bind_by_default": false,
+    "broad_python_process_kill": false,
+    "managed_process_identity_verification": true,
+    "user_managed_comfyui_never_killed": true,
+    "atomic_output_downloads": true,
+    "authorized_mcp_image_reads": true,
+    "chatgpt_tunnel_release_sha256_verification": true,
+    "chatgpt_tunnel_executable_sha256_verification": true,
+    "chatgpt_tunnel_dpapi_key_storage": true,
+    "plaintext_tunnel_key_in_repo_or_startup": false,
+    "arbitrary_model_url_from_mcp_tool": false
+  },
+  "unsupported_production_modalities": [
+    "video",
+    "audio",
+    "3d",
+    "particles",
+    "general-text",
+    "dedicated-pbr-textures"
+  ],
+  "source_of_truth": [
+    "README.md",
+    "CLAUDE.md",
+    "AGENT-INTEGRATION.md",
+    "AUTOMATION-GUIDE.md",
+    "OPERATIONS-GUIDE.md",
+    "DEPLOYMENT-CHECKLIST.md",
+    "GATEWAY-INTEGRATION-GUIDE.md",
+    "CHATGPT-TUNNEL.md",
+    "QUICK-REFERENCE.md"
+  ]
+}
