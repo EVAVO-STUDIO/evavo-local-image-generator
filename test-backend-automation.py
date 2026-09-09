@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
@@ -12,6 +13,9 @@ from unittest.mock import patch
 
 from evavo_local_image_generator.backends import ComfyUIBackend
 from evavo_local_image_generator import mcp_server
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"EVAVO-test-png"
+WEBP_BYTES = b"RIFF\x04\x00\x00\x00WEBP" + b"EVAVO-test-webp"
 
 
 class BackendAutomationTests(unittest.TestCase):
@@ -203,13 +207,64 @@ class BackendAutomationTests(unittest.TestCase):
             request.assert_called_once()
             self.assertEqual(queued["task_id"], "prompt-123")
 
+    def test_download_output_accepts_valid_png_and_promotes_atomically(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with tempfile.TemporaryDirectory() as directory, patch.object(backend, "_open", return_value=io.BytesIO(PNG_BYTES)):
+            path = Path(backend.download_output({"filename": "valid.png", "subfolder": "", "type": "output"}, directory))
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.read_bytes(), PNG_BYTES)
+            self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+    def test_download_output_rejects_fake_png_before_final_promotion(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with tempfile.TemporaryDirectory() as directory, patch.object(backend, "_open", return_value=io.BytesIO(b"not an image")):
+            with self.assertRaisesRegex(RuntimeError, "COMFYUI_OUTPUT_INVALID_IMAGE"):
+                backend.download_output({"filename": "fake.png", "subfolder": "", "type": "output"}, directory)
+            self.assertFalse((Path(directory) / "fake.png").exists())
+            self.assertEqual(list(Path(directory).glob("*.part")), [])
+
+    def test_download_output_rejects_empty_output(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with tempfile.TemporaryDirectory() as directory, patch.object(backend, "_open", return_value=io.BytesIO(b"")):
+            with self.assertRaisesRegex(RuntimeError, "COMFYUI_OUTPUT_EMPTY"):
+                backend.download_output({"filename": "empty.png", "subfolder": "", "type": "output"}, directory)
+            self.assertFalse((Path(directory) / "empty.png").exists())
+
+    def test_download_output_rejects_unsupported_suffix_before_request(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with tempfile.TemporaryDirectory() as directory, patch.object(backend, "_open") as open_request:
+            with self.assertRaisesRegex(RuntimeError, "COMFYUI_OUTPUT_TYPE_UNSUPPORTED"):
+                backend.download_output({"filename": "not-image.bin", "subfolder": "", "type": "output"}, directory)
+            open_request.assert_not_called()
+
+    def test_download_output_rejects_size_limit_before_final_promotion(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with tempfile.TemporaryDirectory() as directory, patch.object(backend, "_open", return_value=io.BytesIO(PNG_BYTES + b"x" * 100)):
+            with self.assertRaisesRegex(RuntimeError, "COMFYUI_OUTPUT_TOO_LARGE"):
+                backend.download_output({"filename": "large.png", "subfolder": "", "type": "output"}, directory, max_bytes=16)
+            self.assertFalse((Path(directory) / "large.png").exists())
+
+    def test_wait_for_outputs_uses_one_history_request_per_poll(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        history = {"prompt": {"outputs": {"7": {"images": [{"filename": "out.png", "subfolder": "", "type": "output"}]}}}}
+        with patch.object(backend, "history", return_value=history) as history_call:
+            outputs = backend.wait_for_outputs("prompt", timeout=1, interval=0.1)
+        self.assertEqual(outputs[0]["filename"], "out.png")
+        history_call.assert_called_once_with("prompt")
+
+    def test_cfg_scale_rejects_non_finite_values(self) -> None:
+        backend = ComfyUIBackend("http://127.0.0.1:18199")
+        with patch.object(backend, "choose_checkpoint", return_value="model.safetensors"):
+            with self.assertRaises(ValueError):
+                backend.build_txt2img_workflow("test", cfg_scale=float("nan"))
+
     def test_output_image_rejects_unrecorded_file_outside_output_root(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             output_root = root / "allowed"
             output_root.mkdir()
             outside = root / "outside.png"
-            outside.write_bytes(b"not-empty")
+            outside.write_bytes(PNG_BYTES)
             with (
                 patch.object(mcp_server, "_output_root", return_value=output_root.resolve()),
                 patch.object(mcp_server, "_recorded_output_paths", return_value=set()),
@@ -222,7 +277,7 @@ class BackendAutomationTests(unittest.TestCase):
             output_root = Path(directory) / "allowed"
             output_root.mkdir()
             image = output_root / "generated.png"
-            image.write_bytes(b"not-empty")
+            image.write_bytes(PNG_BYTES)
             with (
                 patch.object(mcp_server, "_output_root", return_value=output_root.resolve()),
                 patch.object(mcp_server, "_recorded_output_paths", return_value=set()),
@@ -235,7 +290,7 @@ class BackendAutomationTests(unittest.TestCase):
             output_root = root / "allowed"
             output_root.mkdir()
             recorded = root / "custom-output.webp"
-            recorded.write_bytes(b"not-empty")
+            recorded.write_bytes(WEBP_BYTES)
             with (
                 patch.object(mcp_server, "_output_root", return_value=output_root.resolve()),
                 patch.object(mcp_server, "_recorded_output_paths", return_value={recorded.resolve()}),
