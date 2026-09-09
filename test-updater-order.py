@@ -74,6 +74,24 @@ class UpdaterOrderingTests(unittest.TestCase):
         late = source[final_start:]
         self.assertNotIn('recover-comfyui.py") --json', late)
 
+    def test_real_generation_smoke_is_required_after_final_doctor_and_before_final_status(self) -> None:
+        source = self.source
+        final_doctor = source.index("& $python @finalDoctorArgs")
+        smoke = source.index('real-generation-smoke.py") --json')
+        final_status = source.index('evavo.py") status', smoke)
+        completed = source.index("EVAVO workstation setup completed.")
+        self.assertLess(final_doctor, smoke)
+        self.assertLess(smoke, final_status)
+        self.assertLess(final_status, completed)
+        self.assertIn("Real native generation smoke proof failed", source)
+        self.assertIn("Real native generation smoke proof: passed", source)
+
+    def test_real_generation_smoke_command_is_repository_owned_and_not_skippable_by_default(self) -> None:
+        source = self.source
+        self.assertTrue((ROOT / "real-generation-smoke.py").is_file())
+        self.assertNotIn("SkipRealGenerationSmoke", source)
+        self.assertEqual(source.count('real-generation-smoke.py") --json'), 1)
+
     def test_bootstrap_itself_is_strict_native(self) -> None:
         controller = (ROOT / "evavo.py").read_text(encoding="utf-8")
         self.assertIn('[sys.executable, controller, "start", "--endpoint", endpoint, "--no-mock"]', controller)
