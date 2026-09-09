@@ -37,6 +37,28 @@ if (-not (Test-Path $binary)) {
     throw "OpenAI tunnel-client is not installed. Run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
 }
 
+# The installed executable must still match the digest recorded immediately
+# after extraction from the verified official release archive. This check runs
+# on every manual/login tunnel start, not only during installation.
+$metadataPath = Join-Path $PSScriptRoot ".evavo\tools\tunnel-client-install.json"
+if (-not (Test-Path $metadataPath)) {
+    throw "Tunnel-client integrity metadata is missing. Re-run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
+}
+try {
+    $metadata = Get-Content $metadataPath -Raw | ConvertFrom-Json
+    $expectedBinaryHash = [string]$metadata.binary_digest
+}
+catch {
+    throw "Tunnel-client integrity metadata is invalid. Re-run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
+}
+if ($expectedBinaryHash -notmatch '^[0-9a-f]{64}$') {
+    throw "Tunnel-client integrity metadata does not contain a valid executable SHA-256. Re-run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
+}
+$actualBinaryHash = (Get-FileHash -Path $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualBinaryHash -ne $expectedBinaryHash) {
+    throw "Tunnel-client executable SHA-256 does not match the verified-install record. Refusing to run; re-run INSTALL-CHATGPT-MCP-TUNNEL.ps1."
+}
+
 # Load the runtime key. Environment wins so operators can use ephemeral keys.
 if (-not $env:CONTROL_PLANE_API_KEY) {
     if (-not $env:LOCALAPPDATA) {
