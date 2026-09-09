@@ -18,6 +18,8 @@ from evavo_local_image_generator import comfyui_repair, mcp_server
 
 ROOT = Path(__file__).resolve().parent
 STANDALONE_REPAIR = ROOT / "repair-comfyui-dependencies.py"
+MANIFEST = ROOT / "EVAVO-CAPABILITIES.json"
+UPDATER = ROOT / "UPDATE-AND-VERIFY-EVAVO.ps1"
 
 
 def load_standalone_repair():
@@ -62,6 +64,15 @@ class ComfyUIRepairSafetyTests(unittest.TestCase):
         self.assertFalse(result["repair_performed"])
         evidence.assert_not_called()
         run.assert_not_called()
+
+    def test_force_sync_owner_gate_is_machine_readable_and_updater_never_enables_it(self) -> None:
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        repair = manifest["interfaces"]["mcp"]["startup_dependency_repair"]
+        self.assertEqual(repair["force_sync_owner_environment"], "EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR")
+        self.assertTrue(repair["force_sync_requires_owner_authorization"])
+        self.assertTrue(manifest["security"]["mcp_force_sync_requires_owner_authorization"])
+        updater = UPDATER.read_text(encoding="utf-8")
+        self.assertNotIn("EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR", updater)
 
     def test_custom_node_failure_does_not_mutate_core_requirements(self) -> None:
         failure = {"category": "custom_node_dependency", "missing_modules": ["custom_module"]}
