@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -30,6 +31,10 @@ DIAGNOSTIC_OUTPUT_FILE = STATE_DIR / "comfy-startup-output.txt"
 DEFAULT_CORE_MODULE = "comfy_aimdo"
 _MODULE_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _MAX_DIAGNOSTIC_BYTES = 256 * 1024
+
+
+def _env_true(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _validated_timeout(value: Any) -> float:
@@ -199,10 +204,19 @@ def repair_backend_dependencies(
     Normal mutation is admitted only when the newest EVAVO-owned startup
     evidence is a core ``missing_dependency`` failure. Custom-node dependency
     failures are deliberately not repaired through core ComfyUI requirements.
-    ``force_sync`` is an explicit operator/agent override that still uses only
-    the selected checkout's own requirements and selected ComfyUI interpreter.
+    Forced synchronization additionally requires explicit workstation-owner
+    authorization through ``EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR=1``.
     """
     timeout = _validated_timeout(timeout_seconds)
+    if force_sync and not _env_true("EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR"):
+        return {
+            "ok": False,
+            "status": "force_sync_not_authorized",
+            "error_code": "FORCE_SYNC_NOT_AUTHORIZED",
+            "message": "Set EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR=1 locally to authorize force_sync. Normal evidence-gated repair remains available without this override.",
+            "repair_performed": False,
+        }
+
     failure = _latest_repair_evidence()
     category = str(failure.get("category") or "none")
     missing_modules = failure.get("missing_modules") if isinstance(failure.get("missing_modules"), list) else []
@@ -357,6 +371,7 @@ def repair_backend_dependencies(
     result["used_checkout_requirements"] = True
     result["used_selected_runtime"] = True
     result["used_shell"] = False
+    result["force_sync_authorized"] = bool(force_sync)
     if completed.returncode != 0:
         result["ok"] = False
     return result
