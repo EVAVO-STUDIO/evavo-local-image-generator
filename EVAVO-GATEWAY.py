@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""EVAVO local image-generation HTTP compatibility gateway.
+"""EVAVO Unified Gateway.
 
-The gateway intentionally exposes one proven production capability: image
-rendering through native ComfyUI. Historical video/audio/3D routes remain as
-explicit 501 compatibility responses instead of pretending to queue work.
+Stable FastAPI compatibility layer for ChatGPT, Claude, MCP adapters, and
+other HTTP clients. Public endpoint paths and the task response shape are
+intentionally conservative because external agents depend on them.
 """
-
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import re
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -35,9 +35,12 @@ GATEWAY_HOST = os.getenv("EVAVO_GATEWAY_HOST", "127.0.0.1")
 GATEWAY_PORT = int(os.getenv("EVAVO_GATEWAY_PORT", "8000"))
 MAX_PROMPT_CHARS = int(os.getenv("EVAVO_GATEWAY_MAX_PROMPT_CHARS", "100000"))
 IMAGE_TIMEOUT_SECONDS = float(os.getenv("EVAVO_GATEWAY_IMAGE_TIMEOUT", "600"))
+TASK_ID_RE = re.compile(r"^(img|vid|aud|3d)_\d+$")
 
 
 class GenerationRequest(BaseModel):
+    """Compatible generation request: prompt is stable, extra fields are additive."""
+
     model_config = ConfigDict(extra="allow")
     prompt: str = Field(min_length=1, max_length=MAX_PROMPT_CHARS)
 
@@ -49,7 +52,7 @@ class TaskQueuedResponse(BaseModel):
 
 
 class TaskStore:
-    """Small single-process task store with atomic persistence."""
+    """Small atomic JSON task store with async serialization."""
 
     def __init__(self, path: Path):
         self.path = path
@@ -64,9 +67,10 @@ class TaskStore:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
-        tasks = payload.get("tasks") if isinstance(payload, dict) else None
-        if isinstance(tasks, dict):
-            self._tasks = {str(key): value for key, value in tasks.items() if isinstance(value, dict)}
+        if isinstance(payload, dict):
+            tasks = payload.get("tasks", payload)
+            if isinstance(tasks, dict):
+                self._tasks = {str(key): value for key, value in tasks.items() if isinstance(value, dict)}
 
     def _write(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,11 +108,11 @@ class TaskStore:
     async def get(self, task_id: str) -> Optional[Dict[str, Any]]:
         async with self._lock:
             task = self._tasks.get(task_id)
-            return dict(task) if task else None
+            return dict(task) if task is not None else None
 
     async def list(self, limit: int = 100) -> list[Dict[str, Any]]:
         async with self._lock:
-            values = list(self._tasks.values())[-max(1, min(int(limit), 1000)) :]
+            values = list(self._tasks.values())[-max(1, min(limit, 1000)) :]
             return [dict(item) for item in reversed(values)]
 
     async def recover_interrupted(self) -> None:
@@ -130,6 +134,7 @@ class TaskStore:
 
 STORE = TaskStore(TASK_STATE_FILE)
 _BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+_LAST_EPOCH_BY_PREFIX: Dict[str, int] = {}
 
 
 def _iso_now() -> str:
@@ -138,16 +143,23 @@ def _iso_now() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-def _next_task_id() -> str:
-    return f"img_{time.time_ns()}"
+def _next_task_id(prefix: str) -> str:
+    now = int(time.time())
+    previous = _LAST_EPOCH_BY_PREFIX.get(prefix, 0)
+    value = now if now > previous else previous + 1
+    _LAST_EPOCH_BY_PREFIX[prefix] = value
+    return f"{prefix}_{value}"
 
 
 def _public_task(task: Dict[str, Any]) -> Dict[str, Any]:
-    hidden = {"request", "result_paths", "backend_task_id"}
-    return {key: value for key, value in task.items() if key not in hidden} | {"result_ready": bool(task.get("result_paths"))}
+    return {
+        key: value
+        for key, value in task.items()
+        if key not in {"request", "result_paths", "backend_task_id", "provider_receipt"}
+    } | {"result_ready": bool(task.get("result_paths"))}
 
 
-async def _mirror_add(task: Dict[str, Any]) -> None:
+async def _track_add(task: Dict[str, Any]) -> None:
     try:
         await asyncio.to_thread(
             TaskTracker().add_task,
@@ -155,17 +167,27 @@ async def _mirror_add(task: Dict[str, Any]) -> None:
             task["prompt"],
             task["status"],
             project_name=str(task.get("project_name", "gateway")),
-            backend_mode="native-comfyui",
+            backend_mode=str(task.get("backend_mode", "gateway")),
         )
     except Exception:
         return
 
 
-async def _mirror_update(task_id: str, status: str, **fields: Any) -> None:
+async def _track_update(task_id: str, status: str, **fields: Any) -> None:
     try:
         await asyncio.to_thread(TaskTracker().update_task, task_id, status, **fields)
     except Exception:
         return
+
+
+async def _check_comfyui_health() -> bool:
+    return bool(await asyncio.to_thread(native_health, COMFYUI_ENDPOINT))
+
+
+def _providers():
+    from evavo_local_image_generator.provider_runner import ProviderRouter
+
+    return ProviderRouter(ROOT, STATE_DIR, RESULT_DIR)
 
 
 async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
@@ -206,11 +228,12 @@ async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
         )
         if not paths:
             raise RuntimeError("COMFYUI_NO_OUTPUT:no image output was produced")
-        await STORE.update(task_id, status="completed", progress=100, result_paths=paths)
-        await _mirror_update(
+        stored_paths = [str(path) for path in paths]
+        await STORE.update(task_id, status="completed", progress=100, result_paths=stored_paths)
+        await _track_update(
             task_id,
             "completed",
-            output_uris=[str(path) for path in paths],
+            output_uris=stored_paths,
             output_dir=str(target),
             backend_mode="native-comfyui",
             checkpoint=queued.get("checkpoint"),
@@ -220,13 +243,69 @@ async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
         message = str(exc)
         code = message.split(":", 1)[0] if ":" in message else type(exc).__name__.upper()
         await STORE.update(task_id, status="failed", progress=0, error_code=code, error=message)
-        await _mirror_update(task_id, "failed", error_code=code, error_message=message, backend_mode="native-comfyui")
+        await _track_update(task_id, "failed", error_code=code, error_message=message, backend_mode="native-comfyui")
+
+
+async def _provider_worker(task_id: str, kind: str, request: Dict[str, Any]) -> None:
+    """Delegate non-image modalities to their governed Studio execution surfaces."""
+
+    try:
+        from evavo_local_image_generator.provider_runner import ProviderError
+
+        await STORE.update(task_id, status="running", progress=5)
+        provider = _providers()
+        result = await provider.generate(kind, task_id, request)
+        if not result.paths:
+            raise ProviderError("PROVIDER_OUTPUT_INVALID", "provider completed without an artifact")
+        await STORE.update(
+            task_id,
+            status="completed",
+            progress=100,
+            result_paths=result.paths,
+            provider_receipt=result.receipt,
+            backend_mode=result.backend_mode,
+        )
+        await _track_update(
+            task_id,
+            "completed",
+            output_uris=result.paths,
+            output_dir=str(Path(result.paths[0]).parent),
+            backend_mode=result.backend_mode,
+        )
+    except Exception as exc:
+        message = str(exc)
+        code = getattr(exc, "code", None) or (message.split(":", 1)[0] if ":" in message else type(exc).__name__.upper())
+        await STORE.update(task_id, status="failed", progress=0, error_code=code, error=message)
+        await _track_update(task_id, "failed", error_code=code, error_message=message)
 
 
 def _launch(coro: Any) -> None:
     task = asyncio.create_task(coro)
     _BACKGROUND_TASKS.add(task)
     task.add_done_callback(_BACKGROUND_TASKS.discard)
+
+
+async def _queue(prefix: str, kind: str, request: GenerationRequest) -> TaskQueuedResponse:
+    payload = request.model_dump()
+    prompt = payload["prompt"].strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="prompt must not be whitespace only")
+    task_id = _next_task_id(prefix)
+    task = {
+        "task_id": task_id,
+        "type": kind,
+        "status": "queued",
+        "progress": 0,
+        "prompt": prompt,
+        "project_name": str(payload.get("project_name", "gateway")),
+        "created_at": _iso_now(),
+        "updated_at": _iso_now(),
+        "request": payload,
+    }
+    await STORE.put(task)
+    await _track_add(task)
+    _launch(_image_worker(task_id, payload) if kind == "image" else _provider_worker(task_id, kind, payload))
+    return TaskQueuedResponse(task_id=task_id)
 
 
 @asynccontextmanager
@@ -243,90 +322,86 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="EVAVO Local Image Generator",
-    version="2.0.0",
-    description="Loopback-only native-ComfyUI image generation compatibility gateway.",
+    title="EVAVO Unified Generator",
+    version="2.1.0",
+    description="Stable local multi-modal generation gateway for ChatGPT, Claude, MCP and HTTP clients.",
     lifespan=lifespan,
 )
 
-cors_raw = os.getenv("EVAVO_GATEWAY_CORS_ORIGINS", "").strip()
-if cors_raw:
-    cors_origins = [item.strip() for item in cors_raw.split(",") if item.strip()]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_origins,
-        allow_credentials=False,
-        allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type", "Accept"],
-    )
+cors_raw = os.getenv("EVAVO_GATEWAY_CORS_ORIGINS", "*")
+cors_origins = [item.strip() for item in cors_raw.split(",") if item.strip()] or ["*"]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
 async def health() -> Dict[str, str]:
-    native = await asyncio.to_thread(native_health, COMFYUI_ENDPOINT)
-    if native:
+    comfy_ok = await _check_comfyui_health()
+    if comfy_ok:
+        # This exact healthy response is a compatibility contract.
         return {"status": "healthy", "gateway": "ok", "comfyui": "ok"}
     return {"status": "degraded", "gateway": "ok", "comfyui": "offline"}
 
 
+@app.get("/services")
+async def services() -> Dict[str, Any]:
+    """Additive provider readiness detail; `/health` stays compatibility-stable."""
+
+    comfy_ready = await _check_comfyui_health()
+    return await _providers().services(comfyui_ready=comfy_ready)
+
+
 @app.get("/capabilities")
 async def capabilities() -> Dict[str, Any]:
-    native = await asyncio.to_thread(native_health, COMFYUI_ENDPOINT)
-    unsupported = {"ready": False, "reason": "not part of the proven evavo-local-image-generator production contract"}
+    service_state = await services()
     return {
-        "image": {"endpoint": "/generate/image", "backend": "native-comfyui", "ready": bool(native)},
-        "video": {"endpoint": "/generate/video", **unsupported},
-        "audio": {"endpoint": "/generate/audio", **unsupported},
-        "3d": {"endpoint": "/generate/3d", **unsupported},
+        "image": {
+            "endpoint": "/generate/image",
+            "backend": service_state["image"].get("backend", "ComfyUI"),
+            "ready": bool(service_state["image"].get("ready")),
+        },
+        "video": {
+            "endpoint": "/generate/video",
+            "backend": service_state["video"].get("backend", "EVAVO Video Studio"),
+            "ready": bool(service_state["video"].get("ready")),
+        },
+        "audio": {
+            "endpoint": "/generate/audio",
+            "backend": service_state["audio"].get("backend", "configured-cli"),
+            "ready": bool(service_state["audio"].get("ready")),
+        },
+        "3d": {
+            "endpoint": "/generate/3d",
+            "backend": service_state["3d"].get("backend", "EVAVO 3D Studio worker"),
+            "ready": bool(service_state["3d"].get("ready")),
+        },
         "progress_websocket": "/ws/progress/{task_id}",
     }
 
 
 @app.post("/generate/image", response_model=TaskQueuedResponse, status_code=202)
 async def generate_image(request: GenerationRequest) -> TaskQueuedResponse:
-    payload = request.model_dump()
-    prompt = payload["prompt"].strip()
-    if not prompt:
-        raise HTTPException(status_code=422, detail="prompt must not be whitespace only")
-    task_id = _next_task_id()
-    task = {
-        "task_id": task_id,
-        "type": "image",
-        "status": "queued",
-        "progress": 0,
-        "prompt": prompt,
-        "project_name": str(payload.get("project_name", "gateway")),
-        "backend_mode": "native-comfyui",
-        "created_at": _iso_now(),
-        "updated_at": _iso_now(),
-        "request": payload,
-    }
-    await STORE.put(task)
-    await _mirror_add(task)
-    _launch(_image_worker(task_id, payload))
-    return TaskQueuedResponse(task_id=task_id)
+    return await _queue("img", "image", request)
 
 
-def _unsupported_modality(kind: str) -> None:
-    raise HTTPException(
-        status_code=501,
-        detail=f"{kind} generation is not implemented by the verified evavo-local-image-generator production runtime",
-    )
+@app.post("/generate/video", response_model=TaskQueuedResponse, status_code=202)
+async def generate_video(request: GenerationRequest) -> TaskQueuedResponse:
+    return await _queue("vid", "video", request)
 
 
-@app.post("/generate/video")
-async def generate_video(_: GenerationRequest) -> None:
-    _unsupported_modality("video")
+@app.post("/generate/audio", response_model=TaskQueuedResponse, status_code=202)
+async def generate_audio(request: GenerationRequest) -> TaskQueuedResponse:
+    return await _queue("aud", "audio", request)
 
 
-@app.post("/generate/audio")
-async def generate_audio(_: GenerationRequest) -> None:
-    _unsupported_modality("audio")
-
-
-@app.post("/generate/3d")
-async def generate_3d(_: GenerationRequest) -> None:
-    _unsupported_modality("3d")
+@app.post("/generate/3d", response_model=TaskQueuedResponse, status_code=202)
+async def generate_3d(request: GenerationRequest) -> TaskQueuedResponse:
+    return await _queue("3d", "3d", request)
 
 
 @app.get("/tasks")
@@ -337,6 +412,8 @@ async def list_tasks(limit: int = 100) -> Dict[str, Any]:
 
 @app.get("/tasks/{task_id}/status")
 async def task_status(task_id: str) -> Dict[str, Any]:
+    if not TASK_ID_RE.fullmatch(task_id):
+        raise HTTPException(status_code=404, detail="Task not found")
     task = await STORE.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -345,6 +422,8 @@ async def task_status(task_id: str) -> Dict[str, Any]:
 
 @app.get("/results/{task_id}")
 async def result(task_id: str):
+    if not TASK_ID_RE.fullmatch(task_id):
+        raise HTTPException(status_code=404, detail="Task not found")
     task = await STORE.get(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -362,7 +441,11 @@ async def result(task_id: str):
     if not isinstance(paths, list) or not paths:
         return JSONResponse(
             status_code=202,
-            content={"task_id": task_id, "status": task.get("status", "queued"), "progress": int(task.get("progress", 0))},
+            content={
+                "task_id": task_id,
+                "status": task.get("status", "queued"),
+                "progress": int(task.get("progress", 0)),
+            },
         )
     candidate = Path(str(paths[0])).expanduser().resolve()
     task_root = (RESULT_DIR / task_id).resolve()
@@ -408,7 +491,12 @@ def main() -> int:
         raise SystemExit("EVAVO_GATEWAY_PORT must be between 1 and 65535")
     import uvicorn
 
-    uvicorn.run(app, host=GATEWAY_HOST, port=GATEWAY_PORT, log_level=os.getenv("EVAVO_GATEWAY_LOG_LEVEL", "info"))
+    uvicorn.run(
+        app,
+        host=GATEWAY_HOST,
+        port=GATEWAY_PORT,
+        log_level=os.getenv("EVAVO_GATEWAY_LOG_LEVEL", "info"),
+    )
     return 0
 
 
