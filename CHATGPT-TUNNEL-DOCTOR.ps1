@@ -62,8 +62,41 @@ $binary = if ($state -and $state.tunnel_client) { [string]$state.tunnel_client }
 if (-not $binary -or -not (Test-Path $binary)) {
     $binary = Join-Path $PSScriptRoot ".evavo\tools\tunnel-client.exe"
 }
-$binaryOk = Test-Path $binary
-if ($binaryOk) {
+$binaryExists = Test-Path $binary
+Add-Check "tunnel_client_file" $binaryExists ($(if ($binaryExists) { $binary } else { "missing; run INSTALL-CHATGPT-MCP-TUNNEL.ps1" }))
+
+$binaryIntegrityOk = $false
+$binaryIntegrityDetail = "not checked"
+$metadataPath = Join-Path $PSScriptRoot ".evavo\tools\tunnel-client-install.json"
+if ($binaryExists -and (Test-Path $metadataPath)) {
+    try {
+        $metadata = Get-Content $metadataPath -Raw | ConvertFrom-Json
+        $expectedBinaryHash = [string]$metadata.binary_digest
+        if ($expectedBinaryHash -match '^[0-9a-f]{64}$') {
+            $actualBinaryHash = (Get-FileHash -Path $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            $binaryIntegrityOk = $actualBinaryHash -eq $expectedBinaryHash
+            $binaryIntegrityDetail = if ($binaryIntegrityOk) {
+                "executable SHA-256 matches verified-install metadata"
+            }
+            else {
+                "executable SHA-256 mismatch; reinstall tunnel-client"
+            }
+        }
+        else {
+            $binaryIntegrityDetail = "verified-install metadata is missing a valid binary_digest; rerun installer"
+        }
+    }
+    catch {
+        $binaryIntegrityDetail = "unable to validate executable integrity: $($_.Exception.Message)"
+    }
+}
+elif ($binaryExists) {
+    $binaryIntegrityDetail = "verified-install metadata missing; rerun INSTALL-CHATGPT-MCP-TUNNEL.ps1"
+}
+Add-Check "tunnel_client_integrity" $binaryIntegrityOk $binaryIntegrityDetail
+
+$binaryOk = $false
+if ($binaryIntegrityOk) {
     try {
         & $binary help quickstart *> $null
         $binaryOk = $LASTEXITCODE -eq 0
@@ -72,7 +105,7 @@ if ($binaryOk) {
         $binaryOk = $false
     }
 }
-Add-Check "tunnel_client" $binaryOk ($(if ($binaryOk) { $binary } else { "missing or not executable; run INSTALL-CHATGPT-MCP-TUNNEL.ps1" }))
+Add-Check "tunnel_client_exec" $binaryOk ($(if ($binaryOk) { "hash-verified executable smoke check passed" } else { "not executable/verified; rerun INSTALL-CHATGPT-MCP-TUNNEL.ps1" }))
 
 $localMcpOk = $false
 $localMcpDetail = "not checked"
