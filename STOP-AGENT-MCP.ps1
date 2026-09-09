@@ -13,8 +13,8 @@ Set-Location $PSScriptRoot
 if ($Port -lt 1 -or $Port -gt 65535) {
     throw "MCP port must be between 1 and 65535."
 }
-if (-not $Path.StartsWith("/")) {
-    throw "MCP path must start with '/'."
+if (-not $Path.StartsWith("/") -or $Path.Length -gt 256 -or $Path.Contains("?") -or $Path.Contains("#") -or $Path.Contains([char]0)) {
+    throw "MCP path must be an absolute path up to 256 characters and must not contain ?, #, or NUL."
 }
 
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
