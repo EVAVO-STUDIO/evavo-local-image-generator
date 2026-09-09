@@ -24,6 +24,11 @@ if (-not $Path.StartsWith("/")) {
     throw "Path must start with '/'."
 }
 
+# HTTP MCP is permitted to provision the official ComfyUI runtime when missing.
+# Model sources remain operator-controlled through environment variables; no
+# arbitrary checkpoint URL is accepted from an MCP tool argument.
+$env:EVAVO_AUTO_PROVISION_COMFYUI = "1"
+
 # Avoid duplicate login/manual listeners and never take over an unrelated port.
 $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($listener) {
@@ -60,6 +65,6 @@ if ($JsonResponse) {
 }
 
 Write-Host "Starting EVAVO MCP at http://127.0.0.1:$Port$Path" -ForegroundColor Green
-Write-Host "Native ComfyUI will auto-start on the first tool call when EVAVO can locate it." -ForegroundColor Green
+Write-Host "Native ComfyUI will auto-start or be provisioned on the first tool call when required." -ForegroundColor Green
 & $python @argsList
 exit $LASTEXITCODE
