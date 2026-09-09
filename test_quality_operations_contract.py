@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent
 QUALITY_PYTHON = (
     "quality-benchmark.py",
     "quality-report.py",
+    "lora-sweep.py",
     "kokoro-quality-test.py",
     "kokoro-provider.py",
 )
@@ -22,6 +23,7 @@ QUALITY_PYTHON = (
 QUALITY_POWERSHELL = (
     "RUN-PRODUCTION-QUALITY.ps1",
     "RUN-HERO-QUALITY.ps1",
+    "RUN-LORA-SWEEP.ps1",
     "RUN-FULL-QUALITY-RELEASE.ps1",
     "START-EVAVO-QUALITY-STACK.ps1",
     "SETUP-COMFYUI-NEXT.ps1",
@@ -101,7 +103,7 @@ class QualityOperationsContractTests(unittest.TestCase):
                     f"PowerShell parse failed for {relative}: {result.stderr or result.stdout}",
                 )
 
-    def test_wrapper_forwards_hero_and_second_pass_controls(self):
+    def test_wrapper_forwards_hero_lora_and_second_pass_controls(self):
         module = _load_wrapper_module()
         payload = {
             "prompt": "quality wrapper regression",
@@ -117,6 +119,9 @@ class QualityOperationsContractTests(unittest.TestCase):
             "second_pass_scheduler": "karras",
             "second_pass_denoise": 0.24,
             "latent_upscale_method": "bislerp",
+            "lora_name": "detail-style.safetensors",
+            "lora_model_strength": 0.7,
+            "lora_clip_strength": 0.6,
         }
         FakeComfyUIBackend.last_kwargs = None
         with patch.object(
@@ -144,6 +149,14 @@ class QualityOperationsContractTests(unittest.TestCase):
         self.assertIn("quality-benchmark.py", source)
         self.assertIn("quality-report.py", source)
         self.assertIn("human_review.csv", source)
+
+    def test_lora_runner_keeps_base_and_fixed_strengths(self):
+        source = (ROOT / "RUN-LORA-SWEEP.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn('"0,0.5,0.7,0.9"', source)
+        self.assertIn("lora-sweep.py", source)
+        self.assertIn("quality-report.py", source)
+        self.assertIn("human_review.csv", source)
+        self.assertIn("test_quality_profiles.py", source)
 
     def test_full_release_runs_system_gate_before_expensive_hero_review(self):
         source = (ROOT / "RUN-FULL-QUALITY-RELEASE.ps1").read_text(encoding="utf-8-sig")
