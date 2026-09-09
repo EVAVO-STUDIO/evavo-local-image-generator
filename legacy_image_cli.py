@@ -63,6 +63,11 @@ def compatibility_main(
     if args.concurrency < 1 or args.concurrency > 16:
         parser.error("--concurrency must be between 1 and 16")
 
+    generation_requested = bool(args.prompts or args.examples)
+    explicit_maintenance = bool(args.verify or args.repair)
+    if not generation_requested and not explicit_maintenance:
+        parser.error("provide --prompts or explicit --examples; legacy launchers no longer start surprise generation or provisioning jobs")
+
     if verify_first or args.verify:
         code = _verify()
         if code != 0:
@@ -72,11 +77,9 @@ def compatibility_main(
         if code != 0:
             return code
 
-    if not args.prompts and not args.examples:
-        if verify_first or repair_first or args.verify or args.repair:
-            print("EVAVO verification/readiness completed. No image generation was requested.")
-            return 0
-        parser.error("provide --prompts or explicit --examples; legacy launchers no longer start surprise generation jobs")
+    if not generation_requested:
+        print("EVAVO verification/readiness completed. No image generation was requested.")
+        return 0
 
     command: List[str] = [
         sys.executable,
