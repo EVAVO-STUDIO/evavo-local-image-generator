@@ -69,6 +69,7 @@ def _config_float(name: str, default: float, minimum: float, maximum: float, *, 
 
 STATE_DIR = Path(os.getenv("EVAVO_GATEWAY_STATE_DIR", str(ROOT / ".evavo" / "gateway"))).expanduser().resolve()
 TASK_STATE_FILE = Path(os.getenv("EVAVO_GATEWAY_TASK_FILE", str(STATE_DIR / "tasks.json"))).expanduser().resolve()
+GATEWAY_INSTANCE_LOCK = TASK_STATE_FILE.with_suffix(TASK_STATE_FILE.suffix + ".instance.lock")
 RESULT_DIR = Path(os.getenv("EVAVO_GATEWAY_RESULT_DIR", str(STATE_DIR / "results"))).expanduser().resolve()
 COMFYUI_ENDPOINT = (os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
 GATEWAY_HOST = os.getenv("EVAVO_GATEWAY_HOST", "127.0.0.1").strip()
@@ -540,15 +541,21 @@ async def _queue(prefix: str, kind: str, request: GenerationRequest) -> TaskQueu
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    RESULT_DIR.mkdir(parents=True, exist_ok=True)
-    await STORE.recover_interrupted()
-    yield
-    pending = list(_BACKGROUND_TASKS)
-    for task in pending:
-        task.cancel()
-    if pending:
-        await asyncio.gather(*pending, return_exceptions=True)
+    try:
+        with interprocess_lock(GATEWAY_INSTANCE_LOCK, timeout=0.25):
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            RESULT_DIR.mkdir(parents=True, exist_ok=True)
+            await STORE.recover_interrupted()
+            try:
+                yield
+            finally:
+                pending = list(_BACKGROUND_TASKS)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+    except TimeoutError as exc:
+        raise RuntimeError(f"GATEWAY_STATE_IN_USE:{TASK_STATE_FILE}") from exc
 
 
 def _configured_cors_origins() -> list[str]:
@@ -578,7 +585,7 @@ def _configured_cors_origins() -> list[str]:
 
 app = FastAPI(
     title="EVAVO Unified Generator",
-    version="2.3.0",
+    version="2.4.0",
     description="Stable local image gateway with governed auxiliary provider delegation for ChatGPT, Claude, MCP and HTTP clients.",
     lifespan=lifespan,
 )
