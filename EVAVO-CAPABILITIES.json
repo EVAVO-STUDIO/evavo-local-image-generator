@@ -64,7 +64,8 @@
         "uses_selected_comfyui_python": true,
         "shell_execution": false,
         "structured_receipt": true,
-        "force_sync_explicit_only": true
+        "force_sync_owner_environment": "EVAVO_ALLOW_FORCED_DEPENDENCY_REPAIR",
+        "force_sync_requires_owner_authorization": true
       },
       "generation_status": {
         "source": ["GET /api/jobs/<job_id>", "GET /history/<prompt_id>", "GET /queue"],
@@ -141,6 +142,7 @@
     "optional_runtime_provisioning": true,
     "bounded_dependency_repair": true,
     "dependency_repair_requires_structured_evidence_by_default": true,
+    "forced_dependency_repair_requires_owner_authorization": true,
     "optional_checkpoint_repair": true,
     "shared_model_roots": true,
     "custom_workflow_preflight": true,
@@ -183,6 +185,7 @@
     "mcp_dependency_repair_arbitrary_comfyui_path_allowed": false,
     "mcp_dependency_repair_custom_node_core_sync_allowed": false,
     "mcp_dependency_repair_shell_execution": false,
+    "mcp_force_sync_requires_owner_authorization": true,
     "broad_python_process_kill": false,
     "managed_process_identity_verification": true,
     "user_managed_comfyui_never_killed": true,
