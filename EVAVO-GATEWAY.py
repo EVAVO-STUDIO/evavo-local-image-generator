@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import tempfile
@@ -27,16 +28,6 @@ from evavo_local_image_generator.backends import ComfyUIBackend
 from evavo_local_image_generator.comfyui_runtime import ensure_comfyui, native_health
 
 ROOT = Path(__file__).resolve().parent
-STATE_DIR = Path(os.getenv("EVAVO_GATEWAY_STATE_DIR", str(ROOT / ".evavo" / "gateway"))).expanduser().resolve()
-TASK_STATE_FILE = Path(os.getenv("EVAVO_GATEWAY_TASK_FILE", str(STATE_DIR / "tasks.json"))).expanduser().resolve()
-RESULT_DIR = Path(os.getenv("EVAVO_GATEWAY_RESULT_DIR", str(STATE_DIR / "results"))).expanduser().resolve()
-COMFYUI_ENDPOINT = (os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
-GATEWAY_HOST = os.getenv("EVAVO_GATEWAY_HOST", "127.0.0.1")
-GATEWAY_PORT = int(os.getenv("EVAVO_GATEWAY_PORT", "8000"))
-MAX_PROMPT_CHARS = max(1, min(int(os.getenv("EVAVO_GATEWAY_MAX_PROMPT_CHARS", "100000")), 1_000_000))
-MAX_REQUEST_BYTES = max(4096, min(int(os.getenv("EVAVO_GATEWAY_MAX_REQUEST_BYTES", str(1024 * 1024))), 16 * 1024 * 1024))
-MAX_PROJECT_CHARS = max(1, min(int(os.getenv("EVAVO_GATEWAY_MAX_PROJECT_CHARS", "128")), 1024))
-IMAGE_TIMEOUT_SECONDS = max(1.0, min(float(os.getenv("EVAVO_GATEWAY_IMAGE_TIMEOUT", "600")), 86400.0))
 TASK_ID_RE = re.compile(r"^(img|vid|aud|3d)_\d+$")
 LOOPBACK_ORIGIN_RE = re.compile(r"^https?://(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$", re.IGNORECASE)
 
@@ -48,14 +39,62 @@ def _env_true(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-class RequestBodyLimitMiddleware:
-    """Reject oversized HTTP request bodies before FastAPI/Pydantic parsing.
+def _config_int(name: str, default: int, minimum: int, maximum: int, *, clamp: bool) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"GATEWAY_CONFIG_INVALID:{name}:expected an integer, got {raw!r}") from exc
+    if clamp:
+        return max(minimum, min(maximum, value))
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"GATEWAY_CONFIG_INVALID:{name}:must be between {minimum} and {maximum}")
+    return value
 
-    Content-Length is rejected immediately when present. Bodies without a
-    trustworthy length (including chunked transfer encoding) are consumed only
-    up to the configured cap and then replayed to the application. This keeps
-    the ingress memory bound aligned with the gateway's request contract.
-    """
+
+def _config_float(name: str, default: float, minimum: float, maximum: float, *, clamp: bool) -> float:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"GATEWAY_CONFIG_INVALID:{name}:expected a number, got {raw!r}") from exc
+    if not math.isfinite(value):
+        raise RuntimeError(f"GATEWAY_CONFIG_INVALID:{name}:value must be finite")
+    if clamp:
+        return max(minimum, min(maximum, value))
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"GATEWAY_CONFIG_INVALID:{name}:must be between {minimum:g} and {maximum:g}")
+    return value
+
+
+STATE_DIR = Path(os.getenv("EVAVO_GATEWAY_STATE_DIR", str(ROOT / ".evavo" / "gateway"))).expanduser().resolve()
+TASK_STATE_FILE = Path(os.getenv("EVAVO_GATEWAY_TASK_FILE", str(STATE_DIR / "tasks.json"))).expanduser().resolve()
+RESULT_DIR = Path(os.getenv("EVAVO_GATEWAY_RESULT_DIR", str(STATE_DIR / "results"))).expanduser().resolve()
+COMFYUI_ENDPOINT = (os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
+GATEWAY_HOST = os.getenv("EVAVO_GATEWAY_HOST", "127.0.0.1").strip()
+GATEWAY_PORT = _config_int("EVAVO_GATEWAY_PORT", 8000, 1, 65535, clamp=False)
+MAX_PROMPT_CHARS = _config_int("EVAVO_GATEWAY_MAX_PROMPT_CHARS", 100000, 1, 1_000_000, clamp=True)
+MAX_REQUEST_BYTES = _config_int("EVAVO_GATEWAY_MAX_REQUEST_BYTES", 1024 * 1024, 4096, 16 * 1024 * 1024, clamp=True)
+MAX_PROJECT_CHARS = _config_int("EVAVO_GATEWAY_MAX_PROJECT_CHARS", 128, 1, 1024, clamp=True)
+IMAGE_TIMEOUT_SECONDS = _config_float("EVAVO_GATEWAY_IMAGE_TIMEOUT", 600.0, 1.0, 86400.0, clamp=True)
+REQUEST_WORKFLOW_PATHS_ALLOWED = _env_true("EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS", False)
+WORKFLOW_ROOT_RAW = os.getenv("EVAVO_GATEWAY_WORKFLOW_ROOT", "").strip()
+REQUEST_WORKFLOW_ROOT: Optional[Path] = None
+if REQUEST_WORKFLOW_PATHS_ALLOWED:
+    if not WORKFLOW_ROOT_RAW:
+        raise RuntimeError(
+            "GATEWAY_CONFIG_INVALID:EVAVO_GATEWAY_WORKFLOW_ROOT:required when EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS=1"
+        )
+    try:
+        REQUEST_WORKFLOW_ROOT = Path(WORKFLOW_ROOT_RAW).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"GATEWAY_CONFIG_INVALID:EVAVO_GATEWAY_WORKFLOW_ROOT:{exc}") from exc
+    if not REQUEST_WORKFLOW_ROOT.is_dir():
+        raise RuntimeError("GATEWAY_CONFIG_INVALID:EVAVO_GATEWAY_WORKFLOW_ROOT:must be an existing directory")
+
+
+class RequestBodyLimitMiddleware:
+    """Reject oversized HTTP request bodies before FastAPI/Pydantic parsing."""
 
     def __init__(self, app: Any, max_bytes: int):
         self.app = app
@@ -312,7 +351,32 @@ def _bounded_wait_timeout(value: Any) -> float:
         parsed = float(value)
     except (TypeError, ValueError):
         parsed = IMAGE_TIMEOUT_SECONDS
+    if not math.isfinite(parsed):
+        return IMAGE_TIMEOUT_SECONDS
     return max(1.0, min(parsed, 86400.0))
+
+
+def _request_workflow_path(value: Any) -> Optional[str]:
+    if value is None or not str(value).strip():
+        return None
+    if not REQUEST_WORKFLOW_PATHS_ALLOWED:
+        raise HTTPException(
+            status_code=403,
+            detail="per-request workflow_path is disabled; configure EVAVO_COMFYUI_WORKFLOW or explicitly enable EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS with EVAVO_GATEWAY_WORKFLOW_ROOT",
+        )
+    if REQUEST_WORKFLOW_ROOT is None:
+        raise HTTPException(status_code=500, detail="gateway workflow-root configuration is unavailable")
+    try:
+        candidate = Path(str(value)).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise HTTPException(status_code=422, detail=f"workflow_path is unavailable: {exc}") from exc
+    try:
+        candidate.relative_to(REQUEST_WORKFLOW_ROOT)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="workflow_path is outside EVAVO_GATEWAY_WORKFLOW_ROOT") from exc
+    if not candidate.is_file():
+        raise HTTPException(status_code=422, detail="workflow_path must resolve to an existing file")
+    return str(candidate)
 
 
 async def _track_add(task: Dict[str, Any]) -> None:
@@ -442,11 +506,12 @@ async def _queue(prefix: str, kind: str, request: GenerationRequest) -> TaskQueu
         raise HTTPException(status_code=422, detail="prompt must not be whitespace only")
     project_name = str(payload.get("project_name", "gateway")).strip()[:MAX_PROJECT_CHARS] or "gateway"
     payload["project_name"] = project_name
-    if kind == "image" and payload.get("workflow_path") and not _env_true("EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS", False):
-        raise HTTPException(
-            status_code=403,
-            detail="per-request workflow_path is disabled; configure EVAVO_COMFYUI_WORKFLOW or explicitly enable EVAVO_GATEWAY_ALLOW_REQUEST_WORKFLOW_PATHS",
-        )
+    if kind == "image":
+        workflow_path = _request_workflow_path(payload.get("workflow_path"))
+        if workflow_path:
+            payload["workflow_path"] = workflow_path
+        else:
+            payload.pop("workflow_path", None)
     try:
         encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError) as exc:
@@ -492,7 +557,18 @@ def _configured_cors_origins() -> list[str]:
     if not raw:
         return []
     origins = [item.strip().rstrip("/") for item in raw.split(",") if item.strip()]
-    invalid = [origin for origin in origins if origin == "*" or not LOOPBACK_ORIGIN_RE.fullmatch(origin)]
+    invalid: list[str] = []
+    for origin in origins:
+        if origin == "*" or not LOOPBACK_ORIGIN_RE.fullmatch(origin):
+            invalid.append(origin)
+            continue
+        from urllib.parse import urlparse
+
+        try:
+            parsed = urlparse(origin)
+            _ = parsed.port
+        except ValueError:
+            invalid.append(origin)
     if invalid:
         raise RuntimeError(
             "EVAVO_GATEWAY_CORS_ORIGINS accepts only explicit loopback http/https origins; invalid: " + ", ".join(invalid)
@@ -502,7 +578,7 @@ def _configured_cors_origins() -> list[str]:
 
 app = FastAPI(
     title="EVAVO Unified Generator",
-    version="2.2.0",
+    version="2.3.0",
     description="Stable local image gateway with governed auxiliary provider delegation for ChatGPT, Claude, MCP and HTTP clients.",
     lifespan=lifespan,
 )
@@ -665,8 +741,6 @@ async def progress_socket(websocket: WebSocket, task_id: str) -> None:
 def main() -> int:
     if GATEWAY_HOST not in {"127.0.0.1", "localhost", "::1"}:
         raise SystemExit("EVAVO_GATEWAY_HOST is restricted to loopback (127.0.0.1/localhost/::1)")
-    if not 1 <= GATEWAY_PORT <= 65535:
-        raise SystemExit("EVAVO_GATEWAY_PORT must be between 1 and 65535")
     import uvicorn
 
     uvicorn.run(
