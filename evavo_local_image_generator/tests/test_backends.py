@@ -1,40 +1,57 @@
-"""
-Unit tests for EVAVO backend service integrations.
+"""Offline package tests for the current backend contract."""
 
-Tests verify:
-- Backend initialization
-- Service endpoint configuration
-- Health check functionality
-"""
+from __future__ import annotations
 
+import os
 import unittest
-from evavo_local_image_generator.backends import (
-    ComfyUIBackend, OllamaBackend, KokoroBackend
-)
+from pathlib import Path
+from unittest.mock import patch
 
-class TestComfyUIBackend(unittest.TestCase):
-    """Test ComfyUI backend integration."""
-    
-    def test_initialization(self):
-        """Test ComfyUIBackend initializes with endpoint."""
+from evavo_local_image_generator.backends import ComfyUIBackend, KokoroBackend, OllamaBackend
+from evavo_local_image_generator.backends.comfyui_backend import MODEL_LOADER_INPUTS
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+class ComfyUIBackendTests(unittest.TestCase):
+    def test_explicit_endpoint_initialization(self) -> None:
         backend = ComfyUIBackend(endpoint="http://127.0.0.1:8188")
         self.assertEqual(backend.endpoint, "http://127.0.0.1:8188")
 
-class TestOllamaBackend(unittest.TestCase):
-    """Test Ollama backend integration."""
-    
-    def test_initialization(self):
-        """Test OllamaBackend initializes with endpoint."""
-        backend = OllamaBackend(endpoint="http://127.0.0.1:11434")
-        self.assertEqual(backend.endpoint, "http://127.0.0.1:11434")
+    def test_default_endpoint_is_loopback(self) -> None:
+        env = os.environ.copy()
+        env.pop("COMFYUI_ENDPOINT", None)
+        env.pop("EVAVO_COMFYUI_ENDPOINT", None)
+        with patch.dict(os.environ, env, clear=True):
+            backend = ComfyUIBackend()
+        self.assertEqual(backend.endpoint, "http://127.0.0.1:8188")
 
-class TestKokoroBackend(unittest.TestCase):
-    """Test Kokoro backend integration."""
-    
-    def test_initialization(self):
-        """Test KokoroBackend initializes with endpoint."""
-        backend = KokoroBackend(endpoint="http://127.0.0.1:8000")
-        self.assertEqual(backend.endpoint, "http://127.0.0.1:8000")
+    def test_model_inventory_covers_current_loader_categories(self) -> None:
+        expected = {
+            "checkpoints",
+            "loras",
+            "vae",
+            "controlnet",
+            "diffusion_models",
+            "text_encoders",
+            "clip_vision",
+            "upscale_models",
+        }
+        self.assertEqual(set(MODEL_LOADER_INPUTS), expected)
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_mcp_server_does_not_import_legacy_non_image_backends(self) -> None:
+        source = (ROOT / "evavo_local_image_generator" / "mcp_server.py").read_text(encoding="utf-8")
+        self.assertNotIn("OllamaBackend", source)
+        self.assertNotIn("KokoroBackend", source)
+
+
+class LegacyBackendCompatibilityTests(unittest.TestCase):
+    def test_legacy_helpers_remain_importable_without_becoming_dependencies(self) -> None:
+        ollama = OllamaBackend(endpoint="http://127.0.0.1:11434")
+        kokoro = KokoroBackend(endpoint="http://127.0.0.1:8880")
+        self.assertEqual(ollama.endpoint, "http://127.0.0.1:11434")
+        self.assertEqual(kokoro.endpoint, "http://127.0.0.1:8880")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
