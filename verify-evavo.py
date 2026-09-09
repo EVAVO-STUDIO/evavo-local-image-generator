@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -20,6 +21,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parent
+DEFAULT_TEST_TIMEOUT_SECONDS = 300.0
+MIN_TEST_TIMEOUT_SECONDS = 10.0
+MAX_TEST_TIMEOUT_SECONDS = 1800.0
 
 CRITICAL_FILES: Sequence[str] = (
     ".mcp.json",
@@ -45,6 +49,8 @@ CRITICAL_FILES: Sequence[str] = (
     "evavo_local_image_generator/provider_runner.py",
     "evavo_local_image_generator/backends/comfyui_backend.py",
     "evavo_local_image_generator/comfyui_runtime.py",
+    "evavo_local_image_generator/comfyui_status.py",
+    "evavo_local_image_generator/comfyui_cancel.py",
     "evavo_local_image_generator/mcp_server.py",
     "UPDATE-AND-VERIFY-EVAVO.ps1",
     "INSTALL-CLAUDE-MCP.ps1",
@@ -191,21 +197,30 @@ def _result(name: str, ok: bool, detail: str, *, severity: str = "error", skippe
     return {"name": name, "ok": ok, "severity": severity, "skipped": skipped, "detail": detail}
 
 
+def _test_timeout(value: Any) -> float:
+    try:
+        timeout = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("test timeout must be a number") from exc
+    if not math.isfinite(timeout) or timeout < MIN_TEST_TIMEOUT_SECONDS or timeout > MAX_TEST_TIMEOUT_SECONDS:
+        raise ValueError(
+            f"test timeout must be finite and between {MIN_TEST_TIMEOUT_SECONDS:g} and {MAX_TEST_TIMEOUT_SECONDS:g} seconds"
+        )
+    return timeout
+
+
 def discover_tests() -> List[str]:
     """Discover every maintained Python test surface deterministically."""
     paths = [path for path in ROOT.glob("test-*.py") if path.is_file()]
     paths.extend(path for path in ROOT.glob("test_*.py") if path.is_file())
-
     repository_tests = ROOT / "tests"
     if repository_tests.is_dir():
         paths.extend(path for path in repository_tests.glob("test_*.py") if path.is_file())
         paths.extend(path for path in repository_tests.glob("test-*.py") if path.is_file())
-
     package_tests = ROOT / "evavo_local_image_generator" / "tests"
     if package_tests.is_dir():
         paths.extend(path for path in package_tests.glob("test_*.py") if path.is_file())
         paths.extend(path for path in package_tests.glob("test-*.py") if path.is_file())
-
     return sorted({path.relative_to(ROOT).as_posix() for path in paths})
 
 
@@ -307,7 +322,6 @@ def verify_powershell_syntax(require: bool) -> Dict[str, Any]:
             severity=severity,
             skipped=not require,
         )
-
     failures: List[str] = []
     checked = 0
     for name in POWERSHELL_SCRIPTS:
@@ -337,14 +351,14 @@ def verify_powershell_syntax(require: bool) -> Dict[str, Any]:
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip().replace("\n", " | ")
             failures.append(f"{name}: {detail[-1200:] or f'exit {completed.returncode}'}")
-
     detail = f"parsed {checked} PowerShell scripts with {executable}"
     if failures:
         detail += "; failures: " + " | ".join(failures[:30])
     return _result("powershell_syntax", not failures, detail)
 
 
-def run_tests(tests: Iterable[str]) -> List[Dict[str, Any]]:
+def run_tests(tests: Iterable[str], *, timeout_seconds: float) -> List[Dict[str, Any]]:
+    timeout_seconds = _test_timeout(timeout_seconds)
     results: List[Dict[str, Any]] = []
     for name in tests:
         path = ROOT / name
@@ -357,10 +371,10 @@ def run_tests(tests: Iterable[str]) -> List[Dict[str, Any]]:
                 cwd=str(ROOT),
                 capture_output=True,
                 text=True,
-                timeout=900,
+                timeout=timeout_seconds,
             )
         except subprocess.TimeoutExpired:
-            results.append(_result(f"test:{name}", False, "timed out after 900 seconds"))
+            results.append(_result(f"test:{name}", False, f"timed out after {timeout_seconds:g} seconds"))
             continue
         except OSError as exc:
             results.append(_result(f"test:{name}", False, str(exc)))
@@ -371,7 +385,8 @@ def run_tests(tests: Iterable[str]) -> List[Dict[str, Any]]:
     return results
 
 
-def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
+def verify(*, full: bool, require_powershell: bool, test_timeout: float = DEFAULT_TEST_TIMEOUT_SECONDS) -> Dict[str, Any]:
+    timeout_seconds = _test_timeout(test_timeout)
     tests = discover_tests()
     checks = [verify_files(), verify_python_compile(), verify_legacy_entrypoints(), verify_powershell_syntax(require_powershell)]
     if full:
@@ -379,10 +394,14 @@ def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
             _result(
                 "test_inventory",
                 bool(tests),
-                f"discovered {len(tests)} suites: {', '.join(tests)}" if tests else "no modern test suites found",
+                (
+                    f"discovered {len(tests)} suites; timeout={timeout_seconds:g}s each: {', '.join(tests)}"
+                    if tests
+                    else "no modern test suites found"
+                ),
             )
         )
-        checks.extend(run_tests(tests))
+        checks.extend(run_tests(tests, timeout_seconds=timeout_seconds))
     hard_failures = [item for item in checks if not item["ok"] and item["severity"] == "error"]
     warnings = [item for item in checks if not item["ok"] and item["severity"] == "warning"]
     return {
@@ -391,6 +410,7 @@ def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
         "root": str(ROOT),
         "python": sys.executable,
         "full": full,
+        "test_timeout_seconds": timeout_seconds,
         "discovered_tests": tests,
         "checks": checks,
     }
@@ -400,10 +420,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Verify EVAVO repository/runtime contracts without mutating workstation configuration")
     parser.add_argument("--full", action="store_true", help="Run every discovered root/repository/package safety and integration suite")
     parser.add_argument("--require-powershell", action="store_true", help="Fail when PowerShell is unavailable instead of reporting a skipped warning")
+    parser.add_argument(
+        "--test-timeout",
+        type=float,
+        default=os.getenv("EVAVO_VERIFY_TEST_TIMEOUT", str(DEFAULT_TEST_TIMEOUT_SECONDS)),
+        help=f"Per-suite timeout in seconds ({MIN_TEST_TIMEOUT_SECONDS:g}-{MAX_TEST_TIMEOUT_SECONDS:g}; default {DEFAULT_TEST_TIMEOUT_SECONDS:g})",
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     args = parser.parse_args()
-
-    payload = verify(full=args.full, require_powershell=args.require_powershell)
+    try:
+        timeout_seconds = _test_timeout(args.test_timeout)
+    except ValueError as exc:
+        parser.error(str(exc))
+    payload = verify(full=args.full, require_powershell=args.require_powershell, test_timeout=timeout_seconds)
     if args.json:
         print(json.dumps(payload, indent=2))
     else:
