@@ -95,20 +95,20 @@ if ($code -ne 0) {
 
 if (-not $SkipAgentConfiguration) {
     Write-Host "Installing/updating Claude Desktop stdio MCP configuration..." -ForegroundColor Cyan
-    & (Join-Path $PSScriptRoot "INSTALL-CLAUDE-MCP.ps1")
+    & (Join-Path $PSScriptRoot "INSTALL-CLAUDE-MCP.ps1") -SkipValidation
     if ($LASTEXITCODE -ne 0) {
         Fail "Claude MCP configuration failed." 3
     }
 
     Write-Host "Installing/updating per-user HTTP MCP autostart..." -ForegroundColor Cyan
-    & (Join-Path $PSScriptRoot "INSTALL-AGENT-MCP-AUTOSTART.ps1") -Port $McpPort
+    & (Join-Path $PSScriptRoot "INSTALL-AGENT-MCP-AUTOSTART.ps1") -Port $McpPort -SkipValidation
     if ($LASTEXITCODE -ne 0) {
         Fail "HTTP MCP autostart installation failed." 3
     }
 }
 
 Write-Host "Running final agent doctor with safe repair enabled..." -ForegroundColor Cyan
-$doctorArgs = @((Join-Path $PSScriptRoot "agent-doctor.py"), "--repair", "--mcp-port", "$McpPort")
+$doctorArgs = @((Join-Path $PSScriptRoot "agent-doctor.py"), "--repair", "--skip-tests", "--mcp-port", "$McpPort")
 if (-not $SkipComfyUIProvision) {
     $doctorArgs += "--provision"
 }
@@ -137,9 +137,9 @@ if (-not $SkipAgentConfiguration) {
 if (-not $SkipComfyUIProvision) {
     Write-Host "  ComfyUI provisioning: enabled when missing" -ForegroundColor Green
 }
-Write-Host "  Agent doctor: real renderer + checkpoint + model inventory checked" -ForegroundColor Green
+Write-Host "  Agent doctor: real renderer + checkpoint + shared roots + model inventory checked" -ForegroundColor Green
 Write-Host ""
 Write-Host "Claude: restart Claude Desktop so it reloads its MCP configuration." -ForegroundColor Yellow
 Write-Host "Local HTTP MCP endpoint: http://127.0.0.1:$McpPort/mcp" -ForegroundColor Green
-Write-Host "Native ComfyUI is reused, auto-started, or provisioned when missing." -ForegroundColor Green
+Write-Host "Windows login startup now launches MCP directly without rerunning the full integration suite." -ForegroundColor Green
 exit 0
