@@ -3,7 +3,7 @@
 
 This verifier is intentionally read-only. It checks the critical repository
 contract, compiles Python sources in memory, optionally asks PowerShell to parse
-the canonical Windows scripts, and can run every root ``test-*.py`` suite.
+the canonical Windows scripts, and can run every modern root/package test suite.
 """
 
 from __future__ import annotations
@@ -38,6 +38,8 @@ CRITICAL_FILES: Sequence[str] = (
     "test-agent-integration.py",
     "test-agent-doctor-workflows.py",
     "test-chatgpt-tunnel.py",
+    "evavo_local_image_generator/tests/test_backends.py",
+    "evavo_local_image_generator/tests/test_generators.py",
     "UPDATE-AND-VERIFY-EVAVO.ps1",
     "INSTALL-CLAUDE-MCP.ps1",
     "START-AGENT-MCP.ps1",
@@ -74,8 +76,12 @@ def _result(name: str, ok: bool, detail: str, *, severity: str = "error", skippe
 
 
 def discover_tests() -> List[str]:
-    """Discover every root integration/safety suite by repository naming contract."""
-    return sorted(path.name for path in ROOT.glob("test-*.py") if path.is_file())
+    """Discover modern tests by repository naming/location contract."""
+    paths = [path for path in ROOT.glob("test-*.py") if path.is_file()]
+    package_tests = ROOT / "evavo_local_image_generator" / "tests"
+    if package_tests.is_dir():
+        paths.extend(path for path in package_tests.glob("test_*.py") if path.is_file())
+    return sorted(path.relative_to(ROOT).as_posix() for path in paths)
 
 
 def _critical_python_files() -> List[Path]:
@@ -207,7 +213,7 @@ def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
             _result(
                 "test_inventory",
                 bool(tests),
-                f"discovered {len(tests)} root suites: {', '.join(tests)}" if tests else "no root test-*.py suites found",
+                f"discovered {len(tests)} suites: {', '.join(tests)}" if tests else "no modern test suites found",
             )
         )
         checks.extend(run_tests(tests))
@@ -226,7 +232,7 @@ def verify(*, full: bool, require_powershell: bool) -> Dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify EVAVO repository/runtime contracts without mutating workstation configuration")
-    parser.add_argument("--full", action="store_true", help="Run every discovered root test-*.py suite after structural checks")
+    parser.add_argument("--full", action="store_true", help="Run every discovered root/package modern test suite after structural checks")
     parser.add_argument("--require-powershell", action="store_true", help="Fail when PowerShell is unavailable instead of reporting a skipped warning")
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     args = parser.parse_args()
