@@ -1,54 +1,52 @@
 # EVAVO Provider Integration Guide
 
-## Current status
+## Ownership model
 
-`evavo-local-image-generator` is the production control plane for **local image generation only**. Its optional HTTP gateway does not currently dispatch video, audio, 3D, particle, text, or dedicated PBR-texture work to other repositories.
+`evavo-local-image-generator` owns and verifies **native image generation**. Native ComfyUI is its production renderer.
 
-That boundary is intentional. It prevents this repository from claiming a modality is queued or completed when another Studio has not actually executed it.
-
-## Gateway contract
-
-The compatibility gateway listens on loopback only:
+The optional HTTP gateway may additionally **delegate** video, audio and 3D requests to separately governed sibling EVAVO Studio providers. Delegation does not make those modalities owned capabilities of this repository, and they are not added to its MCP tool surface.
 
 ```text
-http://127.0.0.1:8000
+owned here:       image -> native ComfyUI
+delegated only:   video -> EVAVO Video Studio / reviewed provider
+                  audio -> reviewed Audio Studio provider
+                  3d    -> token-gated EVAVO 3D Studio worker
 ```
 
-Production behavior:
+## Fail-closed provider rule
 
-- `GET /health` requires a healthy native ComfyUI renderer;
-- `GET /capabilities` reports image availability truthfully;
-- `POST /generate/image` queues real native ComfyUI image work;
-- `POST /generate/video` returns HTTP `501`;
-- `POST /generate/audio` returns HTTP `501`;
-- `POST /generate/3d` returns HTTP `501`;
-- `/tasks`, `/tasks/{task_id}/status`, `/results/{task_id}` and WebSocket progress remain available for image tasks.
+A provider route may accept an asynchronous request with HTTP `202`, but that means only **accepted for processing**. Completion requires:
 
-The deterministic EVAVO mock is test infrastructure and cannot make the production gateway healthy.
+- a provider that is actually ready;
+- a bounded, reviewed execution interface;
+- a valid success receipt;
+- a real artifact;
+- path confinement to the admitted task workspace;
+- hash verification when supplied by the provider;
+- timeout/error handling.
 
-## Dedicated Studio ownership
+If those conditions are not satisfied, the gateway task moves to `failed` with a structured `PROVIDER_*` error. It must never invent task success or an output file.
 
-Non-image modalities belong to their dedicated EVAVO repositories. This repository must not silently shell out to them, fabricate provider task IDs, or promote their candidate artifacts as successful image-generator results.
+## Readiness
 
-If EVAVO needs a future cross-Studio orchestration layer, implement it as an explicit orchestration contract with its own:
+Core image readiness:
 
-- capability discovery;
-- provider identity/version checks;
-- request/receipt schemas;
-- authentication and authority boundaries;
-- task ownership and cancellation semantics;
-- artifact confinement and digest verification;
-- timeout/retry behavior;
-- end-to-end tests against the actual provider;
-- truthful unavailable/not-implemented responses.
+```text
+GET http://127.0.0.1:8000/health
+```
 
-Do not add a provider adapter to this gateway merely to preserve an old endpoint name.
+Per-provider readiness:
+
+```text
+GET http://127.0.0.1:8000/services
+GET http://127.0.0.1:8000/capabilities
+```
+
+Auxiliary availability is deliberately separate from core image health.
 
 ## Image provider
 
-Native ComfyUI is the one production provider in this repository.
-
-Default endpoint:
+Default native ComfyUI endpoint:
 
 ```text
 http://127.0.0.1:8188
@@ -60,42 +58,52 @@ Preferred environment variable:
 COMFYUI_ENDPOINT
 ```
 
-`EVAVO_COMFYUI_ENDPOINT` remains a legacy fallback alias.
+`EVAVO_COMFYUI_ENDPOINT` remains a compatibility fallback.
 
-The image path uses the shared `ComfyUIBackend` and native routes:
+The owned image path uses:
 
 ```text
 GET  /system_stats
-GET  /object_info
+GET  /object_info[/<node>]
 POST /prompt
 GET  /history/{prompt_id}
 GET  /view
 ```
 
-Custom ComfyUI API workflows are live-preflighted before queueing when configured.
+## Delegated CLI providers
+
+Where a Studio exposes a reviewed CLI provider, EVAVO accepts an **argument-array contract**, not an arbitrary shell command. The provider runner uses `asyncio.create_subprocess_exec`; `shell=True` is not used.
+
+The provider must emit a machine-readable success receipt and identify an artifact inside the provider task directory. Environment-specific details are documented in `GATEWAY-AUX-PROVIDERS.md`.
+
+## 3D provider
+
+The 3D route uses the existing governed 3D Studio worker contract: loopback endpoint, explicit execution enablement, workspace confinement and bearer token. EVAVO validates health/capabilities, compiles the job through the worker, submits it, polls status, accepts only the expected completion receipt, confines the artifact path and verifies its digest when present.
+
+The gateway does not promote a 3D candidate beyond the authority granted by the 3D Studio worker.
+
+## Security
+
+- gateway remains loopback-only;
+- CORS is disabled by default and wildcard/non-loopback origins are rejected;
+- no generic shell execution;
+- no fake success from exit code `0` alone;
+- provider stdout/stderr retention is bounded;
+- timeouts terminate provider children safely;
+- result path traversal/symlink escapes are rejected;
+- provider receipts remain internal task evidence;
+- unavailable providers fail closed.
 
 ## Verification
-
-Repository contract:
 
 ```powershell
 python evavo.py verify --full --require-powershell
 ```
 
-Gateway isolated integration test:
+The authoritative verifier runs both isolated gateway tests and the provider suites under `tests/`, including CLI provider success, output escape rejection, governed 3D worker flow and service-manager provider safety.
 
-```powershell
-python test-gateway.py
-```
+See:
 
-Live gateway smoke test after starting the real gateway/native renderer:
-
-```powershell
-python gateway-smoke-test.py
-```
-
-The tests verify that unsupported modalities fail explicitly rather than producing fake queued tasks.
-
-## Historical note
-
-Older revisions of this document described Video Studio/Wan, Audio Studio and 3D Studio provider adapters behind the unified gateway. That design is superseded. The current gateway source and `GATEWAY-INTEGRATION-GUIDE.md` are authoritative.
+- `GATEWAY-INTEGRATION-GUIDE.md` for the HTTP contract;
+- `GATEWAY-AUX-PROVIDERS.md` for provider-specific setup;
+- `EVAVO-CAPABILITIES.json` for the machine-readable ownership boundary.
