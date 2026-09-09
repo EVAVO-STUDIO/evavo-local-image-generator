@@ -177,19 +177,28 @@ See `GATEWAY-AUX-PROVIDERS.md` for the provider-specific controls.
 - HTTP `404` for an unknown task;
 - HTTP `410` if a recorded output is missing or violates the result-path authorization boundary.
 
-## Persistence
+## Persistence and live ownership
 
 ```text
 .evavo/gateway/tasks.json
 .evavo/gateway/tasks.json.lock
+.evavo/gateway/tasks.json.instance.lock
 .evavo/gateway/results/<task_id>/
 .evavo/gateway/logs/gateway.log
 .evavo/gateway/service-manager.json
 ```
 
-Gateway task state is atomically written and guarded by the public `evavo_operations.interprocess_lock` primitive also used by EVAVO task history. The older `_interprocess_lock` name remains only as an in-repository compatibility alias. Task-ID allocation and insertion occur inside one interprocess critical section, so two loopback gateway processes accidentally sharing a task file cannot reuse the same ID.
+Gateway task state is atomically written and guarded by the public `evavo_operations.interprocess_lock` primitive also used by EVAVO task history. The older `_interprocess_lock` name remains only as an in-repository compatibility alias. Task-ID allocation and insertion occur inside one mutation critical section, and all reads/mutations refresh persisted state under that lock.
 
-Reads refresh from the persisted state under the same lock. Interrupted queued/running gateway tasks are marked failed with `GATEWAY_RESTARTED` after restart instead of remaining falsely active.
+A separate lifetime **instance lock** protects recovery semantics: exactly one live gateway may own a given `tasks.json` at a time. A second gateway can run on another port only when it uses a different task-state file. If it points at the same task state, startup fails with:
+
+```text
+GATEWAY_STATE_IN_USE:<task-state-path>
+```
+
+This is deliberate. Allowing two live processes to share a task store would make `GATEWAY_RESTARTED`/orphan recovery ambiguous even if individual writes were serialized. The first gateway remains authoritative and continues running; the second process does not mutate the shared task state.
+
+Interrupted queued/running gateway tasks are marked failed with `GATEWAY_RESTARTED` after the owning gateway restarts instead of remaining falsely active.
 
 Malformed/corrupt `tasks.json` is **not** treated as an empty task store. Gateway startup fails with `GATEWAY_TASK_STATE_CORRUPT` (or a read error) and leaves the original file untouched for diagnosis/recovery instead of silently overwriting task history.
 
@@ -213,7 +222,7 @@ The authoritative verifier discovers root, `tests/`, and package suites:
 python evavo.py verify --full --require-powershell
 ```
 
-Coverage includes native image flow, unavailable-provider fail-closed behavior, provider receipt/output confinement and digest evidence, provider secret/state handling, service-manager ownership-state corruption, loopback binding, structured startup configuration errors, CORS defaults, declared and chunked request-size limits, workflow-root confinement, bounded project names, restart-safe task IDs, shared-task-file interprocess locking, and corrupt-state fail-closed startup.
+Coverage includes native image flow, unavailable-provider fail-closed behavior, provider receipt/output confinement and digest evidence, provider secret/state handling, service-manager ownership-state corruption, loopback binding, structured startup configuration errors, CORS defaults, declared and chunked request-size limits, workflow-root confinement, bounded project names, restart-safe task IDs, mutation locking, **single live gateway ownership per task state**, and corrupt-state fail-closed startup.
 
 For an already-running real gateway:
 
