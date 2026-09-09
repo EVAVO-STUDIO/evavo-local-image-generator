@@ -30,6 +30,7 @@ $stateDir = Join-Path $PSScriptRoot ".evavo"
 $toolsDir = Join-Path $stateDir "tools"
 $statePath = Join-Path $stateDir "chatgpt-tunnel.json"
 $binary = Join-Path $toolsDir "tunnel-client.exe"
+$metadataPath = Join-Path $toolsDir "tunnel-client-install.json"
 New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
 
 if (-not $TunnelId -and (Test-Path $statePath)) {
@@ -74,15 +75,26 @@ if (-not $asset.digest -or [string]$asset.digest -notmatch '^sha256:([0-9a-fA-F]
 $expectedHash = $Matches[1].ToLowerInvariant()
 
 $needsInstall = $true
-$metadataPath = Join-Path $toolsDir "tunnel-client-install.json"
 if ((Test-Path $binary) -and (Test-Path $metadataPath)) {
     try {
         $metadata = Get-Content $metadataPath -Raw | ConvertFrom-Json
-        if ([string]$metadata.release_tag -eq [string]$release.tag_name -and [string]$metadata.asset_digest -eq $expectedHash) {
-            & $binary help quickstart *> $null
-            if ($LASTEXITCODE -eq 0) {
-                $needsInstall = $false
-                Write-Host "OpenAI tunnel-client $($release.tag_name) is already installed and executable." -ForegroundColor Green
+        $recordedBinaryHash = [string]$metadata.binary_digest
+        $metadataMatchesRelease = (
+            [string]$metadata.release_tag -eq [string]$release.tag_name -and
+            [string]$metadata.asset_digest -eq $expectedHash -and
+            $recordedBinaryHash -match '^[0-9a-f]{64}$'
+        )
+        if ($metadataMatchesRelease) {
+            $installedBinaryHash = (Get-FileHash -Path $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installedBinaryHash -eq $recordedBinaryHash) {
+                & $binary help quickstart *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    $needsInstall = $false
+                    Write-Host "OpenAI tunnel-client $($release.tag_name) is already installed, hash-verified and executable." -ForegroundColor Green
+                }
+            }
+            else {
+                Write-Host "Installed tunnel-client hash differs from the verified-install record; reinstalling from the official release." -ForegroundColor Yellow
             }
         }
     }
@@ -111,6 +123,10 @@ if ($needsInstall) {
             Fail "Verified tunnel-client archive did not contain a tunnel-client executable."
         }
         Copy-Item -Path $candidate.FullName -Destination $binary -Force
+        $binaryHash = (Get-FileHash -Path $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($binaryHash -notmatch '^[0-9a-f]{64}$') {
+            Fail "Unable to calculate a valid SHA-256 for the installed tunnel-client executable."
+        }
         & $binary help quickstart *> $null
         if ($LASTEXITCODE -ne 0) {
             Fail "Installed tunnel-client executable failed its help smoke check."
@@ -120,11 +136,12 @@ if ($needsInstall) {
             release_tag = [string]$release.tag_name
             asset_name = [string]$asset.name
             asset_digest = $expectedHash
+            binary_digest = $binaryHash
             installed_at = (Get-Date).ToString("o")
             binary = $binary
         }
         $installMetadata | ConvertTo-Json -Depth 6 | Set-Content -Path $metadataPath -Encoding UTF8
-        Write-Host "Installed verified OpenAI tunnel-client $($release.tag_name)." -ForegroundColor Green
+        Write-Host "Installed verified OpenAI tunnel-client $($release.tag_name); executable SHA-256 recorded." -ForegroundColor Green
     }
     finally {
         Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
