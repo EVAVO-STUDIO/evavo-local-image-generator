@@ -29,7 +29,9 @@
     },
     "mcp": {
       "sdk": "mcp[cli]>=2,<3",
-      "stdio": "python -m evavo_local_image_generator.mcp_server --transport stdio",
+      "production_entry_module": "evavo_local_image_generator.mcp_entry",
+      "implementation_module": "evavo_local_image_generator.mcp_server",
+      "stdio": "python -m evavo_local_image_generator.mcp_entry --transport stdio",
       "streamable_http": {
         "default_url": "http://127.0.0.1:8765/mcp",
         "loopback_only": true,
@@ -50,8 +52,11 @@
         "tool_workflow_path_opt_in_environment": "EVAVO_MCP_ALLOW_WORKFLOW_PATHS",
         "tool_workflow_root_environment": "EVAVO_MCP_WORKFLOW_ROOT",
         "ordinary_file_identity_required": true,
+        "additional_output_roots_must_be_writable": true,
         "image_signature_validation": true,
-        "persistent_profiles_keep_non_secret_policy": true
+        "persistent_profiles_keep_non_secret_policy": true,
+        "validated_before_profile_persistence": true,
+        "validated_at_production_server_entry": true
       },
       "invalid_request_preflight_before_backend_work": true,
       "startup_dependency_repair": {
@@ -180,6 +185,8 @@
     "mcp_output_symlink_or_parent_redirection_rejected": true,
     "mcp_image_signature_validation": true,
     "mcp_invalid_file_or_wait_policy_preflight": true,
+    "mcp_profile_policy_validated_before_persistence": true,
+    "mcp_production_entry_policy_validation": true,
     "mcp_failed_prompt_not_reported_as_queued": true,
     "mcp_targeted_cancel_preferred": true,
     "mcp_legacy_running_broad_interrupt_allowed": false,
