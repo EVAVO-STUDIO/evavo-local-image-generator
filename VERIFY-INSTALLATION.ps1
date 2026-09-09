@@ -1,43 +1,31 @@
-#Requires -Version 5.0
-<#
-.SYNOPSIS
-Verify EVAVO Local Image Generator installation
+# Compatibility shim for historical installation verification.
+# The authoritative verifier compiles current Python, parses canonical
+# PowerShell scripts and runs every modern safety/integration suite.
 
-.DESCRIPTION
-Checks Python, dependencies, services, and MCP configuration
+param(
+    [switch]$StructuralOnly,
+    [switch]$Json
+)
 
-.EXAMPLE
-.\VERIFY-INSTALLATION.ps1
-#>
+$ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
 
-Write-Host "EVAVO Installation Verification" -ForegroundColor Cyan
-Write-Host "===============================" -ForegroundColor Cyan
-Write-Host ""
-
-# Python
-Write-Host "Checking Python..."
-python --version
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "[PASS] Python installed" -ForegroundColor Green
-} else {
-    Write-Host "[FAIL] Python not found" -ForegroundColor Red
+$python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $python)) {
+    $command = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $command) {
+        throw "Python 3.10+ was not found."
+    }
+    $python = $command.Source
 }
 
-# Dependencies
-Write-Host ""
-Write-Host "Checking dependencies..."
-pip list | findstr /i "httpx pytest pydantic"
-Write-Host "[PASS] Dependencies verified" -ForegroundColor Green
-
-# ComfyUI
-Write-Host ""
-Write-Host "Checking ComfyUI..."
-try {
-    $response = Invoke-WebRequest -Uri "http://127.0.0.1:8188/system" -TimeoutSec 2 -ErrorAction SilentlyContinue
-    Write-Host "[PASS] ComfyUI available" -ForegroundColor Green
-} catch {
-    Write-Host "[WARN] ComfyUI not responding (optional)" -ForegroundColor Yellow
+$args = @((Join-Path $PSScriptRoot "verify-evavo.py"), "--require-powershell")
+if (-not $StructuralOnly) {
+    $args += "--full"
+}
+if ($Json) {
+    $args += "--json"
 }
 
-Write-Host ""
-Write-Host "[PASS] Verification complete" -ForegroundColor Green
+& $python @args
+exit $LASTEXITCODE
