@@ -17,11 +17,14 @@ QUALITY_PYTHON = (
     "quality-report.py",
     "quality-review-summary.py",
     "runtime-snapshot.py",
+    "studio-runtime-snapshot.py",
+    "release-evidence.py",
     "lora-sweep.py",
     "prompt-quality.py",
     "gateway-smoke-test.py",
     "kokoro-quality-test.py",
     "kokoro-review-summary.py",
+    "kokoro-runtime-snapshot.py",
     "kokoro-provider.py",
 )
 
@@ -34,6 +37,8 @@ QUALITY_POWERSHELL = (
     "RUN-FULL-QUALITY-RELEASE.ps1",
     "FINALIZE-QUALITY-REVIEW.ps1",
     "FINALIZE-KOKORO-REVIEW.ps1",
+    "FINALIZE-FULL-RELEASE.ps1",
+    "VERIFY-FULL-RELEASE.ps1",
     "START-EVAVO-QUALITY-STACK.ps1",
     "SETUP-COMFYUI-NEXT.ps1",
 )
@@ -173,6 +178,12 @@ class QualityOperationsContractTests(unittest.TestCase):
         self.assertEqual(forwarded["prompt"], payload["prompt"])
         self.assertEqual(forwarded["project_name"], payload["project_name"])
 
+    def test_hero_and_lora_runners_accept_absolute_output_roots(self):
+        hero = (ROOT / "RUN-HERO-QUALITY.ps1").read_text(encoding="utf-8-sig")
+        lora = (ROOT / "RUN-LORA-SWEEP.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("IsPathRooted", hero)
+        self.assertIn("IsPathRooted", lora)
+
     def test_hero_runner_builds_attested_review_package(self):
         source = (ROOT / "RUN-HERO-QUALITY.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("quality,hero,detail,euler_reference,legacy_768_reference", source)
@@ -202,6 +213,7 @@ class QualityOperationsContractTests(unittest.TestCase):
         self.assertIn("hero_two_pass", source)
         self.assertIn("workflow_sha256", source)
         self.assertIn("-StartIfNeeded", source)
+        self.assertIn("IsPathRooted", source)
         stack = (ROOT / "START-EVAVO-QUALITY-STACK.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("[switch]$StartGateway", stack)
         self.assertIn("Test-GatewayQualityContract", stack)
@@ -211,33 +223,51 @@ class QualityOperationsContractTests(unittest.TestCase):
     def test_kokoro_voice_review_is_controlled_and_non_mutating(self):
         runner = (ROOT / "RUN-KOKORO-VOICE-COMPARISON.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("neutral,numbers,expressive,technical,proper_nouns", runner)
+        self.assertIn("kokoro-runtime-snapshot.py", runner)
         self.assertIn("human_review.csv", runner)
         finalizer = (ROOT / "FINALIZE-KOKORO-REVIEW.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("kokoro-review-summary.py", finalizer)
         self.assertIn("No production default voice was changed automatically", finalizer)
 
-    def test_review_finalizer_never_mutates_defaults(self):
-        source = (ROOT / "FINALIZE-QUALITY-REVIEW.ps1").read_text(encoding="utf-8-sig")
-        self.assertIn("quality-review-summary.py", source)
-        self.assertIn("Human quality review is incomplete or invalid", source)
-        self.assertIn("No production default was changed automatically", source)
+    def test_review_finalizers_never_mutate_defaults(self):
+        image = (ROOT / "FINALIZE-QUALITY-REVIEW.ps1").read_text(encoding="utf-8-sig")
+        audio = (ROOT / "FINALIZE-KOKORO-REVIEW.ps1").read_text(encoding="utf-8-sig")
+        full = (ROOT / "FINALIZE-FULL-RELEASE.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("No production default was changed automatically", image)
+        self.assertIn("No production default voice was changed automatically", audio)
+        self.assertIn("automaticPromotion = $false", full)
+        self.assertIn("release-evidence.py create", full)
+        self.assertIn("release-evidence.py verify", full)
 
-    def test_full_release_runs_system_gate_before_expensive_hero_review(self):
+    def test_full_release_builds_and_verifies_single_evidence_bundle(self):
         source = (ROOT / "RUN-FULL-QUALITY-RELEASE.ps1").read_text(encoding="utf-8-sig")
         production_index = source.index("RUN-PRODUCTION-QUALITY.ps1")
         hero_index = source.index("RUN-HERO-QUALITY.ps1")
+        manifest_index = source.index("release-evidence.py create")
         self.assertLess(production_index, hero_index)
+        self.assertLess(hero_index, manifest_index)
         self.assertIn('"-Mode", "full"', source)
         self.assertIn("RequireGateway", source)
         self.assertIn("GatewayEndpoint", source)
         self.assertIn("Require3DExecution", source)
-        self.assertIn("model/runtime attestation", source)
-        self.assertIn("human_review.csv", source)
+        self.assertIn("ReleaseRoot", source)
+        self.assertIn("Copy-Item", source)
+        self.assertIn("release-manifest.json", source)
+        self.assertIn("release-evidence.py verify", source)
         gate = (ROOT / "RUN-PRODUCTION-QUALITY.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("[switch]$RequireGateway", gate)
         self.assertIn("RUN-GATEWAY-QUALITY-SMOKE.ps1", gate)
         self.assertIn("prompt-quality-tests", gate)
         self.assertIn("audio-quality-tests", gate)
+        self.assertIn("kokoro-runtime-attestation", gate)
+        self.assertIn("3d-runtime-attestation", gate)
+        self.assertIn("atmosphere-runtime-attestation", gate)
+
+    def test_release_verifier_uses_tamper_evident_manifest(self):
+        source = (ROOT / "VERIFY-FULL-RELEASE.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("release-manifest.json", source)
+        self.assertIn("release-evidence.py verify", source)
+        self.assertIn("unchanged release evidence", source)
 
     def test_3d_startup_is_opt_in_and_token_gated(self):
         source = (ROOT / "START-EVAVO-QUALITY-STACK.ps1").read_text(encoding="utf-8-sig")
