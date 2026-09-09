@@ -25,9 +25,10 @@ async def check_comfyui_health(endpoint: str, timeout: float = 5.0) -> Dict[str,
         try:
             payload = await asyncio.to_thread(request_json, f"{endpoint}/system", timeout=timeout)
             validate_health(payload)
-            mode = payload.get("mode", "mock")
+            mode = str(payload.get("mode", "mock"))
             result = {
                 "healthy": True,
+                "render_capable": mode != "mock",
                 "status": "ready",
                 "service": payload.get("service"),
                 "protocol_version": payload.get("protocol_version"),
@@ -37,6 +38,7 @@ async def check_comfyui_health(endpoint: str, timeout: float = 5.0) -> Dict[str,
             native = await asyncio.to_thread(ComfyUIBackend(endpoint).health)
             result = {
                 "healthy": True,
+                "render_capable": True,
                 "status": "ready",
                 "service": "ComfyUI",
                 "mode": "native-comfyui",
@@ -48,6 +50,7 @@ async def check_comfyui_health(endpoint: str, timeout: float = 5.0) -> Dict[str,
     except RuntimeError as exc:
         return {
             "healthy": False,
+            "render_capable": False,
             "status": "offline",
             "latency_ms": round((time.perf_counter() - started) * 1000, 1),
             "error": str(exc),
@@ -105,9 +108,17 @@ async def run_health_check(endpoint: str = DEFAULT_ENDPOINT) -> Dict[str, Any]:
     endpoint = endpoint.rstrip("/")
     backend, wrapper = await asyncio.gather(check_comfyui_health(endpoint), check_evavo_wrapper(endpoint))
     healthy = bool(backend.get("healthy") and wrapper.get("healthy"))
+    render_capable = bool(healthy and backend.get("render_capable"))
+    if not healthy:
+        status = "degraded"
+    elif render_capable:
+        status = "operational"
+    else:
+        status = "test_only_mock"
     return {
         "healthy": healthy,
-        "status": "operational" if healthy else "degraded",
+        "render_capable": render_capable,
+        "status": status,
         "service": SERVICE_NAME,
         "endpoint": endpoint,
         "timestamp": now_iso(),
@@ -128,6 +139,7 @@ def display_health(health: Dict[str, Any]) -> None:
     print(f"Time:     {health['timestamp']}")
     print(f"Endpoint: {health['endpoint']}")
     print(f"Backend:  {backend.get('mode', 'unknown')}")
+    print(f"Renderer: {'READY' if health.get('render_capable') else 'TEST-ONLY / NOT RENDER-CAPABLE'}")
     print()
     print(f"Service:  {'OK' if backend['healthy'] else 'OFFLINE'} ({backend.get('latency_ms', '?')} ms)")
     if backend.get("error"):
@@ -158,7 +170,7 @@ async def monitor_continuous(endpoint: str, interval: float, json_output: bool) 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Monitor EVAVO system health")
+    parser = argparse.ArgumentParser(description="Monitor EVAVO system health and real-render capability")
     parser.add_argument("--continuous", action="store_true", help="Continuous monitoring")
     parser.add_argument("--interval", type=float, default=10.0, help="Check interval in seconds")
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT, help="EVAVO or native ComfyUI base URL")
