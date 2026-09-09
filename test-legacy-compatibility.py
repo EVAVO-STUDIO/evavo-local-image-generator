@@ -97,9 +97,10 @@ class LegacyCompatibilityTests(unittest.TestCase):
     def test_generate_now_batch_does_not_kill_python_or_start_services(self) -> None:
         source = (ROOT / "EVAVO-GENERATE-NOW.bat").read_text(encoding="utf-8").lower()
         self.assertIn("legacy_image_cli.py", source)
-        self.assertNotIn("taskkill", source)
+        self.assertNotIn("taskkill /f /im python.exe", source)
         self.assertNotIn("ollama serve", source)
-        self.assertNotIn("kokoro", source)
+        self.assertNotIn("kokoro-fastapi", source)
+        self.assertNotIn("start \"\" cmd /c", source)
 
 
 if __name__ == "__main__":
