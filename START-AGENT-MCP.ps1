@@ -23,8 +23,8 @@ $python = (Resolve-Path $python).Path
 if ($Port -lt 1 -or $Port -gt 65535) {
     throw "Port must be between 1 and 65535."
 }
-if (-not $Path.StartsWith("/")) {
-    throw "Path must start with '/'."
+if (-not $Path.StartsWith("/") -or $Path.Length -gt 256 -or $Path.Contains("?") -or $Path.Contains("#") -or $Path.Contains([char]0)) {
+    throw "Path must be an absolute path up to 256 characters and must not contain ?, #, or NUL."
 }
 
 $env:EVAVO_AUTO_PROVISION_COMFYUI = "1"
