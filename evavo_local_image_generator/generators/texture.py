@@ -1,55 +1,32 @@
-"""
-PBR texture generation module for EVAVO system.
+"""Legacy texture-generation compatibility surface.
 
-Implements digest-bound texture generation tasks including:
-- Physically-based texture synthesis
-- Normal map generation
-- Roughness and metallic channel creation
+Dedicated PBR texture generation is outside the verified scope of EVAVO Local
+Image Generator. All methods fail explicitly without network, filesystem, or
+task-history side effects.
 """
 
-from dataclasses import dataclass
-from typing import Optional, Dict
-from evavo_local_image_generator.scripts.generate import GenerationTask
+from __future__ import annotations
 
-@dataclass
-class TextureGenerationTask(GenerationTask):
-    """Texture generation task with digest-bound validation."""
-    
-    task_type: str = "texture_generation"
-    resolution: int = 2048
-    format: str = "png"
+from typing import Dict
+
+from ._unsupported import unsupported
+
 
 class TextureGenerator:
-    """Generates PBR textures from descriptions."""
-    
     def __init__(self):
         self.task_type = "texture_generation"
-    
+
     async def generate_texture(
         self,
         description: str,
         resolution: int = 2048,
         texture_type: str = "diffuse",
     ) -> Dict:
-        """Generate a PBR texture."""
-        task = TextureGenerationTask(
-            prompt=description,
-            resolution=resolution
-        )
-        
-        # TODO: Implement texture generation
-        raise NotImplementedError("Texture generation not yet implemented")
-    
-    async def generate_pbr_set(
-        self,
-        description: str,
-        resolution: int = 2048,
-    ) -> Dict:
-        """Generate a complete PBR texture set (diffuse, normal, roughness, metallic)."""
-        # TODO: Implement PBR set generation
-        raise NotImplementedError("PBR set generation not yet implemented")
+        unsupported("pbr-texture")
+
+    async def generate_pbr_set(self, description: str, resolution: int = 2048) -> Dict:
+        unsupported("pbr-texture-set")
+
 
 async def generate_texture(description: str, **kwargs) -> Dict:
-    """Convenience function for texture generation."""
-    generator = TextureGenerator()
-    return await generator.generate_texture(description, **kwargs)
+    return await TextureGenerator().generate_texture(description, **kwargs)
