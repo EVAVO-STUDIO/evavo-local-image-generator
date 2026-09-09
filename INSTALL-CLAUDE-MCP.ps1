@@ -21,13 +21,15 @@ if (-not $SkipValidation) {
 }
 
 # This read-only gate always runs, including the canonical updater's fast path.
-Write-Host "Validating MCP filesystem authority before changing Claude configuration..." -ForegroundColor Cyan
+Write-Host "Validating MCP production authority before changing Claude configuration..." -ForegroundColor Cyan
 $policyOutput = & $python -m evavo_local_image_generator.mcp_policy --json
-if ($LASTEXITCODE -ne 0) { throw "MCP filesystem policy is invalid. Claude configuration was not changed." }
+if ($LASTEXITCODE -ne 0) { throw "MCP production policy is invalid. Claude configuration was not changed." }
 try { $policyResult = ($policyOutput -join "`n") | ConvertFrom-Json }
-catch { throw "MCP filesystem policy returned invalid JSON. Claude configuration was not changed." }
+catch { throw "MCP production policy returned invalid JSON. Claude configuration was not changed." }
 $generationOutputDir = [string]$policyResult.policy.default_output_root
-if (-not $generationOutputDir) { throw "MCP filesystem policy did not return a validated default output root. Claude configuration was not changed." }
+$comfyEndpoint = [string]$policyResult.policy.comfyui_endpoint
+if (-not $generationOutputDir) { throw "MCP production policy did not return a validated default output root. Claude configuration was not changed." }
+if (-not $comfyEndpoint) { throw "MCP production policy did not return a validated loopback ComfyUI endpoint. Claude configuration was not changed." }
 
 $configDir = Join-Path $env:APPDATA "Claude"
 $configPath = Join-Path $configDir "claude_desktop_config.json"
@@ -47,10 +49,6 @@ if (-not ($config.PSObject.Properties.Name -contains "mcpServers")) {
 }
 elseif ($null -eq $config.mcpServers) { $config.mcpServers = [pscustomobject]@{} }
 
-$comfyEndpoint = [Environment]::GetEnvironmentVariable("COMFYUI_ENDPOINT")
-if (-not $comfyEndpoint) { $comfyEndpoint = [Environment]::GetEnvironmentVariable("EVAVO_COMFYUI_ENDPOINT") }
-if (-not $comfyEndpoint) { $comfyEndpoint = "http://127.0.0.1:8188" }
-
 $environment = [ordered]@{
     "PYTHONPATH" = $PSScriptRoot
     "PYTHONUNBUFFERED" = "1"
@@ -60,7 +58,7 @@ $environment = [ordered]@{
     "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
 }
 
-# Persist normalized MCP authority paths returned by the validator, not the raw
+# Persist normalized MCP authority paths returned by the validator, not raw
 # environment strings. This avoids relative paths changing meaning when Claude
 # launches from a different working directory.
 $approvedRoots = @($policyResult.policy.additional_output_roots)
@@ -104,8 +102,8 @@ $config | ConvertTo-Json -Depth 20 | Set-Content -Path $configPath -Encoding UTF
 
 Write-Host "Claude Desktop MCP configuration installed: $configPath" -ForegroundColor Green
 Write-Host "Python: $python" -ForegroundColor Green
-Write-Host "ComfyUI endpoint: $comfyEndpoint" -ForegroundColor Green
+Write-Host "ComfyUI endpoint: $comfyEndpoint (policy-validated loopback)" -ForegroundColor Green
 Write-Host "Generation output root: $generationOutputDir" -ForegroundColor Green
-Write-Host "MCP launch and persisted path authority are policy-validated." -ForegroundColor Green
+Write-Host "MCP launch and persisted authority are policy-validated." -ForegroundColor Green
 if ($env:EVAVO_CHECKPOINT_URL) { Write-Host "EVAVO_CHECKPOINT_URL was not persisted because URLs may contain secrets." -ForegroundColor Yellow }
 Write-Host "Restart Claude Desktop so it reloads MCP configuration." -ForegroundColor Yellow
