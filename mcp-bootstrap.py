@@ -52,6 +52,10 @@ def main() -> None:
         print(str(exc), file=sys.stderr)
         raise SystemExit(78) from exc
 
+    # MCP hosts are not required to preserve the repository as their working
+    # directory. Normalize it before `-m` so the local package and repo-owned
+    # recovery/provision scripts remain discoverable regardless of caller cwd.
+    os.chdir(ROOT)
     argv = [
         str(python),
         "-m",

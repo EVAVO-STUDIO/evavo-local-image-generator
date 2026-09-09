@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import importlib.util
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -67,15 +66,19 @@ class McpBootstrapTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "MCP_BOOTSTRAP_INVALID_VENV"):
                     module._venv_python()
 
-    def test_main_execs_exact_venv_python_into_validated_entry(self) -> None:
+    def test_main_normalizes_repo_cwd_then_execs_exact_venv_python_into_validated_entry(self) -> None:
         module = load_bootstrap()
         fake_python = Path("C:/EVAVO/.venv/Scripts/python.exe")
+        fake_root = Path("C:/EVAVO")
         with (
+            patch.object(module, "ROOT", fake_root),
             patch.object(module, "_venv_python", return_value=fake_python),
             patch.object(module.sys, "argv", ["mcp-bootstrap.py", "--transport", "stdio"]),
+            patch.object(module.os, "chdir") as chdir,
             patch.object(module.os, "execv") as execv,
         ):
             module.main()
+        chdir.assert_called_once_with(fake_root)
         execv.assert_called_once_with(
             str(fake_python),
             [
@@ -93,6 +96,7 @@ class McpBootstrapTests(unittest.TestCase):
         self.assertNotIn("import mcp", source)
         self.assertNotIn("requests", source)
         self.assertNotIn("subprocess", source)
+        self.assertIn("os.chdir(ROOT)", source)
         self.assertIn("os.execv", source)
 
 
