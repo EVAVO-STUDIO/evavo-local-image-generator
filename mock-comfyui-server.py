@@ -45,7 +45,7 @@ NATIVE_NODES: Dict[str, Dict[str, Any]] = {
 
 
 class EvavoMockHandler(BaseHTTPRequestHandler):
-    server_version = "EVAVOMockComfyUI/2.3"
+    server_version = "EVAVOMockComfyUI/2.4"
 
     @property
     def native_only(self) -> bool:
@@ -115,14 +115,49 @@ class EvavoMockHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, {node_name: node})
             return
+        if path == "/queue":
+            with TASKS_LOCK:
+                running = []
+                pending = []
+                for index, (prompt_id, task) in enumerate(TASKS.items(), start=1):
+                    status = str(task.get("status", ""))
+                    row = [index, prompt_id, task.get("workflow", {}), {}, []]
+                    if status == "running":
+                        running.append(row)
+                    elif status == "queued":
+                        pending.append(row)
+            self._send_json(200, {"queue_running": running, "queue_pending": pending})
+            return
         if path.startswith("/history/"):
             prompt_id = path.rsplit("/", 1)[-1]
             with TASKS_LOCK:
                 task = TASKS.get(prompt_id)
-            if task is None:
+            if task is None or task.get("status") in {"queued", "running"}:
                 self._send_json(200, {})
+            elif task.get("status") == "failed":
+                self._send_json(
+                    200,
+                    {
+                        prompt_id: {
+                            "status": {
+                                "status_str": "error",
+                                "completed": False,
+                                "messages": [["execution_error", {"exception_message": str(task.get("error", "simulated failure"))}]],
+                            },
+                            "outputs": {},
+                        }
+                    },
+                )
             else:
-                self._send_json(200, {prompt_id: {"status": {"completed": True}, "outputs": {"7": {"images": [{"filename": f"{prompt_id}.png", "subfolder": "EVAVO/test", "type": "output"}]}}}})
+                self._send_json(
+                    200,
+                    {
+                        prompt_id: {
+                            "status": {"status_str": "success", "completed": True, "messages": []},
+                            "outputs": {"7": {"images": [{"filename": f"{prompt_id}.png", "subfolder": "EVAVO/test", "type": "output"}]}},
+                        }
+                    },
+                )
             return
         if path == "/view":
             self._send_bytes(200, PNG_1X1, "image/png")
