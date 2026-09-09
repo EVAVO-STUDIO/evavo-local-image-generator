@@ -21,6 +21,7 @@ QUALITY_PYTHON = (
     "prompt-quality.py",
     "gateway-smoke-test.py",
     "kokoro-quality-test.py",
+    "kokoro-review-summary.py",
     "kokoro-provider.py",
 )
 
@@ -29,8 +30,10 @@ QUALITY_POWERSHELL = (
     "RUN-HERO-QUALITY.ps1",
     "RUN-LORA-SWEEP.ps1",
     "RUN-GATEWAY-QUALITY-SMOKE.ps1",
+    "RUN-KOKORO-VOICE-COMPARISON.ps1",
     "RUN-FULL-QUALITY-RELEASE.ps1",
     "FINALIZE-QUALITY-REVIEW.ps1",
+    "FINALIZE-KOKORO-REVIEW.ps1",
     "START-EVAVO-QUALITY-STACK.ps1",
     "SETUP-COMFYUI-NEXT.ps1",
 )
@@ -70,8 +73,13 @@ class QualityOperationsContractTests(unittest.TestCase):
             "QUALITY-PRODUCTION.md",
             "QUALITY-ADVANCED-WORKFLOWS.md",
             "GATEWAY-IMAGE-QUALITY.md",
+            "PROMPT-QUALITY.md",
+            "KOKORO-QUALITY.md",
             "config/quality-golden-prompts-v1.json",
+            "config/kokoro-golden-texts-v1.json",
+            "examples/prompt-spec-1871-chandlery.json",
             "evavo_local_image_generator/prompt_quality.py",
+            "evavo_local_image_generator/audio_quality.py",
         )
         for relative in required:
             with self.subTest(path=relative):
@@ -200,6 +208,14 @@ class QualityOperationsContractTests(unittest.TestCase):
         self.assertIn("START-GATEWAY.ps1", stack)
         self.assertIn("EVAVO_COMFYUI_ENDPOINT", stack)
 
+    def test_kokoro_voice_review_is_controlled_and_non_mutating(self):
+        runner = (ROOT / "RUN-KOKORO-VOICE-COMPARISON.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("neutral,numbers,expressive,technical,proper_nouns", runner)
+        self.assertIn("human_review.csv", runner)
+        finalizer = (ROOT / "FINALIZE-KOKORO-REVIEW.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("kokoro-review-summary.py", finalizer)
+        self.assertIn("No production default voice was changed automatically", finalizer)
+
     def test_review_finalizer_never_mutates_defaults(self):
         source = (ROOT / "FINALIZE-QUALITY-REVIEW.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("quality-review-summary.py", source)
@@ -212,9 +228,16 @@ class QualityOperationsContractTests(unittest.TestCase):
         hero_index = source.index("RUN-HERO-QUALITY.ps1")
         self.assertLess(production_index, hero_index)
         self.assertIn('"-Mode", "full"', source)
+        self.assertIn("RequireGateway", source)
+        self.assertIn("GatewayEndpoint", source)
         self.assertIn("Require3DExecution", source)
         self.assertIn("model/runtime attestation", source)
         self.assertIn("human_review.csv", source)
+        gate = (ROOT / "RUN-PRODUCTION-QUALITY.ps1").read_text(encoding="utf-8-sig")
+        self.assertIn("[switch]$RequireGateway", gate)
+        self.assertIn("RUN-GATEWAY-QUALITY-SMOKE.ps1", gate)
+        self.assertIn("prompt-quality-tests", gate)
+        self.assertIn("audio-quality-tests", gate)
 
     def test_3d_startup_is_opt_in_and_token_gated(self):
         source = (ROOT / "START-EVAVO-QUALITY-STACK.ps1").read_text(encoding="utf-8-sig")
