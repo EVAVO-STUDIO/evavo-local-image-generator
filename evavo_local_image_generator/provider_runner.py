@@ -1,6 +1,6 @@
 """Bounded provider adapters for the EVAVO Unified Gateway.
 
-The public gateway contract is intentionally kept outside this module.  This
+The public gateway contract is intentionally kept outside this module. This
 module only turns a queued gateway request into a verified local artifact.
 Providers are local-first and fail closed when their execution surface is not
 configured or does not prove a successful result.
@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -21,7 +22,11 @@ from typing import Any, Iterable
 import aiohttp
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_MAX_PROVIDER_LOG_BYTES = int(os.getenv("EVAVO_PROVIDER_MAX_LOG_BYTES", str(1024 * 1024)))
+try:
+    _configured_log_limit = int(os.getenv("EVAVO_PROVIDER_MAX_LOG_BYTES", str(1024 * 1024)))
+except ValueError:
+    _configured_log_limit = 1024 * 1024
+_MAX_PROVIDER_LOG_BYTES = max(64 * 1024, min(_configured_log_limit, 16 * 1024 * 1024))
 
 
 class ProviderError(RuntimeError):
@@ -48,9 +53,10 @@ def _bool_env(name: str, default: bool = False) -> bool:
 
 def _float_env(name: str, default: float) -> float:
     try:
-        return float(os.getenv(name, str(default)))
+        value = float(os.getenv(name, str(default)))
     except ValueError:
         return default
+    return max(1.0, value)
 
 
 def _int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -83,6 +89,25 @@ def _inside(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _loopback_endpoint(url: str, *, default_port: int) -> str:
+    parsed = urllib.parse.urlparse(url.rstrip("/"))
+    if parsed.scheme != "http" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ProviderError("PROVIDER_CONFIG_INVALID", f"provider endpoint must be a plain loopback HTTP URL: {url}")
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise ProviderError("PROVIDER_CONFIG_INVALID", f"provider endpoint must use loopback: {url}")
+    if parsed.path not in {"", "/"}:
+        raise ProviderError("PROVIDER_CONFIG_INVALID", f"provider endpoint must not contain a path: {url}")
+    try:
+        port = parsed.port or default_port
+    except ValueError as exc:
+        raise ProviderError("PROVIDER_CONFIG_INVALID", f"provider endpoint contains an invalid port: {url}") from exc
+    if not 1 <= port <= 65535:
+        raise ProviderError("PROVIDER_CONFIG_INVALID", f"provider endpoint contains an invalid port: {url}")
+    host = "127.0.0.1" if parsed.hostname == "localhost" else parsed.hostname
+    display_host = f"[{host}]" if ":" in host else host
+    return f"http://{display_host}:{port}"
 
 
 def _json_argv(env_name: str) -> list[str] | None:
@@ -167,6 +192,29 @@ def _receipt_from_stdout(stdout: str) -> dict[str, Any]:
         if isinstance(value, dict):
             return value
     raise ProviderError("PROVIDER_PROTOCOL_ERROR", "provider did not emit a JSON object receipt")
+
+
+def _receipt_sha256(receipt: dict[str, Any]) -> str | None:
+    candidates: list[Any] = [
+        receipt.get("sha256"),
+        receipt.get("outputSha256"),
+        receipt.get("artifactSha256"),
+        receipt.get("fileSha256"),
+    ]
+    result = receipt.get("result")
+    if isinstance(result, dict):
+        candidates.extend([
+            result.get("sha256"),
+            result.get("outputSha256"),
+            result.get("artifactSha256"),
+            result.get("fileSha256"),
+        ])
+    supplied = [str(value).strip().lower() for value in candidates if value not in {None, ""}]
+    if not supplied:
+        return None
+    if len(set(supplied)) != 1 or not _SHA256_RE.fullmatch(supplied[0]):
+        raise ProviderError("PROVIDER_PROTOCOL_ERROR", "provider receipt contains an invalid or conflicting SHA-256")
+    return supplied[0]
 
 
 def _copy_verified(source: Path, destination: Path, *, admitted_root: Path) -> Path:
@@ -365,7 +413,7 @@ class ProviderRouter:
             "image": {
                 "backend": "ComfyUI",
                 "ready": bool(comfyui_ready),
-                "endpoint": os.getenv("EVAVO_COMFYUI_ENDPOINT", os.getenv("COMFYUI_ENDPOINT", "http://127.0.0.1:8188")),
+                "endpoint": os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188",
             },
             "video": video,
             "audio": audio,
@@ -387,7 +435,7 @@ class ProviderRouter:
             return {"backend": "Wan 2.1 Studio worker", "ready": False, "reason": "EVAVO_WAN21_MODEL_DIR is not configured"}
         model = Path(model_raw).expanduser()
         manifest = model / "evavo-model-manifest.json"
-        ready = model.is_dir() and manifest.is_file()
+        ready = model.is_dir() and manifest.is_file() and not manifest.is_symlink()
         return {
             "backend": "Wan 2.1 Studio worker",
             "ready": ready,
@@ -408,7 +456,10 @@ class ProviderRouter:
         }
 
     async def _three_d_status(self) -> dict[str, Any]:
-        endpoint = os.getenv("EVAVO_3D_ENDPOINT", "http://127.0.0.1:4314").rstrip("/")
+        try:
+            endpoint = _loopback_endpoint(os.getenv("EVAVO_3D_ENDPOINT", "http://127.0.0.1:4314"), default_port=4314)
+        except ProviderError as exc:
+            return {"backend": "EVAVO 3D Studio worker", "ready": False, "reason": str(exc)}
         token = os.getenv("EVAVO_3D_AGENT_EXECUTION_TOKEN", "")
         workspace = os.getenv("EVAVO_3D_AGENT_WORKSPACE_ROOT", "").strip()
         if len(token) < 32:
@@ -420,7 +471,8 @@ class ProviderRouter:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(f"{endpoint}/api/v1/health") as response:
                     payload = await response.json(content_type=None)
-            ready = response.status == 200 and isinstance(payload, dict) and payload.get("ok") is True and payload.get("executionEnabled") is True
+                    status = response.status
+            ready = status == 200 and isinstance(payload, dict) and payload.get("ok") is True and payload.get("executionEnabled") is True
             return {"backend": "EVAVO 3D Studio worker", "ready": ready, "endpoint": endpoint, "health": payload}
         except Exception as exc:
             return {"backend": "EVAVO 3D Studio worker", "ready": False, "endpoint": endpoint, "reason": str(exc)}
@@ -471,6 +523,10 @@ class ProviderRouter:
             source = output_dir / source
         suffix = source.suffix or ".bin"
         copied = await asyncio.to_thread(_copy_verified, source, self._result_root(task_id) / f"{kind}{suffix}", admitted_root=task_root)
+        expected_sha = _receipt_sha256(receipt)
+        if expected_sha and await asyncio.to_thread(_sha256_file, copied) != expected_sha:
+            copied.unlink(missing_ok=True)
+            raise ProviderError("PROVIDER_OUTPUT_INVALID", "provider output SHA-256 does not match its receipt")
         return ProviderResult(paths=[str(copied)], receipt=receipt, backend_mode=f"{kind}-configured-cli")
 
     async def _video(self, task_id: str, request: dict[str, Any]) -> ProviderResult:
@@ -530,7 +586,7 @@ class ProviderRouter:
         return ProviderResult(paths=[str(copied)], receipt=receipt, backend_mode="video-studio-wan21")
 
     async def _three_d(self, task_id: str, request: dict[str, Any]) -> ProviderResult:
-        endpoint = os.getenv("EVAVO_3D_ENDPOINT", "http://127.0.0.1:4314").rstrip("/")
+        endpoint = _loopback_endpoint(os.getenv("EVAVO_3D_ENDPOINT", "http://127.0.0.1:4314"), default_port=4314)
         token = os.getenv("EVAVO_3D_AGENT_EXECUTION_TOKEN", "")
         workspace_raw = os.getenv("EVAVO_3D_AGENT_WORKSPACE_ROOT", "").strip()
         if len(token) < 32:
@@ -577,23 +633,27 @@ class ProviderRouter:
             try:
                 async with session.get(f"{endpoint}/api/v1/health") as response:
                     health = await response.json(content_type=None)
-                if response.status != 200 or not isinstance(health, dict) or health.get("ok") is not True or health.get("executionEnabled") is not True:
+                    health_status = response.status
+                if health_status != 200 or not isinstance(health, dict) or health.get("ok") is not True or health.get("executionEnabled") is not True:
                     raise ProviderError("PROVIDER_UNAVAILABLE", "3D worker is not execution-ready")
 
                 async with session.get(f"{endpoint}/api/v1/capabilities") as response:
                     caps = await response.json(content_type=None)
+                    caps_status = response.status
                 operations = caps.get("operations", []) if isinstance(caps, dict) else []
-                if response.status != 200 or "pipeline.full-candidate" not in operations:
+                if caps_status != 200 or "pipeline.full-candidate" not in operations:
                     raise ProviderError("PROVIDER_UNAVAILABLE", "3D worker does not expose pipeline.full-candidate")
 
                 async with session.post(f"{endpoint}/api/v1/jobs/compile", json=compile_body) as response:
                     compiled = await response.json(content_type=None)
-                if response.status != 200 or not isinstance(compiled, dict) or not compiled.get("jobSha256"):
+                    compile_status = response.status
+                if compile_status != 200 or not isinstance(compiled, dict) or not compiled.get("jobSha256"):
                     raise ProviderError("PROVIDER_PROTOCOL_ERROR", f"3D worker rejected job compilation: {compiled}")
 
                 async with session.post(f"{endpoint}/api/v1/jobs", json=compiled, headers=headers) as response:
                     submitted = await response.json(content_type=None)
-                if response.status != 202:
+                    submit_status = response.status
+                if submit_status != 202:
                     raise ProviderError("PROVIDER_FAILED", f"3D worker rejected job submission: {submitted}")
 
                 loop = asyncio.get_running_loop()
@@ -602,7 +662,8 @@ class ProviderRouter:
                 while loop.time() < deadline:
                     async with session.get(f"{endpoint}/api/v1/jobs/{worker_job_id}", headers=headers) as response:
                         current = await response.json(content_type=None)
-                    if response.status != 200 or not isinstance(current, dict):
+                        current_status = response.status
+                    if current_status != 200 or not isinstance(current, dict):
                         raise ProviderError("PROVIDER_PROTOCOL_ERROR", f"3D worker returned invalid job status: {current}")
                     state = current.get("state") if isinstance(current.get("state"), dict) else {}
                     status = state.get("status")
