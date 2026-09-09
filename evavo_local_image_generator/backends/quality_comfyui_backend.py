@@ -7,6 +7,7 @@ legacy ComfyUI adapter, while making SDXL-native production settings canonical.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import replace
 from typing import Any, Dict, Optional
@@ -34,10 +35,15 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             latent_upscale_methods = self.node_input_choices("LatentUpscale", "upscale_method")
         except RuntimeError:
             latent_upscale_methods = []
+        try:
+            loras = self.node_input_choices("LoraLoader", "lora_name")
+        except RuntimeError:
+            loras = []
         return {
             "samplers": samplers,
             "schedulers": schedulers,
             "latent_upscale_methods": latent_upscale_methods,
+            "loras": loras,
             "recommended_sampler": self._choose_available(
                 os.getenv("EVAVO_IMAGE_SAMPLER", "dpmpp_2m_sde"),
                 samplers,
@@ -65,6 +71,52 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             if candidate in available:
                 return candidate
         return available[0]
+
+    @staticmethod
+    def _lora_strength(value: Any, *, name: str, default: float) -> float:
+        if value is None:
+            return default
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be a number") from exc
+        if not math.isfinite(number) or not -4.0 <= number <= 4.0:
+            raise ValueError(f"{name} must be finite and between -4 and 4")
+        return number
+
+    def _resolve_lora(
+        self,
+        lora_name: Optional[str],
+        lora_model_strength: Any,
+        lora_clip_strength: Any,
+    ) -> Optional[Dict[str, Any]]:
+        raw_name = lora_name if lora_name is not None else os.getenv("EVAVO_IMAGE_LORA")
+        if raw_name is None or not str(raw_name).strip():
+            return None
+        name = str(raw_name).strip()
+        model_strength = self._lora_strength(
+            lora_model_strength if lora_model_strength is not None else os.getenv("EVAVO_IMAGE_LORA_MODEL_STRENGTH"),
+            name="lora_model_strength",
+            default=0.7,
+        )
+        clip_strength = self._lora_strength(
+            lora_clip_strength if lora_clip_strength is not None else os.getenv("EVAVO_IMAGE_LORA_CLIP_STRENGTH"),
+            name="lora_clip_strength",
+            default=model_strength,
+        )
+        try:
+            available = self.node_input_choices("LoraLoader", "lora_name")
+        except RuntimeError as exc:
+            raise RuntimeError("COMFYUI_LORA_LOADER_UNAVAILABLE:LoraLoader is not available on the active ComfyUI runtime") from exc
+        if available and name not in available:
+            raise RuntimeError(
+                f"COMFYUI_LORA_NOT_FOUND:{name!r} is not in the active ComfyUI LoRA inventory"
+            )
+        return {
+            "name": name,
+            "model_strength": model_strength,
+            "clip_strength": clip_strength,
+        }
 
     def resolve_sampling(self, settings: ImageQualitySettings) -> ImageQualitySettings:
         try:
@@ -106,6 +158,9 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
 
     @staticmethod
     def _apply_primary_sampling(workflow: Dict[str, Any], settings: ImageQualitySettings) -> None:
+        # Before a hero pass is appended, the canonical graph has only one
+        # KSampler. Custom workflows are left alone unless an explicit override
+        # was requested by the caller.
         for node in workflow.values():
             if not isinstance(node, dict) or node.get("class_type") != "KSampler":
                 continue
@@ -120,13 +175,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
 
     @staticmethod
     def _append_hero_second_pass(workflow: Dict[str, Any], settings: ImageQualitySettings) -> None:
-        """Append a core-node-only latent upscale and low-denoise detail pass.
-
-        This method intentionally assumes the canonical built-in EVAVO graph
-        created by the base adapter. Custom templates can have arbitrary graph
-        topology, so two-pass expansion is refused for them rather than silently
-        claiming the hero profile was applied.
-        """
+        """Append a core-node-only latent upscale and low-denoise detail pass."""
 
         if not settings.second_pass_enabled:
             return
@@ -182,6 +231,49 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             raise RuntimeError("COMFYUI_HERO_BASE_GRAPH_INVALID:VAEDecode inputs are missing")
         decode_inputs["samples"] = ["9", 0]
 
+    @staticmethod
+    def _apply_lora(workflow: Dict[str, Any], lora: Dict[str, Any]) -> None:
+        """Insert one isolated LoRA into the canonical built-in graph.
+
+        The LoRA is loaded after the checkpoint and before both CLIP conditioning
+        and diffusion passes. This ensures the same LoRA influences model and
+        text conditioning consistently, including the optional hero pass.
+        """
+
+        required = {"1", "2", "3", "5"}
+        if not required.issubset(workflow):
+            raise RuntimeError("COMFYUI_LORA_BASE_GRAPH_INVALID:canonical checkpoint/conditioning/sampler nodes are required")
+        node_id = "10"
+        if node_id in workflow:
+            raise RuntimeError("COMFYUI_LORA_NODE_COLLISION:canonical LoRA node id 10 is already in use")
+        workflow[node_id] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": lora["name"],
+                "strength_model": lora["model_strength"],
+                "strength_clip": lora["clip_strength"],
+                "model": ["1", 0],
+                "clip": ["1", 1],
+            },
+        }
+        for conditioning_id in ("2", "3"):
+            node = workflow[conditioning_id]
+            inputs = node.get("inputs") if isinstance(node, dict) else None
+            if not isinstance(inputs, dict):
+                raise RuntimeError("COMFYUI_LORA_BASE_GRAPH_INVALID:conditioning node inputs are missing")
+            inputs["clip"] = [node_id, 1]
+        primary = workflow["5"]
+        primary_inputs = primary.get("inputs") if isinstance(primary, dict) else None
+        if not isinstance(primary_inputs, dict):
+            raise RuntimeError("COMFYUI_LORA_BASE_GRAPH_INVALID:primary sampler inputs are missing")
+        primary_inputs["model"] = [node_id, 0]
+        if "9" in workflow:
+            second = workflow["9"]
+            second_inputs = second.get("inputs") if isinstance(second, dict) else None
+            if not isinstance(second_inputs, dict):
+                raise RuntimeError("COMFYUI_LORA_BASE_GRAPH_INVALID:second sampler inputs are missing")
+            second_inputs["model"] = [node_id, 0]
+
     def build_txt2img_workflow(
         self,
         prompt: str,
@@ -206,6 +298,9 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         second_pass_scheduler: Optional[str] = None,
         second_pass_denoise: Any = None,
         latent_upscale_method: Optional[str] = None,
+        lora_name: Optional[str] = None,
+        lora_model_strength: Any = None,
+        lora_clip_strength: Any = None,
     ) -> Dict[str, Any]:
         settings = resolve_quality_settings(
             quality_profile=quality_profile,
@@ -225,12 +320,18 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             latent_upscale_method=latent_upscale_method,
         )
         settings = self.resolve_sampling(settings)
+        lora = self._resolve_lora(lora_name, lora_model_strength, lora_clip_strength)
 
         template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
         if template_path and settings.second_pass_enabled:
             raise RuntimeError(
                 "COMFYUI_HERO_CUSTOM_WORKFLOW_UNSUPPORTED:two-pass quality expansion requires the canonical built-in graph; "
                 "encode the high-resolution pass directly in the custom workflow instead"
+            )
+        if template_path and lora is not None:
+            raise RuntimeError(
+                "COMFYUI_LORA_CUSTOM_WORKFLOW_UNSUPPORTED:automatic LoRA insertion requires the canonical built-in graph; "
+                "encode the LoRA loader directly in the custom workflow instead"
             )
 
         workflow = super().build_txt2img_workflow(
@@ -268,6 +369,8 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         self._apply_primary_sampling(workflow, settings)
         if settings.second_pass_enabled:
             self._append_hero_second_pass(workflow, settings)
+        if lora is not None:
+            self._apply_lora(workflow, lora)
         return workflow
 
     def queue_image(
@@ -294,6 +397,9 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         second_pass_scheduler: Optional[str] = None,
         second_pass_denoise: Any = None,
         latent_upscale_method: Optional[str] = None,
+        lora_name: Optional[str] = None,
+        lora_model_strength: Any = None,
+        lora_clip_strength: Any = None,
     ) -> Dict[str, Any]:
         if not isinstance(prompt, str) or not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
@@ -316,6 +422,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             latent_upscale_method=latent_upscale_method,
         )
         settings = self.resolve_sampling(settings)
+        lora = self._resolve_lora(lora_name, lora_model_strength, lora_clip_strength)
 
         template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
         workflow = self.build_txt2img_workflow(
@@ -340,11 +447,14 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             second_pass_scheduler=second_pass_scheduler,
             second_pass_denoise=second_pass_denoise,
             latent_upscale_method=latent_upscale_method,
+            lora_name=lora_name,
+            lora_model_strength=lora_model_strength,
+            lora_clip_strength=lora_clip_strength,
         )
         if (
             template_path
             and self._truthy_environment("EVAVO_PREFLIGHT_CUSTOM_WORKFLOW", default=True)
-        ) or settings.second_pass_enabled:
+        ) or settings.second_pass_enabled or lora is not None:
             self.preflight_workflow(workflow)
 
         response = self._request("/prompt", method="POST", payload={"prompt": workflow}, timeout=30.0)
@@ -383,4 +493,5 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             "render_passes": settings.pass_count if quality_applied else None,
             "output_width": settings.output_width if quality_applied else None,
             "output_height": settings.output_height if quality_applied else None,
+            "lora": lora,
         }
