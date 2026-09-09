@@ -128,6 +128,12 @@ if ($LASTEXITCODE -ne 0) {
     Fail "Agent/MCP integration tests failed." 3
 }
 
+Write-Host "Running workflow-aware strict agent-doctor validation..." -ForegroundColor Cyan
+& $python (Join-Path $PSScriptRoot "test-agent-doctor-workflows.py")
+if ($LASTEXITCODE -ne 0) {
+    Fail "Workflow-aware agent-doctor tests failed." 3
+}
+
 Write-Host "Running EVAVO bootstrap..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "evavo.py") bootstrap --skip-pull
 $code = $LASTEXITCODE
@@ -156,7 +162,7 @@ if (-not $SkipComfyUIProvision) {
 }
 & $python @doctorArgs
 if ($LASTEXITCODE -ne 0) {
-    Fail "Agent doctor found a blocking configuration problem. Configure a checkpoint source/shared model root if required, then rerun." 3
+    Fail "Agent doctor found a blocking generation-contract problem. Configure the required workflow/model source/shared model root, then rerun." 3
 }
 
 Write-Host "Running final backend status..." -ForegroundColor Cyan
@@ -261,10 +267,11 @@ Write-Host "EVAVO workstation setup completed." -ForegroundColor Green
 Write-Host "  PowerShell syntax validation: passed" -ForegroundColor Green
 Write-Host "  Dependencies: installed/validated" -ForegroundColor Green
 Write-Host "  Provisioning/runtime safety tests: passed" -ForegroundColor Green
-Write-Host "  Backend repair/file-boundary tests: passed" -ForegroundColor Green
+Write-Host "  Backend repair/file-boundary/workflow-preflight tests: passed" -ForegroundColor Green
 Write-Host "  ChatGPT tunnel security-contract tests: passed" -ForegroundColor Green
+Write-Host "  Workflow-aware strict doctor tests: passed" -ForegroundColor Green
 Write-Host "  Operational tests: passed" -ForegroundColor Green
-Write-Host "  MCP negotiation/generation/model-inventory tests: passed" -ForegroundColor Green
+Write-Host "  MCP negotiation/generation/model-inventory/workflow-preflight tests: passed" -ForegroundColor Green
 if (-not $SkipAgentConfiguration) {
     Write-Host "  Claude stdio MCP: installed/updated" -ForegroundColor Green
     Write-Host "  Private HTTP MCP autostart: installed and started" -ForegroundColor Green
@@ -272,7 +279,7 @@ if (-not $SkipAgentConfiguration) {
 if (-not $SkipComfyUIProvision) {
     Write-Host "  ComfyUI provisioning: enabled when missing" -ForegroundColor Green
 }
-Write-Host "  Agent doctor: real renderer + checkpoint + shared roots + model inventory checked" -ForegroundColor Green
+Write-Host "  Agent doctor: active generation contract + shared roots + model inventory checked" -ForegroundColor Green
 if (-not $SkipChatGPTTunnel) {
     Write-Host "  ChatGPT Secure MCP Tunnel: $chatGptTunnelStatus" -ForegroundColor $(if ($chatGptTunnelStatus -match "running") { "Green" } else { "Yellow" })
 }
