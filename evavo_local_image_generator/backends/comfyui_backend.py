@@ -109,7 +109,13 @@ class ComfyUIBackend:
         return self._extract_choice_values(info, node_class, input_name)
 
     def checkpoints(self) -> List[str]:
-        return self.node_input_choices("CheckpointLoaderSimple", "ckpt_name")
+        """Return checkpoint choices; a missing checkpoint loader means an empty inventory, not a dead backend."""
+        try:
+            return self.node_input_choices("CheckpointLoaderSimple", "ckpt_name")
+        except RuntimeError as exc:
+            if str(exc).startswith("COMFYUI_HTTP_ERROR:404:"):
+                return []
+            raise
 
     def model_inventory(self, limit_per_category: int = 200) -> Dict[str, Any]:
         """Inspect common model loader choices without failing on missing node classes."""
@@ -273,7 +279,6 @@ class ComfyUIBackend:
         for name, value in values.items():
             replacements[f"{{{{{name}}}}}"] = value
             replacements[f"{{{{{name.upper()}}}}}"] = value
-        # Historical/documented aliases for CFG are intentionally both valid.
         replacements["{{CFG}}"] = cfg_scale
         replacements["{{cfg}}"] = cfg_scale
         return replacements
@@ -334,7 +339,6 @@ class ComfyUIBackend:
                         continue
                     value = inputs[input_name]
                     choices = self._workflow_choice_values(spec)
-                    # A list such as ["12", 0] is a dynamic connection, not a literal choice.
                     if choices and isinstance(value, str) and value not in choices:
                         invalid_choices.append({
                             "node_id": node_key,
@@ -371,9 +375,6 @@ class ComfyUIBackend:
         template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
 
         if template_path:
-            # Custom API workflows may use UNETLoader/CLIPLoader rather than a
-            # CheckpointLoaderSimple. Do not auto-provision a checkpoint merely
-            # because that optional loader inventory is empty.
             preferred = checkpoint or os.getenv("EVAVO_COMFYUI_CHECKPOINT")
             if preferred:
                 try:
