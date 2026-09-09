@@ -68,10 +68,16 @@ if (-not $SkipDependencies) {
     }
 }
 
-Write-Host "Running provisioning safety tests..." -ForegroundColor Cyan
+Write-Host "Running provisioning/runtime safety tests..." -ForegroundColor Cyan
 & $python (Join-Path $PSScriptRoot "test-provisioning.py")
 if ($LASTEXITCODE -ne 0) {
-    Fail "Provisioning tests failed." 3
+    Fail "Provisioning/runtime safety tests failed." 3
+}
+
+Write-Host "Running backend automation/MCP file-boundary tests..." -ForegroundColor Cyan
+& $python (Join-Path $PSScriptRoot "test-backend-automation.py")
+if ($LASTEXITCODE -ne 0) {
+    Fail "Backend automation/MCP file-boundary tests failed." 3
 }
 
 Write-Host "Running Claude/ChatGPT MCP transport validation..." -ForegroundColor Cyan
@@ -108,7 +114,7 @@ if (-not $SkipComfyUIProvision) {
 }
 & $python @doctorArgs
 if ($LASTEXITCODE -ne 0) {
-    Fail "Agent doctor found a blocking configuration problem. If the only blocker is a missing model, configure EVAVO_CHECKPOINT_FILE or EVAVO_CHECKPOINT_URL and rerun." 3
+    Fail "Agent doctor found a blocking configuration problem. Configure a checkpoint source/shared model root if required, then rerun." 3
 }
 
 Write-Host "Running final backend status..." -ForegroundColor Cyan
@@ -120,9 +126,10 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "EVAVO workstation setup completed." -ForegroundColor Green
 Write-Host "  Dependencies: installed/validated" -ForegroundColor Green
-Write-Host "  Provisioning safety tests: passed" -ForegroundColor Green
+Write-Host "  Provisioning/runtime safety tests: passed" -ForegroundColor Green
+Write-Host "  Backend repair/file-boundary tests: passed" -ForegroundColor Green
 Write-Host "  Operational tests: passed" -ForegroundColor Green
-Write-Host "  MCP negotiation/generation tests: passed" -ForegroundColor Green
+Write-Host "  MCP negotiation/generation/model-inventory tests: passed" -ForegroundColor Green
 if (-not $SkipAgentConfiguration) {
     Write-Host "  Claude stdio MCP: installed/updated" -ForegroundColor Green
     Write-Host "  HTTP MCP autostart: installed and started" -ForegroundColor Green
@@ -130,7 +137,7 @@ if (-not $SkipAgentConfiguration) {
 if (-not $SkipComfyUIProvision) {
     Write-Host "  ComfyUI provisioning: enabled when missing" -ForegroundColor Green
 }
-Write-Host "  Agent doctor: real renderer + checkpoint readiness passed" -ForegroundColor Green
+Write-Host "  Agent doctor: real renderer + checkpoint + model inventory checked" -ForegroundColor Green
 Write-Host ""
 Write-Host "Claude: restart Claude Desktop so it reloads its MCP configuration." -ForegroundColor Yellow
 Write-Host "Local HTTP MCP endpoint: http://127.0.0.1:$McpPort/mcp" -ForegroundColor Green
