@@ -102,3 +102,12 @@ def compatibility_main(
     if args.json:
         command.append("--json")
     return _run(command)
+
+
+if __name__ == "__main__":
+    raise SystemExit(
+        compatibility_main(
+            default_project="legacy-generation",
+            description="Run explicit real EVAVO native image generation through the canonical compatibility CLI",
+        )
+    )
