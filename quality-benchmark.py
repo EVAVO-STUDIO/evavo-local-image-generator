@@ -15,52 +15,11 @@ from pathlib import Path
 from typing import Any, Dict
 
 from evavo_local_image_generator.backends import ComfyUIBackend
+from evavo_local_image_generator.prompt_quality import load_prompt_corpus
 from evavo_local_image_generator.quality_profiles import profile_names
 
-
-PROMPTS = {
-    "product": {
-        "prompt": (
-            "Minimal black anodized aluminium desk speaker on a matte charcoal surface, three-quarter front angle, "
-            "soft neutral seamless background, large diffused key light with narrow edge light, precise machined edges "
-            "and fine metal grain, clean commercial product photography, accurate geometry, natural contact shadow, no branding"
-        ),
-        "negative": "warped product, duplicate product, floating object, incorrect perspective, melted edges, fake label, text, logo, watermark, excessive bloom",
-    },
-    "portrait": {
-        "prompt": (
-            "Studio portrait of a weathered shipwright in his late fifties, calm direct expression, chest-up three-quarter framing, "
-            "dark timber workshop behind him, large soft window key light from camera left, subtle warm practical rim light, "
-            "85mm portrait-lens perspective, realistic skin texture, natural grey hair detail, coherent hands, restrained cinematic color grade"
-        ),
-        "negative": "waxy skin, plastic skin, crossed eyes, asymmetrical pupils, malformed hands, extra fingers, duplicate face, blurry, oversharpened, watermark, text",
-    },
-    "landscape": {
-        "prompt": (
-            "Remote temperate coastline just after a storm, wet black rocks and tidal pools in the foreground, wind-bent grass "
-            "and a narrow track through the midground, layered sea cliffs fading into rain haze, broken cloud with low late-afternoon light, "
-            "eye-level 35mm landscape perspective, realistic wet stone and vegetation detail, controlled dynamic range"
-        ),
-        "negative": "muddy detail, smeared foliage, repeated rocks, impossible horizon, oversaturated sky, haloing, blurry, watermark, text",
-    },
-    "interior": {
-        "prompt": (
-            "Late Victorian reading room, fixed eye-level camera facing the long wall, broad clear floor lane in the lower third, "
-            "dark oak shelves and worn leather chairs, overcast daylight through tall sash windows with restrained gas-lamp warmth, "
-            "quiet dusty atmosphere, documentary architectural photography, straight verticals, coherent scale"
-        ),
-        "negative": "fisheye, extreme perspective, warped walls, floating furniture, duplicate doors, modern fixtures, blurry, text, watermark",
-    },
-    "game_art": {
-        "prompt": (
-            "1871 riverfront ship chandlery interior, fixed front-on side-stage camera with a broad horizontal gameplay lane, "
-            "shop counter and merchant as the main midground silhouette, readable shelves, repair bench and exit zones, "
-            "humid rain-darkened daylight with restrained lamp glow, black-and-white engraved DOS-era game art with dense hatching "
-            "and hard silhouettes, historically coherent materials, uncluttered lower-third gameplay lane"
-        ),
-        "negative": "modern signage, electric lights, plastic, flat modern UI, photorealism, fantasy decoration, extreme perspective, isometric view, cluttered floor, watermark, text",
-    },
-}
+ROOT = Path(__file__).resolve().parent
+DEFAULT_PROMPT_CORPUS = ROOT / "config" / "quality-golden-prompts-v1.json"
 
 
 def now_stamp() -> str:
@@ -102,6 +61,7 @@ def main() -> int:
     parser.add_argument("--endpoint", default=os.getenv("COMFYUI_ENDPOINT", "http://127.0.0.1:8188"))
     parser.add_argument("--profiles", default="quality,euler_reference,legacy_768_reference")
     parser.add_argument("--prompts", default="product,portrait,landscape,interior")
+    parser.add_argument("--prompt-corpus", default=str(DEFAULT_PROMPT_CORPUS))
     parser.add_argument("--seeds", default="1337")
     parser.add_argument("--checkpoint", default=os.getenv("EVAVO_COMFYUI_CHECKPOINT"))
     parser.add_argument("--output", default=str(Path(".evavo") / "quality-results"))
@@ -109,14 +69,20 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Validate selections and print plan without rendering")
     args = parser.parse_args()
 
+    try:
+        corpus = load_prompt_corpus(args.prompt_corpus)
+    except ValueError as exc:
+        parser.error(str(exc))
+    prompts = corpus["prompts"]
+
     profiles = parse_csv(args.profiles)
     invalid_profiles = [name for name in profiles if name not in profile_names() and name != "custom"]
     if invalid_profiles:
         parser.error(f"unknown profiles: {', '.join(invalid_profiles)}; available: {', '.join(profile_names())}")
     prompt_ids = parse_csv(args.prompts)
-    invalid_prompts = [name for name in prompt_ids if name not in PROMPTS]
+    invalid_prompts = [name for name in prompt_ids if name not in prompts]
     if invalid_prompts:
-        parser.error(f"unknown prompts: {', '.join(invalid_prompts)}; available: {', '.join(sorted(PROMPTS))}")
+        parser.error(f"unknown prompts: {', '.join(invalid_prompts)}; available: {', '.join(sorted(prompts))}")
     try:
         seeds = [int(value) for value in parse_csv(args.seeds)]
     except ValueError as exc:
@@ -128,8 +94,13 @@ def main() -> int:
         for profile in profiles
         for seed in seeds
     ]
+    corpus_receipt = {
+        "prompt_set_version": corpus.get("prompt_set_version"),
+        "source": corpus["source"],
+        "sha256": corpus["sha256"],
+    }
     if args.dry_run:
-        print(json.dumps({"ok": True, "render_count": len(plan), "plan": plan}, indent=2))
+        print(json.dumps({"ok": True, "prompt_corpus": corpus_receipt, "render_count": len(plan), "plan": plan}, indent=2))
         return 0
 
     backend = ComfyUIBackend(args.endpoint)
@@ -143,12 +114,13 @@ def main() -> int:
     run_dir = Path(args.output).expanduser().resolve() / now_stamp()
     run_dir.mkdir(parents=True, exist_ok=False)
     manifest: Dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "started_at": datetime.now().astimezone().isoformat(),
         "endpoint": backend.endpoint,
         "health": health,
         "sampling_inventory": sampling,
         "checkpoint": args.checkpoint,
+        "prompt_corpus": corpus_receipt,
         "plan": plan,
         "results": [],
         "failures": [],
@@ -156,7 +128,8 @@ def main() -> int:
     write_json(run_dir / "manifest.json", manifest)
 
     for index, item in enumerate(plan, 1):
-        prompt_spec = PROMPTS[item["prompt_id"]]
+        prompt_spec = prompts[item["prompt_id"]]
+        prompt_lint = prompt_spec["lint"]
         project = f"quality-benchmark/{item['prompt_id']}/{item['profile']}/{item['seed']}"
         print(f"[{index}/{len(plan)}] {item['prompt_id']} | {item['profile']} | seed {item['seed']}")
         started = time.perf_counter()
@@ -213,6 +186,9 @@ def main() -> int:
                 **item,
                 "status": "completed",
                 "elapsed_s": round(elapsed, 3),
+                "prompt_sha256": prompt_lint["prompt_sha256"],
+                "prompt_warning_count": prompt_lint["warning_count"],
+                "review_focus": prompt_spec.get("review_focus", []),
                 "submitted_seed": submitted_seed,
                 "checkpoint": queued.get("checkpoint"),
                 "workflow_sha256": queued.get("workflow_sha256"),
@@ -230,7 +206,7 @@ def main() -> int:
             }
             manifest["results"].append(result)
         except Exception as exc:
-            failure = {**item, "status": "failed", "error": str(exc)}
+            failure = {**item, "prompt_sha256": prompt_lint["prompt_sha256"], "status": "failed", "error": str(exc)}
             manifest["failures"].append(failure)
             print(f"  FAIL: {exc}", file=sys.stderr)
         write_json(run_dir / "manifest.json", manifest)
@@ -240,6 +216,7 @@ def main() -> int:
     write_json(run_dir / "manifest.json", manifest)
 
     print(f"\nQuality benchmark manifest: {run_dir / 'manifest.json'}")
+    print(f"Prompt corpus: {corpus_receipt['prompt_set_version']} {corpus_receipt['sha256']}")
     print(f"Completed: {len(manifest['results'])}/{len(plan)}")
     return 0 if manifest["ok"] else 1
 
