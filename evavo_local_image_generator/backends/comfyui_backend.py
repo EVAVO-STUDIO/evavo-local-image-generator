@@ -219,7 +219,6 @@ class ComfyUIBackend:
         missing = (preferred is not None and preferred not in checkpoints) or (preferred is None and not checkpoints)
         if missing and allow_repair and self._provision_configured_checkpoint():
             checkpoints = self.checkpoints()
-
         if preferred:
             if preferred in checkpoints:
                 return preferred
@@ -272,18 +271,7 @@ class ComfyUIBackend:
         return rendered
 
     @staticmethod
-    def _workflow_replacements(
-        *,
-        prompt: str,
-        negative_prompt: str,
-        checkpoint: str,
-        width: int,
-        height: int,
-        steps: int,
-        cfg_scale: float,
-        seed: int,
-        filename_prefix: str,
-    ) -> Dict[str, Any]:
+    def _workflow_replacements(*, prompt: str, negative_prompt: str, checkpoint: str, width: int, height: int, steps: int, cfg_scale: float, seed: int, filename_prefix: str) -> Dict[str, Any]:
         values: Dict[str, Any] = {
             "prompt": prompt,
             "negative_prompt": negative_prompt,
@@ -312,14 +300,12 @@ class ComfyUIBackend:
     def preflight_workflow(self, workflow: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(workflow, dict) or not workflow:
             raise RuntimeError("COMFYUI_WORKFLOW_PREFLIGHT_FAILED:workflow must be a non-empty object")
-
         info = self.object_info()
         missing_nodes: List[Dict[str, str]] = []
         malformed_nodes: List[Dict[str, str]] = []
         missing_inputs: List[Dict[str, str]] = []
         invalid_choices: List[Dict[str, Any]] = []
         node_classes = set()
-
         for node_id, node in workflow.items():
             node_key = str(node_id)
             if not isinstance(node, dict):
@@ -334,7 +320,6 @@ class ComfyUIBackend:
             if not isinstance(inputs, dict):
                 malformed_nodes.append({"node_id": node_key, "reason": "inputs must be an object"})
                 continue
-
             definition = info.get(class_type)
             if not isinstance(definition, dict):
                 missing_nodes.append({"node_id": node_key, "class_type": class_type})
@@ -342,13 +327,11 @@ class ComfyUIBackend:
             input_definition = definition.get("input")
             if not isinstance(input_definition, dict):
                 continue
-
             required = input_definition.get("required")
             if isinstance(required, dict):
                 for input_name in required:
                     if input_name not in inputs:
                         missing_inputs.append({"node_id": node_key, "class_type": class_type, "input": str(input_name)})
-
             for section_name in ("required", "optional"):
                 section = input_definition.get(section_name)
                 if not isinstance(section, dict):
@@ -368,7 +351,6 @@ class ComfyUIBackend:
                             "available": choices[:20],
                             "truncated": len(choices) > 20,
                         })
-
         result: Dict[str, Any] = {
             "ok": not (missing_nodes or malformed_nodes or missing_inputs or invalid_choices),
             "node_count": len(workflow),
@@ -392,7 +374,6 @@ class ComfyUIBackend:
         seed_value = int(seed) if seed is not None else secrets.randbits(63)
         safe_prefix = "".join(ch if ch.isalnum() or ch in "_-/" else "_" for ch in filename_prefix)[:120] or "EVAVO"
         template_path = workflow_path or os.getenv("EVAVO_COMFYUI_WORKFLOW")
-
         if template_path:
             preferred = checkpoint or os.getenv("EVAVO_COMFYUI_CHECKPOINT")
             if preferred:
@@ -405,7 +386,6 @@ class ComfyUIBackend:
                 chosen_checkpoint = available[0] if available else ""
         else:
             chosen_checkpoint = self.choose_checkpoint(checkpoint, allow_repair=True)
-
         replacements = self._workflow_replacements(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -419,7 +399,6 @@ class ComfyUIBackend:
         )
         if template_path:
             return self.load_workflow_template(template_path, replacements)
-
         return {
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": chosen_checkpoint}},
             "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
@@ -477,6 +456,31 @@ class ComfyUIBackend:
             raise ValueError("prompt_id must be a non-empty string")
         return self._request(f"/history/{urllib.parse.quote(prompt_id, safe='')}", timeout=15.0)
 
+    def queue_state(self) -> Dict[str, Any]:
+        """Return ComfyUI's current running/pending queue snapshot."""
+        return self._request("/queue", timeout=10.0)
+
+    def job_detail(self, prompt_id: str) -> Dict[str, Any]:
+        """Return current ComfyUI job details when the jobs namespace is supported."""
+        if not isinstance(prompt_id, str) or not prompt_id.strip():
+            raise ValueError("prompt_id must be a non-empty string")
+        encoded = urllib.parse.quote(prompt_id.strip(), safe="")
+        return self._request(f"/api/jobs/{encoded}", timeout=10.0)
+
+    def cancel_job(self, prompt_id: str) -> Dict[str, Any]:
+        """Request idempotent per-job cancellation on current ComfyUI."""
+        if not isinstance(prompt_id, str) or not prompt_id.strip():
+            raise ValueError("prompt_id must be a non-empty string")
+        encoded = urllib.parse.quote(prompt_id.strip(), safe="")
+        return self._request(f"/api/jobs/{encoded}/cancel", method="POST", payload={}, timeout=15.0)
+
+    def delete_pending(self, prompt_id: str) -> None:
+        """Delete exactly one legacy pending prompt without broad interruption."""
+        if not isinstance(prompt_id, str) or not prompt_id.strip():
+            raise ValueError("prompt_id must be a non-empty string")
+        with self._open("/queue", method="POST", payload={"delete": [prompt_id.strip()]}, timeout=15.0) as response:
+            response.read()
+
     @staticmethod
     def _outputs_from_history(history: Dict[str, Any], prompt_id: str) -> List[Dict[str, str]]:
         entry = history.get(prompt_id)
@@ -522,11 +526,16 @@ class ComfyUIBackend:
                 outputs = self._outputs_from_history(history, prompt_id)
                 if outputs:
                     return outputs
-                status = entry.get("status")
-                if isinstance(status, dict):
-                    messages = status.get("messages")
-                    if status.get("completed") is False and messages:
-                        raise RuntimeError(f"COMFYUI_EXECUTION_FAILED:{messages}")
+                status = entry.get("status") if isinstance(entry.get("status"), dict) else {}
+                status_str = str(status.get("status_str", "")).strip().lower()
+                completed = status.get("completed")
+                messages = status.get("messages") if isinstance(status.get("messages"), list) else []
+                if status_str in {"cancelled", "canceled", "interrupted"}:
+                    raise RuntimeError(f"COMFYUI_EXECUTION_CANCELLED:{prompt_id}")
+                if status_str in {"error", "failed", "failure"} or (completed is False and messages):
+                    raise RuntimeError(f"COMFYUI_EXECUTION_FAILED:{messages or status_str or 'unknown error'}")
+                if completed is True or status_str in {"success", "completed"}:
+                    raise RuntimeError(f"COMFYUI_NO_OUTPUT:{prompt_id}:workflow completed without an image output")
             time.sleep(interval)
         raise RuntimeError(f"COMFYUI_WAIT_TIMEOUT:{prompt_id}:{timeout:g}s")
 
@@ -546,7 +555,6 @@ class ComfyUIBackend:
             raise ValueError("max_bytes must be an integer") from exc
         if max_bytes <= 0:
             raise ValueError("max_bytes must be greater than zero")
-
         destination_dir = Path(target_dir).expanduser().resolve()
         destination_dir.mkdir(parents=True, exist_ok=True)
         destination = destination_dir / safe_name
