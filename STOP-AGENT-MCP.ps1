@@ -46,7 +46,7 @@ function Test-EvavoMcpListenerIdentity($Listener) {
         if ($commandLine -notmatch $pattern) { return $false }
     }
 
-    if ($executable -and [StringComparer]::OrdinalIgnoreCase.Equals([IO.Path]::GetFullPath($executable), [IO.Path]::GetFullPath($python))) {
+    if ($executable -and [System.StringComparer]::OrdinalIgnoreCase.Equals([System.IO.Path]::GetFullPath($executable), [System.IO.Path]::GetFullPath($python))) {
         return $true
     }
 
