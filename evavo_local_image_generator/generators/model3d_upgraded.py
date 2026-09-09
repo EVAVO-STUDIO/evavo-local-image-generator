@@ -1,14 +1,13 @@
-"""3D model generation"""
+"""Historical 3D compatibility wrapper with explicit unsupported behavior."""
+
+from __future__ import annotations
+
+from ._unsupported import unsupported
+
 
 class Model3DGenerator:
-    def __init__(self, endpoint: str = "http://127.0.0.1:8889"):
+    def __init__(self, endpoint: str | None = None):
         self.endpoint = endpoint
 
     async def generate(self, prompt: str, format: str = "obj") -> dict:
-        """Generate 3D model from text"""
-        return {
-            "status": "queued",
-            "type": "3d_model",
-            "prompt": prompt,
-            "format": format,
-        }
+        unsupported("3d-model")
