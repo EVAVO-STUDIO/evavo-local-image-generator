@@ -33,6 +33,19 @@
         "purpose": ["local MCP clients", "integration testing", "private target for OpenAI Secure MCP Tunnel"]
       },
       "owned_generation_modalities": ["image"],
+      "file_policy": {
+        "default_output_root_environment": "EVAVO_GENERATION_OUTPUT_DIR",
+        "additional_output_roots_environment": "EVAVO_MCP_OUTPUT_ROOTS",
+        "arbitrary_output_directories_allowed": false,
+        "owner_workflow_environment": "EVAVO_COMFYUI_WORKFLOW",
+        "tool_workflow_paths_default_allowed": false,
+        "tool_workflow_path_opt_in_environment": "EVAVO_MCP_ALLOW_WORKFLOW_PATHS",
+        "tool_workflow_root_environment": "EVAVO_MCP_WORKFLOW_ROOT",
+        "ordinary_file_identity_required": true,
+        "image_signature_validation": true,
+        "persistent_profiles_keep_non_secret_policy": true
+      },
+      "invalid_request_preflight_before_backend_work": true,
       "tools": [
         "provision_backend", "ensure_backend", "health_check", "discover_backends", "list_checkpoints",
         "model_inventory", "workflow_preflight", "generate_image", "generate_batch", "generation_status",
@@ -63,6 +76,7 @@
       "single_live_gateway_per_task_state": true,
       "state_in_use_error": "GATEWAY_STATE_IN_USE",
       "corrupt_task_state_fail_closed": true,
+      "result_file_identity_required": true,
       "image_endpoint": "/generate/image",
       "owned_generation_modalities": ["image"],
       "auxiliary_delegation": {
@@ -89,7 +103,8 @@
     "wait_and_download": true,
     "shared_task_history": true,
     "native_mcp_image_content": true,
-    "gateway_auxiliary_provider_readiness": true
+    "gateway_auxiliary_provider_readiness": true,
+    "persistent_mcp_file_policy": true
   },
   "security": {
     "public_bind_by_default": false,
@@ -98,12 +113,21 @@
     "gateway_chunked_request_limit": true,
     "gateway_request_workflow_path_default_allowed": false,
     "gateway_request_workflow_root_confinement": true,
+    "gateway_result_symlink_or_parent_redirection_rejected": true,
     "gateway_structured_config_errors": true,
     "gateway_task_state_corruption_fail_closed": true,
     "gateway_task_id_interprocess_atomic": true,
     "gateway_task_state_single_live_owner": true,
     "service_manager_state_corruption_fail_closed": true,
+    "service_manager_state_interprocess_lock": true,
+    "service_manager_lifecycle_interprocess_lock": true,
     "service_manager_provider_secret_plaintext_in_state": false,
+    "mcp_tool_workflow_path_default_allowed": false,
+    "mcp_tool_workflow_root_confinement": true,
+    "mcp_output_directory_root_confinement": true,
+    "mcp_output_symlink_or_parent_redirection_rejected": true,
+    "mcp_image_signature_validation": true,
+    "mcp_invalid_file_or_wait_policy_preflight": true,
     "broad_python_process_kill": false,
     "managed_process_identity_verification": true,
     "user_managed_comfyui_never_killed": true,
@@ -112,6 +136,7 @@
     "provider_shell_execution": false,
     "provider_receipt_required": true,
     "provider_output_confinement": true,
+    "provider_source_and_destination_symlink_rejection": true,
     "provider_receipt_digest_verification_when_supplied": true,
     "chatgpt_tunnel_release_sha256_verification": true,
     "chatgpt_tunnel_executable_sha256_verification": true,
