@@ -51,7 +51,7 @@ class SafeMainGitTests(unittest.TestCase):
             "push --force",
             "remove-item .git",
             "rmtree(root / '.git')",
-            "index.lock").
+        )
         for token in forbidden:
             with self.subTest(token=token):
                 self.assertNotIn(token, source)
