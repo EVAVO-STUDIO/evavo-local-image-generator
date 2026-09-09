@@ -172,13 +172,7 @@ class ComfyUIBackend:
             raise RuntimeError(f"COMFYUI_CHECKPOINT_PROVISIONER_MISSING:{provisioner}")
         command = [sys.executable, str(provisioner), "--checkpoint-only", "--json"]
         try:
-            result = subprocess.run(
-                command,
-                cwd=str(repo_root),
-                capture_output=True,
-                text=True,
-                timeout=3600,
-            )
+            result = subprocess.run(command, cwd=str(repo_root), capture_output=True, text=True, timeout=3600)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("COMFYUI_CHECKPOINT_PROVISION_TIMEOUT:checkpoint provisioning exceeded one hour") from exc
         except OSError as exc:
@@ -251,6 +245,39 @@ class ComfyUIBackend:
             raise RuntimeError("COMFYUI_WORKFLOW_INVALID:rendered workflow is empty")
         return rendered
 
+    @staticmethod
+    def _workflow_replacements(
+        *,
+        prompt: str,
+        negative_prompt: str,
+        checkpoint: str,
+        width: int,
+        height: int,
+        steps: int,
+        cfg_scale: float,
+        seed: int,
+        filename_prefix: str,
+    ) -> Dict[str, Any]:
+        values: Dict[str, Any] = {
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "checkpoint": checkpoint,
+            "width": width,
+            "height": height,
+            "steps": steps,
+            "cfg_scale": cfg_scale,
+            "seed": seed,
+            "filename_prefix": filename_prefix,
+        }
+        replacements: Dict[str, Any] = {}
+        for name, value in values.items():
+            replacements[f"{{{{{name}}}}}"] = value
+            replacements[f"{{{{{name.upper()}}}}}"] = value
+        # Historical/documented aliases for CFG are intentionally both valid.
+        replacements["{{CFG}}"] = cfg_scale
+        replacements["{{cfg}}"] = cfg_scale
+        return replacements
+
     def build_txt2img_workflow(self, prompt: str, *, negative_prompt: str = "", width: int = 1024, height: int = 1024, steps: int = 24, cfg_scale: float = 7.0, seed: Optional[int] = None, checkpoint: Optional[str] = None, filename_prefix: str = "EVAVO", workflow_path: Optional[str] = None) -> Dict[str, Any]:
         width = self._dimension(width, 1024)
         height = self._dimension(height, 1024)
@@ -278,17 +305,17 @@ class ComfyUIBackend:
         else:
             chosen_checkpoint = self.choose_checkpoint(checkpoint, allow_repair=True)
 
-        replacements: Dict[str, Any] = {
-            "{{prompt}}": prompt,
-            "{{negative_prompt}}": negative_prompt,
-            "{{checkpoint}}": chosen_checkpoint,
-            "{{width}}": width,
-            "{{height}}": height,
-            "{{steps}}": steps,
-            "{{cfg_scale}}": cfg_scale,
-            "{{seed}}": seed_value,
-            "{{filename_prefix}}": safe_prefix,
-        }
+        replacements = self._workflow_replacements(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            checkpoint=chosen_checkpoint,
+            width=width,
+            height=height,
+            steps=steps,
+            cfg_scale=cfg_scale,
+            seed=seed_value,
+            filename_prefix=safe_prefix,
+        )
         if template_path:
             return self.load_workflow_template(template_path, replacements)
 
