@@ -54,9 +54,28 @@ $environment = [ordered]@{
     "PYTHONUNBUFFERED" = "1"
     "EVAVO_COMFYUI_ENDPOINT" = "http://127.0.0.1:8188"
     "EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path $PSScriptRoot ".evavo\outputs")
+    "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
 }
-if ($env:EVAVO_COMFYUI_HOME) {
-    $environment["EVAVO_COMFYUI_HOME"] = $env:EVAVO_COMFYUI_HOME
+
+# Persist only local/non-secret configuration into Claude Desktop. In
+# particular, EVAVO_CHECKPOINT_URL is intentionally not copied because signed
+# model URLs can contain credentials/tokens in plaintext.
+$nonSecretEnvironment = @(
+    "EVAVO_COMFYUI_HOME",
+    "EVAVO_COMFYUI_PYTHON",
+    "EVAVO_CHECKPOINT_FILE",
+    "EVAVO_CHECKPOINT_SHA256",
+    "EVAVO_CHECKPOINT_NAME",
+    "EVAVO_COMFYUI_WORKFLOW",
+    "EVAVO_COMFYUI_CHECKPOINT",
+    "EVAVO_TASK_HISTORY",
+    "EVAVO_TORCH_INDEX_URL"
+)
+foreach ($name in $nonSecretEnvironment) {
+    $value = [Environment]::GetEnvironmentVariable($name)
+    if ($value) {
+        $environment[$name] = $value
+    }
 }
 
 $server = [pscustomobject][ordered]@{
@@ -79,4 +98,8 @@ Write-Host "  $configPath" -ForegroundColor Green
 Write-Host "Server: $ServerName" -ForegroundColor Green
 Write-Host "Python: $python" -ForegroundColor Green
 Write-Host "Repo:   $PSScriptRoot" -ForegroundColor Green
+Write-Host "Backend auto-provision: enabled (operator-controlled model sources only)" -ForegroundColor Green
+if ($env:EVAVO_CHECKPOINT_URL) {
+    Write-Host "Note: EVAVO_CHECKPOINT_URL was not persisted into Claude config because URLs may contain secrets." -ForegroundColor Yellow
+}
 Write-Host "Restart Claude Desktop so it reloads MCP configuration." -ForegroundColor Yellow
