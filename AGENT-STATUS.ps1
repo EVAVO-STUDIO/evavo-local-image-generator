@@ -2,6 +2,7 @@
 
 param(
     [int]$McpPort = 8765,
+    [int]$GatewayPort = 8000,
     [switch]$Json,
     [switch]$CheckTunnelControlPlane
 )
@@ -9,8 +10,10 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-if ($McpPort -lt 1 -or $McpPort -gt 65535) {
-    throw "MCP port must be between 1 and 65535."
+foreach ($portValue in @($McpPort, $GatewayPort)) {
+    if ($portValue -lt 1 -or $portValue -gt 65535) {
+        throw "Ports must be between 1 and 65535."
+    }
 }
 
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
@@ -31,6 +34,16 @@ function Invoke-JsonPython([string[]]$Arguments) {
         $payload = $null
     }
     return [pscustomobject]@{ exit_code = $code; payload = $payload; raw = $text }
+}
+
+function Invoke-LocalJson([string]$Uri) {
+    try {
+        $payload = Invoke-RestMethod -Uri $Uri -Method Get -TimeoutSec 2 -ErrorAction Stop
+        return [pscustomobject]@{ ok = $true; payload = $payload; error = $null }
+    }
+    catch {
+        return [pscustomobject]@{ ok = $false; payload = $null; error = $_.Exception.Message }
+    }
 }
 
 $repoDoctor = Invoke-JsonPython @((Join-Path $PSScriptRoot "evavo.py"), "doctor", "--json")
@@ -88,6 +101,18 @@ if ($tunnel.configured) {
     }
 }
 
+$gatewayBase = "http://127.0.0.1:$GatewayPort"
+$gatewayHealth = Invoke-LocalJson "$gatewayBase/health"
+$gatewayServices = if ($gatewayHealth.ok) { Invoke-LocalJson "$gatewayBase/services" } else { [pscustomobject]@{ ok = $false; payload = $null; error = "gateway not reachable" } }
+$gateway = [ordered]@{
+    running = [bool]$gatewayHealth.ok
+    port = $GatewayPort
+    core_healthy = [bool]($gatewayHealth.ok -and $gatewayHealth.payload -and $gatewayHealth.payload.status -eq "healthy")
+    health = $gatewayHealth.payload
+    providers = $gatewayServices.payload
+    error = if ($gatewayHealth.ok) { $gatewayServices.error } else { $gatewayHealth.error }
+}
+
 $repoOk = $repoDoctor.exit_code -eq 0 -and $repoDoctor.payload -and $repoDoctor.payload.ok
 $agentOk = $agentDoctor.exit_code -eq 0 -and $agentDoctor.payload -and $agentDoctor.payload.ok
 $backendOk = $backendStatus.exit_code -eq 0 -and $backendStatus.payload -and $backendStatus.payload.ok
@@ -101,10 +126,11 @@ $payload = [pscustomobject][ordered]@{
     backend = [ordered]@{ ok = [bool]$backendOk; exit_code = $backendStatus.exit_code; payload = $backendStatus.payload; raw = if ($backendStatus.payload) { $null } else { $backendStatus.raw } }
     private_mcp = $mcp
     chatgpt_tunnel = $tunnel
+    optional_gateway = $gateway
 }
 
 if ($Json) {
-    $payload | ConvertTo-Json -Depth 16
+    $payload | ConvertTo-Json -Depth 20
 }
 else {
     Write-Host "EVAVO Agent Status" -ForegroundColor Cyan
@@ -113,6 +139,15 @@ else {
     Write-Host ("Native image readiness: {0}" -f $(if ($agentOk -and $backendOk) { "OK" } else { "NEEDS ATTENTION" }))
     Write-Host ("Private HTTP MCP: {0} ({1})" -f $(if ($mcp.ready) { "RUNNING" } else { "NOT READY" }), $mcp.identity)
     Write-Host ("ChatGPT tunnel: {0}" -f $tunnel.status)
+    Write-Host ("Optional HTTP gateway: {0}" -f $(if (-not $gateway.running) { "NOT RUNNING" } elseif ($gateway.core_healthy) { "CORE HEALTHY" } else { "DEGRADED" }))
+    if ($gateway.providers) {
+        foreach ($kind in @("image", "video", "audio", "3d")) {
+            $provider = $gateway.providers.$kind
+            if ($provider) {
+                Write-Host ("  {0,-6}: {1} ({2})" -f $kind, $(if ($provider.ready) { "READY" } else { "UNAVAILABLE" }), $provider.backend)
+            }
+        }
+    }
     Write-Host ("=" * 84)
     Write-Host $payload.status
     if (-not $tunnel.configured) {
@@ -120,4 +155,6 @@ else {
     }
 }
 
+# Optional gateway/provider readiness is intentionally not part of the owned
+# native-image/MCP readiness exit code.
 exit $(if ($localReady) { 0 } else { 2 })
