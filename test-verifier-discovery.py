@@ -28,6 +28,7 @@ class VerifierDiscoveryTests(unittest.TestCase):
             "test-capability-manifest.py",
             "test-comfyui-cancel.py",
             "test-comfyui-status.py",
+            "test-comfyui-terminal-wait.py",
             "test-gateway.py",
             "test-gateway-config-safety.py",
             "test-gateway-config-security.py",
