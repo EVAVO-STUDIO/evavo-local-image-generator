@@ -29,9 +29,20 @@ if (-not $SkipValidation) {
 # integration suite may be skipped after the canonical updater already ran it,
 # but invalid output/workflow roots must never be persisted across restarts.
 Write-Host "Validating MCP filesystem authority before changing Claude configuration..." -ForegroundColor Cyan
-& $python -m evavo_local_image_generator.mcp_policy --json
-if ($LASTEXITCODE -ne 0) {
+$policyOutput = & $python -m evavo_local_image_generator.mcp_policy --json
+$policyCode = $LASTEXITCODE
+if ($policyCode -ne 0) {
     throw "MCP filesystem policy is invalid. Claude configuration was not changed."
+}
+try {
+    $policyResult = ($policyOutput -join "`n") | ConvertFrom-Json
+}
+catch {
+    throw "MCP filesystem policy returned invalid JSON. Claude configuration was not changed."
+}
+$generationOutputDir = [string]$policyResult.policy.default_output_root
+if (-not $generationOutputDir) {
+    throw "MCP filesystem policy did not return a validated default output root. Claude configuration was not changed."
 }
 
 $configDir = Join-Path $env:APPDATA "Claude"
@@ -77,7 +88,7 @@ $environment = [ordered]@{
     "PYTHONPATH" = $PSScriptRoot
     "PYTHONUNBUFFERED" = "1"
     "COMFYUI_ENDPOINT" = $comfyEndpoint
-    "EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path $PSScriptRoot ".evavo\outputs")
+    "EVAVO_GENERATION_OUTPUT_DIR" = $generationOutputDir
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
     "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
 }
@@ -129,6 +140,7 @@ Write-Host "Server: $ServerName" -ForegroundColor Green
 Write-Host "Python: $python" -ForegroundColor Green
 Write-Host "Repo:   $PSScriptRoot" -ForegroundColor Green
 Write-Host "ComfyUI endpoint: $comfyEndpoint (persisted as canonical COMFYUI_ENDPOINT)" -ForegroundColor Green
+Write-Host "Generation output root: $generationOutputDir (validated before persistence)" -ForegroundColor Green
 Write-Host "Backend/checkpoint auto-provision: enabled (operator-controlled model sources only)" -ForegroundColor Green
 Write-Host "MCP file policy: validated before write; output/workflow paths remain owner-confined." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
