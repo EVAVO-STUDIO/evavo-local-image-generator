@@ -54,9 +54,20 @@ if (-not $SkipValidation) {
 # replacing a Windows Startup launcher. -SkipValidation only skips the expensive
 # protocol suite; it never skips this read-only security/configuration gate.
 Write-Host "Validating MCP filesystem authority before changing login autostart..." -ForegroundColor Cyan
-& $python -m evavo_local_image_generator.mcp_policy --json
-if ($LASTEXITCODE -ne 0) {
+$policyOutput = & $python -m evavo_local_image_generator.mcp_policy --json
+$policyCode = $LASTEXITCODE
+if ($policyCode -ne 0) {
     throw "MCP filesystem policy is invalid. Windows login autostart was not changed."
+}
+try {
+    $policyResult = ($policyOutput -join "`n") | ConvertFrom-Json
+}
+catch {
+    throw "MCP filesystem policy returned invalid JSON. Windows login autostart was not changed."
+}
+$generationOutputDir = [string]$policyResult.policy.default_output_root
+if (-not $generationOutputDir) {
+    throw "MCP filesystem policy did not return a validated default output root. Windows login autostart was not changed."
 }
 
 New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
@@ -87,7 +98,7 @@ $persistedEnvironment = [ordered]@{
     "EVAVO_AUTO_PROVISION_COMFYUI" = "1"
     "EVAVO_AUTO_PROVISION_CHECKPOINT" = "1"
     "COMFYUI_ENDPOINT" = $comfyEndpoint
-    "EVAVO_GENERATION_OUTPUT_DIR" = (Join-Path $repo ".evavo\outputs")
+    "EVAVO_GENERATION_OUTPUT_DIR" = $generationOutputDir
 }
 $nonSecretEnvironment = @(
     "EVAVO_COMFYUI_HOME",
@@ -135,6 +146,7 @@ Write-Host "Installed EVAVO agent MCP autostart:" -ForegroundColor Green
 Write-Host "  $launcher"
 Write-Host "It will expose http://127.0.0.1:$Port/mcp after Windows sign-in without rerunning the full integration suite." -ForegroundColor Green
 Write-Host "ComfyUI endpoint: $comfyEndpoint (persisted as canonical COMFYUI_ENDPOINT)" -ForegroundColor Green
+Write-Host "Generation output root: $generationOutputDir (validated before persistence)" -ForegroundColor Green
 Write-Host "Safe local ComfyUI/checkpoint provisioning settings were embedded for reboot persistence." -ForegroundColor Green
 Write-Host "MCP file policy was validated before write; arbitrary output/workflow paths remain denied." -ForegroundColor Green
 if ($env:EVAVO_SHARED_MODEL_ROOTS -or $env:EVAVO_COMFYUI_MODEL_ROOTS) {
