@@ -1,13 +1,24 @@
 """Backend adapters for EVAVO Local Image Generator.
 
-Production generation in this repository is backed by :class:`ComfyUIBackend`.
-`OllamaBackend` and `KokoroBackend` remain importable only for source
-compatibility with older callers; they are not dependencies of the verified
-image runtime and are not exposed by the MCP server.
+`ComfyUIBackend` is the quality-first production adapter. The original
+hardened transport implementation remains available as
+`LegacyComfyUIBackend` for low-level compatibility and regression tests.
+
+Ollama and Kokoro remain optional provider clients; neither is imported by the
+image-only MCP server.
 """
 
-from .comfyui_backend import ComfyUIBackend
+from .comfyui_backend import ComfyUIBackend as LegacyComfyUIBackend
+from .quality_comfyui_backend import QualityComfyUIBackend
 from .ollama_backend import OllamaBackend
 from .kokoro_backend import KokoroBackend
 
-__all__ = ["ComfyUIBackend", "OllamaBackend", "KokoroBackend"]
+ComfyUIBackend = QualityComfyUIBackend
+
+__all__ = [
+    "ComfyUIBackend",
+    "QualityComfyUIBackend",
+    "LegacyComfyUIBackend",
+    "OllamaBackend",
+    "KokoroBackend",
+]
