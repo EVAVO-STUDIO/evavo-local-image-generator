@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import secrets
 import shutil
@@ -30,17 +31,66 @@ from typing import Any, Dict, Optional
 
 from evavo_local_image_generator.comfyui_runtime import ensure_comfyui, native_health, stop_managed_comfyui
 
+
+def _config_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:expected an integer, got {raw!r}") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:must be between {minimum} and {maximum}")
+    return value
+
+
+def _config_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    raw = os.getenv(name, str(default)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:expected a number, got {raw!r}") from exc
+    if not math.isfinite(value):
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:value must be finite")
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:must be between {minimum:g} and {maximum:g}")
+    return value
+
+
+def _loopback_endpoint(name: str, default: str, default_port: int) -> str:
+    raw = os.getenv(name, default).strip().rstrip("/")
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme != "http" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:must be a plain loopback http URL")
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:must use a loopback host")
+    if parsed.path not in {"", "/"}:
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:must not contain a path")
+    try:
+        port = parsed.port or default_port
+    except ValueError as exc:
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:contains an invalid port") from exc
+    if not 1 <= port <= 65535:
+        raise RuntimeError(f"SERVICE_MANAGER_CONFIG_INVALID:{name}:port must be between 1 and 65535")
+    host = parsed.hostname
+    if host == "::1":
+        host = "[::1]"
+    return f"http://{host}:{port}"
+
+
 ROOT = Path(__file__).resolve().parent
 STATE_DIR = Path(os.getenv("EVAVO_GATEWAY_STATE_DIR", str(ROOT / ".evavo" / "gateway"))).expanduser().resolve()
 STATE_FILE = STATE_DIR / "service-manager.json"
 TOKEN_FILE = STATE_DIR / "3d-worker.token"
 LOG_DIR = STATE_DIR / "logs"
 GATEWAY_SCRIPT = ROOT / "EVAVO-GATEWAY.py"
-GATEWAY_HOST = os.getenv("EVAVO_GATEWAY_HOST", "127.0.0.1")
-GATEWAY_PORT = int(os.getenv("EVAVO_GATEWAY_PORT", "8000"))
-COMFYUI_URL = (os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").rstrip("/")
+GATEWAY_HOST = os.getenv("EVAVO_GATEWAY_HOST", "127.0.0.1").strip()
+if GATEWAY_HOST not in {"127.0.0.1", "localhost", "::1"}:
+    raise RuntimeError("SERVICE_MANAGER_CONFIG_INVALID:EVAVO_GATEWAY_HOST:must use 127.0.0.1, localhost, or ::1")
+GATEWAY_PORT = _config_int("EVAVO_GATEWAY_PORT", 8000, 1, 65535)
+COMFYUI_URL = (os.getenv("COMFYUI_ENDPOINT") or os.getenv("EVAVO_COMFYUI_ENDPOINT") or "http://127.0.0.1:8188").strip().rstrip("/")
+COMFYUI_START_TIMEOUT = _config_float("EVAVO_GATEWAY_COMFYUI_START_TIMEOUT", 120.0, 1.0, 3600.0)
 GATEWAY_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}"
-THREE_D_URL = os.getenv("EVAVO_3D_ENDPOINT", "http://127.0.0.1:4314").rstrip("/")
+THREE_D_URL = _loopback_endpoint("EVAVO_3D_ENDPOINT", "http://127.0.0.1:4314", 4314)
 
 
 def now_iso() -> str:
@@ -55,7 +105,7 @@ def env_true(name: str, default: bool = False) -> bool:
 
 
 def http_json(url: str, timeout: float = 2.0) -> Optional[Dict[str, Any]]:
-    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Manager/4"})
+    request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Manager/5"})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
@@ -140,7 +190,7 @@ def three_d_token_ready(token: str) -> bool:
         headers={
             "Accept": "application/json",
             "Authorization": f"Bearer {token}",
-            "User-Agent": "EVAVO-Gateway-Manager/4",
+            "User-Agent": "EVAVO-Gateway-Manager/5",
         },
     )
     try:
@@ -580,11 +630,7 @@ def ensure_3d_worker_service(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def ensure_comfyui_service() -> Dict[str, Any]:
-    result = ensure_comfyui(
-        COMFYUI_URL,
-        wait_seconds=float(os.getenv("EVAVO_GATEWAY_COMFYUI_START_TIMEOUT", "120")),
-        allow_start=True,
-    )
+    result = ensure_comfyui(COMFYUI_URL, wait_seconds=COMFYUI_START_TIMEOUT, allow_start=True)
     if not native_health(COMFYUI_URL):
         raise RuntimeError("Native ComfyUI did not become ready; mock backends are not accepted by the production gateway")
     return result
@@ -642,10 +688,6 @@ def ensure_gateway_service(state: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def start_services() -> Dict[str, Any]:
-    if GATEWAY_HOST not in {"127.0.0.1", "localhost", "::1"}:
-        raise RuntimeError("Gateway manager is restricted to loopback")
-    if not 1 <= GATEWAY_PORT <= 65535:
-        raise RuntimeError("Gateway port must be between 1 and 65535")
     endpoint_host_port(THREE_D_URL, expected_default_port=4314)
     state = load_state()
     audio = configure_audio_provider()
@@ -676,11 +718,7 @@ def stop_services() -> Dict[str, Any]:
         stopped["gateway"] = True
     model3d = state.get("3d_worker") if isinstance(state.get("3d_worker"), dict) else {}
     model3d_pid = model3d.get("pid")
-    if (
-        model3d.get("managed")
-        and isinstance(model3d_pid, int)
-        and pid_matches_tokens(model3d_pid, "evavo_3d_studio.agent_worker", "serve")
-    ):
+    if model3d.get("managed") and isinstance(model3d_pid, int) and pid_matches_tokens(model3d_pid, "evavo_3d_studio.agent_worker", "serve"):
         terminate_pid(model3d_pid)
         stopped["3d_worker"] = True
     native = stop_managed_comfyui()
@@ -739,8 +777,8 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if result["status"] == "healthy" else 3
         if args.command == "monitor":
-            if args.interval < 1.0:
-                parser.error("--interval must be at least 1 second")
+            if not math.isfinite(args.interval) or args.interval < 1.0 or args.interval > 3600.0:
+                parser.error("--interval must be a finite value between 1 and 3600 seconds")
             return monitor(args.interval)
     except Exception as exc:
         print(json.dumps({"ok": False, "error": str(exc), "timestamp": now_iso()}, ensure_ascii=False), file=sys.stderr)
