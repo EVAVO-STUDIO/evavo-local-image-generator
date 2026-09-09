@@ -25,6 +25,7 @@ SERVICE_NAME = "evavo-local-image-generator"
 PROTOCOL_VERSION = 1
 HISTORY_FILE = Path(os.environ.get("EVAVO_TASK_HISTORY", str(ROOT / "task_history.json"))).expanduser().resolve()
 VALID_STATUSES = {"queued", "running", "completed", "failed", "cancelled", "unknown"}
+GENERATION_RECEIPT_MAX_BYTES = 64 * 1024
 TASK_STRING_FIELDS = {
     "error_code",
     "error_message",
@@ -245,6 +246,25 @@ def _clean_string_list(value: Any) -> List[str]:
     return [str(item) for item in value if item is not None and str(item)]
 
 
+def _clean_generation_receipt(value: Any) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("generation_receipt must be a JSON object")
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"generation_receipt must contain only finite JSON values: {exc}") from exc
+    if len(encoded) > GENERATION_RECEIPT_MAX_BYTES:
+        raise ValueError(
+            f"generation_receipt exceeds {GENERATION_RECEIPT_MAX_BYTES} bytes"
+        )
+    decoded = json.loads(encoded.decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise ValueError("generation_receipt must remain a JSON object")
+    return decoded
+
+
 class TaskTracker:
     """Atomic, lock-protected JSON task history used by CLI and MCP tools."""
 
@@ -312,6 +332,7 @@ class TaskTracker:
         cancelled_at: Optional[str] = None,
         cancel_method: Optional[str] = None,
         backend_status: Optional[str] = None,
+        generation_receipt: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if not isinstance(task_id, str) or not task_id.strip():
             raise ValueError("task_id must be a non-empty string")
@@ -343,6 +364,9 @@ class TaskTracker:
         if cleaned_outputs:
             record["output_uris"] = cleaned_outputs
             record["output_uri"] = cleaned_outputs[0]
+        cleaned_receipt = _clean_generation_receipt(generation_receipt)
+        if cleaned_receipt is not None:
+            record["generation_receipt"] = cleaned_receipt
 
         with interprocess_lock(self.lock_file):
             tasks = self._read_unlocked()
@@ -374,6 +398,13 @@ class TaskTracker:
                 target["output_uris"] = cleaned_outputs
                 if cleaned_outputs:
                     target["output_uri"] = cleaned_outputs[0]
+
+            if "generation_receipt" in fields:
+                cleaned_receipt = _clean_generation_receipt(fields.get("generation_receipt"))
+                if cleaned_receipt is None:
+                    target.pop("generation_receipt", None)
+                else:
+                    target["generation_receipt"] = cleaned_receipt
 
             self._write_unlocked(tasks)
             self.tasks = tasks
