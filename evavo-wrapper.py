@@ -110,6 +110,7 @@ def generate_image(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
             lora_name=payload.get("lora_name"),
             lora_model_strength=payload.get("lora_model_strength"),
             lora_clip_strength=payload.get("lora_clip_strength"),
+            vae_name=payload.get("vae_name"),
             use_environment=use_environment,
         )
         response.update({"ok": True, "endpoint": endpoint, "timestamp": now_iso()})
