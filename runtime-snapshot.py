@@ -234,27 +234,51 @@ def _locate_named_model(name: str, roots: Iterable[Path]) -> Path | None:
         direct = root / Path(normalized)
         if direct.is_file():
             return direct.resolve()
+    matches: list[Path] = []
+    seen: set[str] = set()
     for root in roots:
         if not root.is_dir():
             continue
         try:
             for candidate in root.rglob(basename):
-                if candidate.is_file():
-                    return candidate.resolve()
+                if not candidate.is_file():
+                    continue
+                resolved = candidate.resolve()
+                key = os.path.normcase(os.path.normpath(str(resolved)))
+                if key not in seen:
+                    matches.append(resolved)
+                    seen.add(key)
         except OSError:
             continue
-    return None
+    return matches[0] if len(matches) == 1 else None
 
 
 def _manifest_recipe(manifest: Dict[str, Any]) -> Dict[str, Any]:
     results = manifest.get("results")
-    completed = [item for item in results if isinstance(item, dict) and item.get("status") == "completed"] if isinstance(results, list) else []
-    checkpoint = manifest.get("checkpoint")
-    if not checkpoint:
-        for item in completed:
-            if item.get("checkpoint"):
-                checkpoint = item["checkpoint"]
-                break
+    completed = [
+        item
+        for item in results
+        if isinstance(item, dict) and item.get("status") == "completed"
+    ] if isinstance(results, list) else []
+
+    checkpoints: Dict[str, Dict[str, Any]] = {}
+
+    def add_checkpoint(value: Any) -> None:
+        if not isinstance(value, str) or not value.strip():
+            return
+        name = value.strip()
+        key = name.replace("\\", "/").lower()
+        checkpoints.setdefault(key, {"name": name})
+
+    add_checkpoint(manifest.get("checkpoint"))
+    resolved = manifest.get("resolved_checkpoints")
+    if isinstance(resolved, list):
+        for item in resolved:
+            if isinstance(item, dict):
+                add_checkpoint(item.get("checkpoint"))
+    for item in completed:
+        add_checkpoint(item.get("checkpoint"))
+
     loras: Dict[str, Dict[str, Any]] = {}
     for item in completed:
         lora = item.get("lora")
@@ -262,7 +286,13 @@ def _manifest_recipe(manifest: Dict[str, Any]) -> Dict[str, Any]:
             loras[str(lora["name"])] = lora
     if manifest.get("lora_name") and str(manifest["lora_name"]) not in loras:
         loras[str(manifest["lora_name"])] = {"name": manifest["lora_name"]}
-    return {"checkpoint": checkpoint, "loras": list(loras.values())}
+
+    checkpoint_items = list(checkpoints.values())
+    return {
+        "checkpoint": checkpoint_items[0]["name"] if checkpoint_items else None,
+        "checkpoints": checkpoint_items,
+        "loras": list(loras.values()),
+    }
 
 
 def _custom_nodes(comfy_root: Path) -> list[Dict[str, Any]]:
@@ -287,11 +317,17 @@ def capture_snapshot(
     hash_cache: Path,
 ) -> Dict[str, Any]:
     recipe = _manifest_recipe(manifest or {})
-    checkpoint_name = checkpoint or recipe.get("checkpoint") or os.getenv("EVAVO_COMFYUI_CHECKPOINT")
-    python = _find_python(comfy_root)
+    if checkpoint:
+        checkpoint_names = [checkpoint]
+    elif recipe.get("checkpoints"):
+        checkpoint_names = [str(item["name"]) for item in recipe["checkpoints"]]
+    else:
+        env_checkpoint = os.getenv("EVAVO_COMFYUI_CHECKPOINT")
+        checkpoint_names = [env_checkpoint] if env_checkpoint else []
 
+    python = _find_python(comfy_root)
     evidence: Dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "captured_at": datetime.now().astimezone().isoformat(),
         "endpoint": endpoint,
         "comfy_root": str(comfy_root.expanduser().resolve()) if comfy_root.exists() else str(comfy_root),
@@ -301,7 +337,8 @@ def capture_snapshot(
         "python_runtime": _python_runtime(python),
         "nvidia": _nvidia_snapshot(),
         "custom_nodes": _custom_nodes(comfy_root),
-        "checkpoint": {"name": checkpoint_name},
+        "checkpoint": {"name": checkpoint_names[0] if checkpoint_names else None},
+        "checkpoints": [],
         "loras": [],
         "errors": [],
     }
@@ -315,12 +352,18 @@ def capture_snapshot(
         evidence["errors"].append("runtime snapshot only permits loopback HTTP ComfyUI endpoints")
 
     checkpoint_roots = _search_roots(comfy_root, "checkpoints", extra_model_roots)
-    if checkpoint_name:
-        path = _locate_named_model(str(checkpoint_name), checkpoint_roots)
-        if path is None:
-            evidence["errors"].append(f"checkpoint bytes not found locally: {checkpoint_name}")
-        else:
-            evidence["checkpoint"].update(_sha256_cached(path, hash_cache))
+    if checkpoint_names:
+        for checkpoint_name in checkpoint_names:
+            item: Dict[str, Any] = {"name": checkpoint_name}
+            path = _locate_named_model(str(checkpoint_name), checkpoint_roots)
+            if path is None:
+                item["hash_error"] = f"checkpoint bytes not found or filename is ambiguous locally: {checkpoint_name}"
+                evidence["errors"].append(item["hash_error"])
+            else:
+                item.update(_sha256_cached(path, hash_cache))
+            evidence["checkpoints"].append(item)
+        # Backward-compatible single-checkpoint field points at the first item.
+        evidence["checkpoint"] = dict(evidence["checkpoints"][0])
     else:
         evidence["errors"].append("checkpoint name could not be resolved")
 
@@ -330,15 +373,19 @@ def capture_snapshot(
         item = dict(lora)
         path = _locate_named_model(name, lora_roots) if name else None
         if path is None:
-            item["hash_error"] = f"LoRA bytes not found locally: {name}"
+            item["hash_error"] = f"LoRA bytes not found or filename is ambiguous locally: {name}"
             evidence["errors"].append(item["hash_error"])
         else:
             item.update(_sha256_cached(path, hash_cache))
         evidence["loras"].append(item)
 
+    checkpoint_hashes_complete = bool(evidence["checkpoints"]) and all(
+        isinstance(item, dict) and bool(item.get("sha256"))
+        for item in evidence["checkpoints"]
+    )
     evidence["complete"] = bool(
         evidence["python_runtime"].get("ok")
-        and evidence["checkpoint"].get("sha256")
+        and checkpoint_hashes_complete
         and not evidence["errors"]
     )
     return evidence
