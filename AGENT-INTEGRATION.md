@@ -55,6 +55,7 @@ Claude and ChatGPT use different transports but the **same MCP tool implementati
 provision_backend
 ensure_backend
 open_comfyui_ui
+open_evavo_comfyui_app
 diagnose_backend
 last_startup_failure
 repair_backend_dependencies

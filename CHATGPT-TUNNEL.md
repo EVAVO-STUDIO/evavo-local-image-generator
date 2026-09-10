@@ -166,6 +166,12 @@ verified readiness, and asks the signed-in Windows session to open the local UI
 in its default browser. Browser presentation stays local; the tunnel does not
 publish port 8188.
 
+The tool also renders the EVAVO MCP App control surface inside ChatGPT. If that
+hosted surface is unavailable, call `open_evavo_comfyui_app` to start the
+independent loopback app on port 8770. Both surfaces use the same validated
+native generation implementation; the GitHub execution queue remains recovery
+only when the live tunnel is unavailable.
+
 Workspace administrators may need to create, publish or allow the app depending on organization policy.
 
 ## Canonical updater integration

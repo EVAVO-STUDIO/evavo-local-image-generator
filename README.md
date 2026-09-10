@@ -93,6 +93,7 @@ Tunnel-client release and executable integrity are SHA-256 verified. Optional pe
 provision_backend
 ensure_backend
 open_comfyui_ui
+open_evavo_comfyui_app
 diagnose_backend
 last_startup_failure
 repair_backend_dependencies
@@ -116,11 +117,15 @@ Ask a connected ChatGPT agent to call `open_comfyui_ui`. It starts or reuses
 native ComfyUI, proves HTTP readiness, and renders an embedded EVAVO control
 panel in the conversation. From that panel you can generate and preview images,
 check backend health, or open the complete native node editor in the
-workstation's default browser. The private ComfyUI port is never embedded or
-published. The equivalent direct Windows command is:
+workstation's default browser. The private ComfyUI port is never embedded or published. If the embedded panel
+is unavailable while the workstation is otherwise healthy, call
+`open_evavo_comfyui_app` for the independent loopback-only backup app. It uses
+the same native generator and output validation without depending on the
+ChatGPT iframe. The equivalent direct Windows commands are:
 
 ```powershell
 .\OPEN-COMFYUI.ps1
+.\OPEN-EVAVO-COMFYUI-APP.ps1
 ```
 
 `generate_image` / `generate_batch` auto-start native ComfyUI and wait by default. Invalid file/wait policy is rejected **before backend startup and before queueing**, so a rejected preflight does not create a fake task.

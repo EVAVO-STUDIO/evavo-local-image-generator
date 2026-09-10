@@ -33,6 +33,29 @@ def test_chat_ui_can_start_generate_and_preview_without_embedding_localhost() ->
     assert 'call("open_comfyui_ui"' in source
     assert 'call("generate_image"' in source
     assert 'call("read_output_image"' in source
+    assert 'call("open_evavo_comfyui_app"' in source
     assert 'method:"tools/call"' in source
     assert "window.openai.callTool" in source
     assert "<iframe" not in source.lower()
+
+
+def test_loopback_backup_app_has_security_and_generation_guards() -> None:
+    source = (ROOT / "evavo_local_image_generator" / "local_app.py").read_text(encoding="utf-8")
+    ast.parse(source)
+    assert 'DEFAULT_HOST = "127.0.0.1"' in source
+    assert "hmac.compare_digest" in source
+    assert "SameSite=Strict" in source
+    assert "Content-Security-Policy" in source
+    assert "MAX_BODY_BYTES" in source
+    assert "MAX_PROMPT_CHARS" in source
+    assert "_GENERATION_LOCK.acquire(blocking=False)" in source
+    assert "_validated_output_image" in source
+    assert "shell=False" in source
+    assert "ThreadingHTTPServer" in source
+
+
+def test_mcp_can_open_independent_backup_app() -> None:
+    source = SERVER.read_text(encoding="utf-8")
+    assert "from .local_app import ensure_local_control_app" in source
+    assert "async def open_evavo_comfyui_app" in source
+    assert "ensure_local_control_app" in source

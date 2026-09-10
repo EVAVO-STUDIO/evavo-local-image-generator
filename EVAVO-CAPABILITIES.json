@@ -87,7 +87,7 @@
         "legacy_running_broad_interrupt_allowed": false
       },
       "tools": [
-        "provision_backend", "ensure_backend", "open_comfyui_ui", "diagnose_backend", "last_startup_failure", "repair_backend_dependencies", "health_check",
+        "provision_backend", "ensure_backend", "open_comfyui_ui", "open_evavo_comfyui_app", "diagnose_backend", "last_startup_failure", "repair_backend_dependencies", "health_check",
         "discover_backends", "list_checkpoints", "model_inventory", "workflow_preflight", "generate_image",
         "generate_batch", "generation_status", "cancel_generation", "collect_generation", "read_output_image",
         "task_history", "task_statistics", "stop_managed_backend"
@@ -97,7 +97,12 @@
         "requires_native_readiness": true,
         "opens_on_connected_workstation": true,
         "url_policy": "plain-loopback-http-only",
-        "direct_windows_launcher": "OPEN-COMFYUI.ps1"
+        "direct_windows_launcher": "OPEN-COMFYUI.ps1",
+        "embedded_chat_control": true,
+        "resource_uri": "ui://evavo/comfyui/v1.html",
+        "fallback_tool": "open_evavo_comfyui_app",
+        "fallback_launcher": "OPEN-EVAVO-COMFYUI-APP.ps1",
+        "fallback_loopback_url": "http://127.0.0.1:8770"
       }
     },
     "chatgpt": {

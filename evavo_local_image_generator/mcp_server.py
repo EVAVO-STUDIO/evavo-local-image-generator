@@ -34,6 +34,7 @@ from .comfyui_runtime import (
     stop_managed_comfyui,
 )
 from .comfyui_status import prompt_status
+from .local_app import ensure_local_control_app
 from .comfyui_app import COMFYUI_APP_HTML, COMFYUI_APP_URI
 
 apps = Apps()
@@ -417,6 +418,24 @@ async def ensure_backend(auto_start: bool = True, wait_seconds: float = 90.0) ->
         return await _ensure(auto_start=auto_start, wait_seconds=wait_seconds)
     except ValueError as exc:
         return {"ok": False, "status": "failed", "error_code": "INVALID_WAIT_SECONDS", "message": str(exc)}
+
+
+@mcp.tool()
+async def open_evavo_comfyui_app(port: int = 8770, wait_seconds: float = 30.0) -> Dict[str, Any]:
+    """Start and open the loopback-only EVAVO ComfyUI control app on the workstation."""
+    try:
+        port_value = int(port)
+        wait_value = _positive_seconds(wait_seconds, name="wait_seconds", maximum=120.0)
+        return await asyncio.to_thread(
+            ensure_local_control_app,
+            port_value,
+            open_browser=True,
+            wait_seconds=wait_value,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        message = str(exc)
+        error_code = message.split(":", 1)[0] if ":" in message else "LOCAL_CONTROL_APP_FAILED"
+        return {"ok": False, "status": "failed", "error_code": error_code, "message": message}
 
 
 @mcp.tool()

@@ -76,10 +76,30 @@ class ComfyUIUiTests(unittest.TestCase):
                 return await mcp_server.open_comfyui_ui()
 
         result = asyncio.run(exercise())
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "backend_ready_ui_not_opened")
-        self.assertEqual(result["error_code"], "COMFYUI_UI_OPEN_FAILED")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ready_in_chat")
+        self.assertFalse(result["native_ui_opened"])
+        self.assertEqual(result["native_ui_warning"], "COMFYUI_UI_OPEN_FAILED:no browser")
         self.assertIs(result["backend"], backend)
+
+
+    def test_mcp_tool_can_open_independent_loopback_app(self) -> None:
+        try:
+            from evavo_local_image_generator import mcp_server
+        except RuntimeError as exc:
+            if "MCP SDK is required" in str(exc):
+                self.skipTest("MCP SDK is not installed in this test interpreter")
+            raise
+
+        expected = {"ok": True, "status": "ready", "url": "http://127.0.0.1:8770"}
+
+        async def exercise() -> dict[str, object]:
+            with patch.object(mcp_server, "ensure_local_control_app", return_value=expected) as opener:
+                result = await mcp_server.open_evavo_comfyui_app(port=8770, wait_seconds=30)
+            opener.assert_called_once_with(8770, open_browser=True, wait_seconds=30.0)
+            return result
+
+        self.assertEqual(asyncio.run(exercise()), expected)
 
 
 if __name__ == "__main__":
