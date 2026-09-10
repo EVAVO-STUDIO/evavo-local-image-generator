@@ -64,6 +64,45 @@ class RuntimeVaeAttestationTests(unittest.TestCase):
             self.assertEqual(len(receipt["components"]), 2)
             self.assertEqual(len(receipt["components_sha256"]), 64)
 
+    def test_approximate_vae_can_be_attested_from_shared_external_root(self):
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            active = root / "ComfyUI-next"
+            shared_approx = root / "ComfyUI" / "models" / "vae_approx"
+            active.mkdir(parents=True)
+            shared_approx.mkdir(parents=True)
+            encoder = shared_approx / "taesdxl_encoder.safetensors"
+            decoder = shared_approx / "taesdxl_decoder.safetensors"
+            encoder.write_bytes(b"shared-enc")
+            decoder.write_bytes(b"shared-dec")
+            receipt = module._attest_vae(
+                "taesdxl",
+                active,
+                [shared_approx],
+                root / "cache.json",
+            )
+            self.assertTrue(receipt["complete"])
+            self.assertEqual(receipt["kind"], "approximate")
+            self.assertEqual(
+                {Path(item["path"]).name for item in receipt["components"]},
+                {encoder.name, decoder.name},
+            )
+
+    def test_external_models_root_discovers_nested_vae_approx(self):
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            active = root / "ComfyUI-next"
+            shared_models = root / "ComfyUI" / "models"
+            approx = shared_models / "vae_approx"
+            active.mkdir(parents=True)
+            approx.mkdir(parents=True)
+            (approx / "taesdxl_encoder.safetensors").write_bytes(b"enc")
+            (approx / "taesdxl_decoder.safetensors").write_bytes(b"dec")
+            components = module._approx_vae_components(active, "taesdxl", [shared_models])
+            self.assertEqual(len(components), 2)
+
     def test_incomplete_approximate_vae_is_not_attested(self):
         module = _load_module()
         with tempfile.TemporaryDirectory() as value:
