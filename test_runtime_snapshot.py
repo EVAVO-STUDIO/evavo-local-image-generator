@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,10 +42,31 @@ class RuntimeSnapshotTests(unittest.TestCase):
         }
         recipe = module._manifest_recipe(manifest)
         self.assertEqual(recipe["checkpoint"], "sd_xl_base_1.0.safetensors")
+        self.assertEqual([item["name"] for item in recipe["checkpoints"]], ["sd_xl_base_1.0.safetensors"])
         self.assertEqual(len(recipe["loras"]), 1)
         self.assertEqual(recipe["loras"][0]["name"], "style.safetensors")
 
-    def test_named_model_locator_handles_direct_and_nested_models(self):
+    def test_manifest_recipe_collects_all_unique_checkpoint_sweep_models(self):
+        module = _load_module()
+        manifest = {
+            "resolved_checkpoints": [
+                {"checkpoint": "sd_xl_base_1.0.safetensors"},
+                {"checkpoint": "dream/model.safetensors"},
+            ],
+            "results": [
+                {"status": "completed", "checkpoint": "sd_xl_base_1.0.safetensors"},
+                {"status": "completed", "checkpoint": "dream/model.safetensors"},
+                {"status": "failed", "checkpoint": "ignored-failed.safetensors"},
+            ],
+        }
+        recipe = module._manifest_recipe(manifest)
+        self.assertEqual(
+            [item["name"] for item in recipe["checkpoints"]],
+            ["sd_xl_base_1.0.safetensors", "dream/model.safetensors"],
+        )
+        self.assertEqual(recipe["checkpoint"], "sd_xl_base_1.0.safetensors")
+
+    def test_named_model_locator_handles_direct_and_unique_nested_models(self):
         module = _load_module()
         with tempfile.TemporaryDirectory() as value:
             root = Path(value)
@@ -55,6 +75,19 @@ class RuntimeSnapshotTests(unittest.TestCase):
             model = nested / "example.safetensors"
             model.write_bytes(b"model")
             self.assertEqual(module._locate_named_model("example.safetensors", [root]), model.resolve())
+
+    def test_named_model_locator_refuses_ambiguous_basename_search(self):
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value)
+            first = root / "a" / "same.safetensors"
+            second = root / "b" / "same.safetensors"
+            first.parent.mkdir(parents=True)
+            second.parent.mkdir(parents=True)
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            self.assertIsNone(module._locate_named_model("same.safetensors", [root]))
+            self.assertEqual(module._locate_named_model("a/same.safetensors", [root]), first.resolve())
 
     def test_model_sha256_cache_is_bound_to_size_and_mtime(self):
         module = _load_module()
