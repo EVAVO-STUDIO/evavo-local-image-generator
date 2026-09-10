@@ -312,23 +312,55 @@ def _manifest_recipe(manifest: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _approx_vae_components(comfy_root: Path, name: str) -> list[Path]:
+def _approx_root_candidates(comfy_root: Path, extra_model_roots: Iterable[Path]) -> list[Path]:
+    """Resolve local and externally shared ComfyUI approximate-VAE directories."""
+    roots = [comfy_root / "models" / "vae_approx"]
+    for extra in extra_model_roots:
+        root = extra.expanduser()
+        if root.name.lower() == "vae_approx":
+            roots.append(root)
+        else:
+            # Accept either a models/ root or another explicit search root.
+            roots.append(root / "vae_approx")
+            roots.append(root.parent / "vae_approx")
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        try:
+            value = root.resolve() if root.exists() else root.absolute()
+        except OSError:
+            value = root.absolute()
+        key = os.path.normcase(os.path.normpath(str(value)))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(value)
+    return unique
+
+
+def _approx_vae_components(comfy_root: Path, name: str, extra_model_roots: Iterable[Path] = ()) -> list[Path]:
     if name == "pixel_space":
-        return []
-    root = comfy_root / "models" / "vae_approx"
-    if not root.is_dir():
         return []
     prefixes = (f"{name}_encoder.", f"{name}_decoder.")
     found: list[Path] = []
-    try:
-        for candidate in root.iterdir():
-            if candidate.is_file() and not candidate.is_symlink() and candidate.name.startswith(prefixes):
-                found.append(candidate.resolve())
-    except OSError:
-        return []
+    seen: set[str] = set()
+    for root in _approx_root_candidates(comfy_root, extra_model_roots):
+        if not root.is_dir():
+            continue
+        try:
+            for candidate in root.iterdir():
+                if not candidate.is_file() or candidate.is_symlink() or not candidate.name.startswith(prefixes):
+                    continue
+                resolved = candidate.resolve()
+                key = os.path.normcase(os.path.normpath(str(resolved)))
+                if key not in seen:
+                    found.append(resolved)
+                    seen.add(key)
+        except OSError:
+            continue
     has_encoder = any(path.name.startswith(f"{name}_encoder.") for path in found)
     has_decoder = any(path.name.startswith(f"{name}_decoder.") for path in found)
-    return sorted(found, key=lambda value: value.name.lower()) if has_encoder and has_decoder else []
+    return sorted(found, key=lambda value: str(value).lower()) if has_encoder and has_decoder else []
 
 
 def _attest_vae(name: str, comfy_root: Path, extra_model_roots: list[Path], hash_cache: Path) -> Dict[str, Any]:
@@ -342,7 +374,7 @@ def _attest_vae(name: str, comfy_root: Path, extra_model_roots: list[Path], hash
         item.update({"kind": "file", **_sha256_cached(path, hash_cache), "complete": True})
         return item
 
-    components = _approx_vae_components(comfy_root, name)
+    components = _approx_vae_components(comfy_root, name, extra_model_roots)
     if components:
         receipts = [_sha256_cached(path, hash_cache) for path in components]
         item.update({"kind": "approximate", "components": receipts, "complete": True})
@@ -390,7 +422,7 @@ def capture_snapshot(
 
     python = _find_python(comfy_root)
     evidence: Dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "captured_at": datetime.now().astimezone().isoformat(),
         "endpoint": endpoint,
         "comfy_root": str(comfy_root.expanduser().resolve()) if comfy_root.exists() else str(comfy_root),
@@ -471,7 +503,7 @@ def main() -> int:
     parser.add_argument("--endpoint", default=None)
     parser.add_argument("--comfy-root", default=None)
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--model-root", action="append", default=[], help="Additional checkpoint/LoRA/VAE search root; may be repeated")
+    parser.add_argument("--model-root", action="append", default=[], help="Additional checkpoint/LoRA/VAE/vae_approx search root; may be repeated")
     parser.add_argument("--hash-cache", default=str(DEFAULT_CACHE))
     parser.add_argument("--output", default=None)
     parser.add_argument("--require-complete", action="store_true")
