@@ -42,11 +42,16 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             loras = self.node_input_choices("LoraLoader", "lora_name")
         except RuntimeError:
             loras = []
+        try:
+            vaes = self.node_input_choices("VAELoader", "vae_name")
+        except RuntimeError:
+            vaes = []
         return {
             "samplers": samplers,
             "schedulers": schedulers,
             "latent_upscale_methods": latent_upscale_methods,
             "loras": loras,
+            "vaes": vaes,
             "recommended_sampler": self._choose_available(
                 os.getenv("EVAVO_IMAGE_SAMPLER", "dpmpp_2m_sde"),
                 samplers,
@@ -154,6 +159,20 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             "model_strength": model_strength,
             "clip_strength": clip_strength,
         }
+
+    def _resolve_vae(self, vae_name: Optional[str], *, use_environment: bool = True) -> Optional[Dict[str, Any]]:
+        env_name = os.getenv("EVAVO_IMAGE_VAE") if use_environment else None
+        raw_name = vae_name if vae_name is not None else env_name
+        if raw_name is None or not str(raw_name).strip():
+            return None
+        name = str(raw_name).strip()
+        try:
+            available = self.node_input_choices("VAELoader", "vae_name")
+        except RuntimeError as exc:
+            raise RuntimeError("COMFYUI_VAE_LOADER_UNAVAILABLE:VAELoader is not available on the active ComfyUI runtime") from exc
+        if available and name not in available:
+            raise RuntimeError(f"COMFYUI_VAE_NOT_FOUND:{name!r} is not in the active ComfyUI VAE inventory")
+        return {"name": name}
 
     def resolve_sampling(self, settings: ImageQualitySettings) -> ImageQualitySettings:
         try:
@@ -303,6 +322,24 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
                 raise RuntimeError("COMFYUI_LORA_BASE_GRAPH_INVALID:second sampler inputs are missing")
             second_inputs["model"] = [node_id, 0]
 
+    @staticmethod
+    def _apply_vae(workflow: Dict[str, Any], vae: Dict[str, Any]) -> None:
+        """Route canonical decoding through one explicit core VAELoader node."""
+        if "6" not in workflow:
+            raise RuntimeError("COMFYUI_VAE_BASE_GRAPH_INVALID:canonical VAEDecode node 6 is required")
+        node_id = "11"
+        if node_id in workflow:
+            raise RuntimeError("COMFYUI_VAE_NODE_COLLISION:canonical VAE node id 11 is already in use")
+        decode = workflow["6"]
+        decode_inputs = decode.get("inputs") if isinstance(decode, dict) else None
+        if not isinstance(decode_inputs, dict):
+            raise RuntimeError("COMFYUI_VAE_BASE_GRAPH_INVALID:VAEDecode inputs are missing")
+        workflow[node_id] = {
+            "class_type": "VAELoader",
+            "inputs": {"vae_name": vae["name"]},
+        }
+        decode_inputs["vae"] = [node_id, 0]
+
     def build_txt2img_workflow(
         self,
         prompt: str,
@@ -330,6 +367,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         lora_name: Optional[str] = None,
         lora_model_strength: Any = None,
         lora_clip_strength: Any = None,
+        vae_name: Optional[str] = None,
         use_environment: bool = True,
     ) -> Dict[str, Any]:
         settings = resolve_quality_settings(
@@ -357,6 +395,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             lora_clip_strength,
             use_environment=use_environment,
         )
+        vae = self._resolve_vae(vae_name, use_environment=use_environment)
 
         template_path = workflow_path or (os.getenv("EVAVO_COMFYUI_WORKFLOW") if use_environment else None)
         if template_path and settings.second_pass_enabled:
@@ -368,6 +407,11 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             raise RuntimeError(
                 "COMFYUI_LORA_CUSTOM_WORKFLOW_UNSUPPORTED:automatic LoRA insertion requires the canonical built-in graph; "
                 "encode the LoRA loader directly in the custom workflow instead"
+            )
+        if template_path and vae is not None:
+            raise RuntimeError(
+                "COMFYUI_VAE_CUSTOM_WORKFLOW_UNSUPPORTED:automatic VAE insertion requires the canonical built-in graph; "
+                "encode VAELoader directly in the custom workflow instead"
             )
 
         # The base adapter still supports its legacy environment workflow hook.
@@ -408,7 +452,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
                 latent_upscale_method,
             )
         ) or not use_environment
-        if template_path and not explicit_sampling:
+        if template_path and not explicit_sampling and lora is None and vae is None:
             return workflow
 
         self._apply_primary_sampling(workflow, settings)
@@ -416,6 +460,8 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             self._append_hero_second_pass(workflow, settings)
         if lora is not None:
             self._apply_lora(workflow, lora)
+        if vae is not None:
+            self._apply_vae(workflow, vae)
         return workflow
 
     def queue_image(
@@ -445,6 +491,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
         lora_name: Optional[str] = None,
         lora_model_strength: Any = None,
         lora_clip_strength: Any = None,
+        vae_name: Optional[str] = None,
         use_environment: bool = True,
     ) -> Dict[str, Any]:
         if not isinstance(prompt, str) or not prompt.strip():
@@ -480,6 +527,7 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             lora_clip_strength,
             use_environment=use_environment,
         )
+        vae = self._resolve_vae(vae_name, use_environment=use_environment)
 
         template_path = workflow_path or (os.getenv("EVAVO_COMFYUI_WORKFLOW") if use_environment else None)
         workflow = self.build_txt2img_workflow(
@@ -507,12 +555,13 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             lora_name=lora_name,
             lora_model_strength=lora_model_strength,
             lora_clip_strength=lora_clip_strength,
+            vae_name=vae_name,
             use_environment=use_environment,
         )
         if (
             template_path
             and self._truthy_environment("EVAVO_PREFLIGHT_CUSTOM_WORKFLOW", default=True)
-        ) or settings.second_pass_enabled or lora is not None:
+        ) or settings.second_pass_enabled or lora is not None or vae is not None:
             self.preflight_workflow(workflow)
 
         submitted_seed = self._workflow_seed(workflow)
@@ -557,5 +606,6 @@ class QualityComfyUIBackend(_BaseComfyUIBackend):
             "output_width": settings.output_width if quality_applied else None,
             "output_height": settings.output_height if quality_applied else None,
             "lora": lora,
+            "vae": vae,
             "use_environment": bool(use_environment),
         }
