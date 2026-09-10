@@ -262,6 +262,7 @@ def _manifest_recipe(manifest: Dict[str, Any]) -> Dict[str, Any]:
     ] if isinstance(results, list) else []
 
     checkpoints: Dict[str, Dict[str, Any]] = {}
+    vaes: Dict[str, Dict[str, Any]] = {}
 
     def add_checkpoint(value: Any) -> None:
         if not isinstance(value, str) or not value.strip():
@@ -270,14 +271,28 @@ def _manifest_recipe(manifest: Dict[str, Any]) -> Dict[str, Any]:
         key = name.replace("\\", "/").lower()
         checkpoints.setdefault(key, {"name": name})
 
+    def add_vae(value: Any) -> None:
+        if isinstance(value, dict):
+            value = value.get("name")
+        if not isinstance(value, str) or not value.strip():
+            return
+        name = value.strip()
+        key = name.replace("\\", "/").lower()
+        vaes.setdefault(key, {"name": name})
+
     add_checkpoint(manifest.get("checkpoint"))
     resolved = manifest.get("resolved_checkpoints")
     if isinstance(resolved, list):
         for item in resolved:
             if isinstance(item, dict):
                 add_checkpoint(item.get("checkpoint"))
+    resolved_vaes = manifest.get("resolved_vaes")
+    if isinstance(resolved_vaes, list):
+        for value in resolved_vaes:
+            add_vae(value)
     for item in completed:
         add_checkpoint(item.get("checkpoint"))
+        add_vae(item.get("vae"))
 
     loras: Dict[str, Dict[str, Any]] = {}
     for item in completed:
@@ -286,13 +301,61 @@ def _manifest_recipe(manifest: Dict[str, Any]) -> Dict[str, Any]:
             loras[str(lora["name"])] = lora
     if manifest.get("lora_name") and str(manifest["lora_name"]) not in loras:
         loras[str(manifest["lora_name"])] = {"name": manifest["lora_name"]}
+    add_vae(manifest.get("vae_name"))
 
     checkpoint_items = list(checkpoints.values())
     return {
         "checkpoint": checkpoint_items[0]["name"] if checkpoint_items else None,
         "checkpoints": checkpoint_items,
         "loras": list(loras.values()),
+        "vaes": list(vaes.values()),
     }
+
+
+def _approx_vae_components(comfy_root: Path, name: str) -> list[Path]:
+    if name == "pixel_space":
+        return []
+    root = comfy_root / "models" / "vae_approx"
+    if not root.is_dir():
+        return []
+    prefixes = (f"{name}_encoder.", f"{name}_decoder.")
+    found: list[Path] = []
+    try:
+        for candidate in root.iterdir():
+            if candidate.is_file() and not candidate.is_symlink() and candidate.name.startswith(prefixes):
+                found.append(candidate.resolve())
+    except OSError:
+        return []
+    has_encoder = any(path.name.startswith(f"{name}_encoder.") for path in found)
+    has_decoder = any(path.name.startswith(f"{name}_decoder.") for path in found)
+    return sorted(found, key=lambda value: value.name.lower()) if has_encoder and has_decoder else []
+
+
+def _attest_vae(name: str, comfy_root: Path, extra_model_roots: list[Path], hash_cache: Path) -> Dict[str, Any]:
+    item: Dict[str, Any] = {"name": name}
+    if name == "pixel_space":
+        item.update({"kind": "intrinsic", "complete": True, "implementation": "ComfyUI pixel_space VAE"})
+        return item
+
+    path = _locate_named_model(name, _search_roots(comfy_root, "vae", extra_model_roots))
+    if path is not None:
+        item.update({"kind": "file", **_sha256_cached(path, hash_cache), "complete": True})
+        return item
+
+    components = _approx_vae_components(comfy_root, name)
+    if components:
+        receipts = [_sha256_cached(path, hash_cache) for path in components]
+        item.update({"kind": "approximate", "components": receipts, "complete": True})
+        canonical = json.dumps(
+            [(receipt["path"], receipt["sha256"]) for receipt in receipts],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        item["components_sha256"] = hashlib.sha256(canonical).hexdigest()
+        return item
+
+    item.update({"kind": "unknown", "complete": False, "hash_error": f"VAE bytes/components not found locally: {name}"})
+    return item
 
 
 def _custom_nodes(comfy_root: Path) -> list[Dict[str, Any]]:
@@ -327,7 +390,7 @@ def capture_snapshot(
 
     python = _find_python(comfy_root)
     evidence: Dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "captured_at": datetime.now().astimezone().isoformat(),
         "endpoint": endpoint,
         "comfy_root": str(comfy_root.expanduser().resolve()) if comfy_root.exists() else str(comfy_root),
@@ -340,6 +403,7 @@ def capture_snapshot(
         "checkpoint": {"name": checkpoint_names[0] if checkpoint_names else None},
         "checkpoints": [],
         "loras": [],
+        "vaes": [],
         "errors": [],
     }
 
@@ -362,7 +426,6 @@ def capture_snapshot(
             else:
                 item.update(_sha256_cached(path, hash_cache))
             evidence["checkpoints"].append(item)
-        # Backward-compatible single-checkpoint field points at the first item.
         evidence["checkpoint"] = dict(evidence["checkpoints"][0])
     else:
         evidence["errors"].append("checkpoint name could not be resolved")
@@ -379,13 +442,24 @@ def capture_snapshot(
             item.update(_sha256_cached(path, hash_cache))
         evidence["loras"].append(item)
 
+    for vae in recipe.get("vaes", []):
+        name = str(vae.get("name", ""))
+        if not name:
+            continue
+        item = _attest_vae(name, comfy_root, extra_model_roots, hash_cache)
+        if not item.get("complete"):
+            evidence["errors"].append(str(item.get("hash_error") or f"VAE attestation failed: {name}"))
+        evidence["vaes"].append(item)
+
     checkpoint_hashes_complete = bool(evidence["checkpoints"]) and all(
         isinstance(item, dict) and bool(item.get("sha256"))
         for item in evidence["checkpoints"]
     )
+    vaes_complete = all(isinstance(item, dict) and item.get("complete") is True for item in evidence["vaes"])
     evidence["complete"] = bool(
         evidence["python_runtime"].get("ok")
         and checkpoint_hashes_complete
+        and vaes_complete
         and not evidence["errors"]
     )
     return evidence
@@ -393,11 +467,11 @@ def capture_snapshot(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Capture ComfyUI/Python/GPU/model checksums for an EVAVO quality run")
-    parser.add_argument("--manifest", default=None, help="Benchmark manifest used to resolve checkpoint/LoRA recipe")
+    parser.add_argument("--manifest", default=None, help="Benchmark manifest used to resolve checkpoint/LoRA/VAE recipe")
     parser.add_argument("--endpoint", default=None)
     parser.add_argument("--comfy-root", default=None)
     parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--model-root", action="append", default=[], help="Additional checkpoint/LoRA search root; may be repeated")
+    parser.add_argument("--model-root", action="append", default=[], help="Additional checkpoint/LoRA/VAE search root; may be repeated")
     parser.add_argument("--hash-cache", default=str(DEFAULT_CACHE))
     parser.add_argument("--output", default=None)
     parser.add_argument("--require-complete", action="store_true")
