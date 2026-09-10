@@ -88,6 +88,7 @@ if (Test-Path -LiteralPath $nextReceipt -PathType Leaf) {
             $currentRoot = [System.IO.Path]::GetFullPath([string]$nextInfo.currentRoot)
             $runtimeArgs += @("--model-root", (Join-Path $currentRoot "models\checkpoints"))
             $runtimeArgs += @("--model-root", (Join-Path $currentRoot "models\vae"))
+            $runtimeArgs += @("--model-root", (Join-Path $currentRoot "models\vae_approx"))
         }
     } catch {
         if (-not $AllowPartialRuntimeEvidence) {
