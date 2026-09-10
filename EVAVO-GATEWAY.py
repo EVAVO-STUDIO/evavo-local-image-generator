@@ -472,6 +472,15 @@ _IMAGE_QUALITY_REQUEST_FIELDS = (
 )
 
 
+def _validate_image_request_payload(request: Dict[str, Any]) -> None:
+    if "use_environment" in request and not isinstance(request.get("use_environment"), bool):
+        raise HTTPException(status_code=422, detail="use_environment must be a JSON boolean")
+    if "vae_name" in request:
+        value = request.get("vae_name")
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(status_code=422, detail="vae_name must be a non-empty string")
+
+
 def _image_queue_kwargs(request: Dict[str, Any], workflow_path: Any) -> Dict[str, Any]:
     """Map the additive gateway request onto the canonical quality backend."""
     kwargs: Dict[str, Any] = {
@@ -611,6 +620,7 @@ async def _queue(prefix: str, kind: str, request: GenerationRequest) -> TaskQueu
     project_name = str(payload.get("project_name", "gateway")).strip()[:MAX_PROJECT_CHARS] or "gateway"
     payload["project_name"] = project_name
     if kind == "image":
+        _validate_image_request_payload(payload)
         workflow_path = _request_workflow_path(payload.get("workflow_path"))
         if workflow_path:
             payload["workflow_path"] = workflow_path
@@ -688,7 +698,7 @@ def _configured_cors_origins() -> list[str]:
 
 app = FastAPI(
     title="EVAVO Unified Generator",
-    version="2.7.0",
+    version="2.7.1",
     description="Stable local image gateway with governed auxiliary provider delegation for ChatGPT, Claude, MCP and HTTP clients.",
     lifespan=lifespan,
 )
