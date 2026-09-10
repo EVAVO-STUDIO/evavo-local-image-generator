@@ -25,6 +25,7 @@ NATIVE_MCP_PORT = 18195
 EXPECTED_TOOLS = {
     "provision_backend",
     "ensure_backend",
+    "open_comfyui_ui",
     "health_check",
     "discover_backends",
     "list_checkpoints",

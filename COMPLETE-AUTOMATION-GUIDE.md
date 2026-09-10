@@ -90,6 +90,7 @@ Current verified tool surface:
 ```text
 provision_backend
 ensure_backend
+open_comfyui_ui
 health_check
 discover_backends
 list_checkpoints

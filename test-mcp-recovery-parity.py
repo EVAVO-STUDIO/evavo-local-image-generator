@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parent
 PRODUCTION_ENTRY = "evavo_local_image_generator.mcp_entry"
 REQUIRED_RECOVERY_TOOLS = {
     "ensure_backend",
+    "open_comfyui_ui",
     "diagnose_backend",
     "last_startup_failure",
     "repair_backend_dependencies",

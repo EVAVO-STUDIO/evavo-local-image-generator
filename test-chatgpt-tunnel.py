@@ -148,6 +148,7 @@ class ChatGPTTunnelContractTests(unittest.TestCase):
             "diagnose_backend",
             "repair_backend_dependencies",
             "ensure_backend",
+            "open_comfyui_ui",
             "health_check",
             "model_inventory",
             "generate_image",

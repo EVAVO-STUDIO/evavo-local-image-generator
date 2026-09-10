@@ -107,6 +107,7 @@ Preserve unrelated local progress and moving-main history.
 
 ```text
 ensure_backend
+open_comfyui_ui
 diagnose_backend
 last_startup_failure
 repair_backend_dependencies

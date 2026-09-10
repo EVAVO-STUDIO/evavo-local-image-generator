@@ -23,6 +23,7 @@ from evavo_local_image_generator.comfyui_runtime import (
     ensure_comfyui,
     load_state as load_native_state,
     native_health,
+    present_comfyui_ui,
     stop_managed_comfyui,
 )
 
@@ -68,6 +69,7 @@ REQUIRED_FILES = [
     "INSTALL-CHATGPT-MCP-TUNNEL-AUTOSTART.ps1",
     "CHATGPT-TUNNEL-DOCTOR.ps1",
     "START-GATEWAY.ps1",
+    "OPEN-COMFYUI.ps1",
     "COMMIT-UPGRADE.ps1",
     "COMMIT_AND_PUSH.ps1",
     "PUSH-UPGRADE-TO-MAIN.ps1",
@@ -434,6 +436,10 @@ def main() -> int:
     start.add_argument("--wait", type=float, default=90.0, help="Native ComfyUI readiness timeout")
     start.add_argument("--no-mock", action="store_true", help="Fail instead of starting the deterministic mock fallback")
 
+    open_ui = subparsers.add_parser("open-ui", help="Start/reuse native ComfyUI and open its local UI in the default browser")
+    open_ui.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    open_ui.add_argument("--wait", type=float, default=90.0, help="Native ComfyUI readiness timeout")
+
     subparsers.add_parser("stop", help="Stop only identity-verified EVAVO-managed native/mock processes")
 
     status = subparsers.add_parser("status", help="Check backend health and whether it can render real images")
@@ -481,6 +487,17 @@ def main() -> int:
         if args.wait <= 0:
             parser.error("--wait must be greater than zero")
         return start_service(args.endpoint, args.wait, allow_mock=not args.no_mock)
+    if args.command == "open-ui":
+        if args.wait <= 0:
+            parser.error("--wait must be greater than zero")
+        try:
+            backend = ensure_comfyui(args.endpoint, wait_seconds=args.wait, allow_start=True)
+            presentation = present_comfyui_ui(args.endpoint)
+        except (RuntimeError, ValueError) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"ok": True, "status": "ready", **presentation, "backend": backend}, indent=2))
+        return 0
     if args.command == "stop":
         return stop_service()
     if args.command == "status":

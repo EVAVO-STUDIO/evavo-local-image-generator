@@ -54,6 +54,7 @@ Claude and ChatGPT use different transports but the **same MCP tool implementati
 ```text
 provision_backend
 ensure_backend
+open_comfyui_ui
 diagnose_backend
 last_startup_failure
 repair_backend_dependencies
@@ -107,6 +108,11 @@ diagnose_backend(seconds=60, cpu=true)
 ensure_backend
 real generation proof
 ```
+
+To start or reuse native ComfyUI and present its interface on the signed-in
+workstation, call `open_comfyui_ui`. The tool first requires native readiness,
+then dispatches only the validated loopback ComfyUI URL to the workstation's
+default browser. It never opens a remote or caller-supplied URL.
 
 `diagnose_backend` performs a bounded startup diagnostic against only the process tree created by that probe. `last_startup_failure` returns the last structured startup failure without changing process state.
 

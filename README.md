@@ -92,6 +92,7 @@ Tunnel-client release and executable integrity are SHA-256 verified. Optional pe
 ```text
 provision_backend
 ensure_backend
+open_comfyui_ui
 diagnose_backend
 last_startup_failure
 repair_backend_dependencies
@@ -109,6 +110,14 @@ read_output_image
 task_history
 task_statistics
 stop_managed_backend
+```
+
+Ask a connected agent to call `open_comfyui_ui` to start or reuse native
+ComfyUI, prove HTTP readiness, and open the interface in the workstation's
+default browser. The equivalent direct Windows command is:
+
+```powershell
+.\OPEN-COMFYUI.ps1
 ```
 
 `generate_image` / `generate_batch` auto-start native ComfyUI and wait by default. Invalid file/wait policy is rejected **before backend startup and before queueing**, so a rejected preflight does not create a fake task.

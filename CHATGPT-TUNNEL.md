@@ -159,7 +159,12 @@ After the workstation tunnel runtime is configured and running, complete the Ope
 3. choose **Tunnel** as the connection type;
 4. select or paste the same tunnel ID used by the workstation profile;
 5. connect/save the app;
-6. verify the EVAVO MCP tools appear, including `health_check`, `model_inventory`, `generate_image`, `generate_batch`, `read_output_image`, `task_history` and `task_statistics`.
+6. verify the EVAVO MCP tools appear, including `open_comfyui_ui`, `health_check`, `model_inventory`, `generate_image`, `generate_batch`, `read_output_image`, `task_history` and `task_statistics`.
+
+Once connected, `open_comfyui_ui` starts or reuses native ComfyUI, waits for
+verified readiness, and asks the signed-in Windows session to open the local UI
+in its default browser. Browser presentation stays local; the tunnel does not
+publish port 8188.
 
 Workspace administrators may need to create, publish or allow the app depending on organization policy.
 

@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -519,6 +520,44 @@ def native_health(endpoint: str = "http://127.0.0.1:8188") -> Optional[Dict[str,
         return ComfyUIBackend(endpoint).health()
     except RuntimeError:
         return None
+
+
+def comfyui_ui_url(endpoint: str = "http://127.0.0.1:8188") -> str:
+    """Return the fixed local ComfyUI UI URL after rejecting remote/ambiguous input."""
+    raw = endpoint.strip().rstrip("/")
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError(f"COMFYUI_UI_ENDPOINT_INVALID:{endpoint}") from exc
+    if (
+        parsed.scheme != "http"
+        or not parsed.hostname
+        or parsed.hostname.lower() not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username
+        or parsed.password
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("COMFYUI_UI_ENDPOINT_INVALID:the UI may only be opened on a plain loopback HTTP endpoint")
+    host = parsed.hostname.lower()
+    rendered_host = f"[{host}]" if host == "::1" else host
+    rendered_port = f":{port}" if port is not None else ""
+    return f"http://{rendered_host}{rendered_port}/"
+
+
+def present_comfyui_ui(endpoint: str = "http://127.0.0.1:8188") -> Dict[str, Any]:
+    """Ask the signed-in workstation session to open the verified local ComfyUI UI."""
+    url = comfyui_ui_url(endpoint)
+    try:
+        dispatched = bool(webbrowser.open_new_tab(url))
+    except (OSError, webbrowser.Error) as exc:
+        raise RuntimeError(f"COMFYUI_UI_OPEN_FAILED:{exc}") from exc
+    if not dispatched:
+        raise RuntimeError("COMFYUI_UI_OPEN_FAILED:no desktop browser accepted the request")
+    return {"opened": True, "ui_url": url, "method": "default-browser-new-tab"}
 
 
 def stop_managed_comfyui() -> Dict[str, Any]:

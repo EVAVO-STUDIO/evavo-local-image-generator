@@ -87,11 +87,18 @@
         "legacy_running_broad_interrupt_allowed": false
       },
       "tools": [
-        "provision_backend", "ensure_backend", "diagnose_backend", "last_startup_failure", "repair_backend_dependencies", "health_check",
+        "provision_backend", "ensure_backend", "open_comfyui_ui", "diagnose_backend", "last_startup_failure", "repair_backend_dependencies", "health_check",
         "discover_backends", "list_checkpoints", "model_inventory", "workflow_preflight", "generate_image",
         "generate_batch", "generation_status", "cancel_generation", "collect_generation", "read_output_image",
         "task_history", "task_statistics", "stop_managed_backend"
-      ]
+      ],
+      "comfyui_ui_presentation": {
+        "tool": "open_comfyui_ui",
+        "requires_native_readiness": true,
+        "opens_on_connected_workstation": true,
+        "url_policy": "plain-loopback-http-only",
+        "direct_windows_launcher": "OPEN-COMFYUI.ps1"
+      }
     },
     "chatgpt": {
       "transport": "openai-secure-mcp-tunnel",
