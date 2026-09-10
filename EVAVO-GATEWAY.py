@@ -467,6 +467,8 @@ _IMAGE_QUALITY_REQUEST_FIELDS = (
     "lora_name",
     "lora_model_strength",
     "lora_clip_strength",
+    "vae_name",
+    "use_environment",
 )
 
 
@@ -503,6 +505,8 @@ def _image_receipt_fields(queued: Dict[str, Any]) -> Dict[str, Any]:
         "output_width": queued.get("output_width"),
         "output_height": queued.get("output_height"),
         "lora": queued.get("lora"),
+        "vae": queued.get("vae"),
+        "use_environment": queued.get("use_environment"),
     }
 
 
@@ -551,6 +555,8 @@ async def _image_worker(task_id: str, request: Dict[str, Any]) -> None:
             output_width=queued.get("output_width"),
             output_height=queued.get("output_height"),
             lora=queued.get("lora"),
+            vae=queued.get("vae"),
+            generation_receipt=receipt,
         )
     except Exception as exc:
         message = str(exc)
@@ -682,7 +688,7 @@ def _configured_cors_origins() -> list[str]:
 
 app = FastAPI(
     title="EVAVO Unified Generator",
-    version="2.6.0",
+    version="2.7.0",
     description="Stable local image gateway with governed auxiliary provider delegation for ChatGPT, Claude, MCP and HTTP clients.",
     lifespan=lifespan,
 )
@@ -725,8 +731,10 @@ async def capabilities() -> Dict[str, Any]:
             "quality_profiles": profile_names(),
             "default_quality_profile": os.getenv("EVAVO_IMAGE_QUALITY_PROFILE", "quality"),
             "per_request_quality": True,
+            "frozen_recipe": True,
             "hero_two_pass": True,
             "lora": True,
+            "vae_override": True,
             "reproducible_receipt": [
                 "seed",
                 "workflow_sha256",
@@ -737,6 +745,8 @@ async def capabilities() -> Dict[str, Any]:
                 "output_width",
                 "output_height",
                 "lora",
+                "vae",
+                "use_environment",
             ],
         },
         "video": {
