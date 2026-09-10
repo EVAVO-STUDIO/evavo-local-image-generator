@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 from evavo_operations import DEFAULT_ENDPOINT, now_iso
+from evavo_local_image_generator.backends import ComfyUIBackend
 from evavo_local_image_generator.prompt_quality import compile_prompt, lint_prompt
 from evavo_local_image_generator.quality_profiles import profile_names, resolve_quality_settings
 
@@ -160,7 +161,7 @@ def _options(value: Any, *, label: str) -> Dict[str, Any]:
     return options
 
 
-def _validate_quality_recipe(options: Dict[str, Any], *, label: str) -> None:
+def _resolve_quality_recipe(options: Dict[str, Any], *, label: str):
     try:
         settings = resolve_quality_settings(
             quality_profile=options.get("quality_profile"),
@@ -178,6 +179,7 @@ def _validate_quality_recipe(options: Dict[str, Any], *, label: str) -> None:
             second_pass_scheduler=options.get("second_pass_scheduler"),
             second_pass_denoise=options.get("second_pass_denoise"),
             latent_upscale_method=options.get("latent_upscale_method"),
+            use_environment=False,
         )
     except ValueError as exc:
         raise ValueError(f"{label}: invalid quality recipe: {exc}") from exc
@@ -187,6 +189,7 @@ def _validate_quality_recipe(options: Dict[str, Any], *, label: str) -> None:
         raise ValueError(f"{label}: custom workflows cannot use automatic hero/two-pass expansion")
     if workflow and options.get("lora_name"):
         raise ValueError(f"{label}: custom workflows cannot use automatic LoRA insertion")
+    return settings
 
 
 def _confined_output(root: Path, subdir: str) -> Path:
@@ -209,6 +212,28 @@ def _resolve_workflow(plan_dir: Path, value: str) -> str:
     if not resolved.is_file() or resolved.is_symlink():
         raise ValueError(f"custom workflow is missing or unsafe: {resolved}")
     return str(resolved)
+
+
+async def _preflight_custom_workflow(endpoint: str, workflow_path: str, sample_prompt: str) -> Dict[str, Any]:
+    """Preflight a plan-owned workflow without inheriting ambient image controls."""
+    backend = ComfyUIBackend(endpoint)
+    path = str(Path(workflow_path).expanduser().resolve())
+    workflow = await asyncio.to_thread(
+        backend.build_txt2img_workflow,
+        sample_prompt,
+        negative_prompt="",
+        width=1024,
+        height=1024,
+        steps=4,
+        cfg_scale=7.0,
+        seed=1,
+        workflow_path=path,
+        filename_prefix="EVAVO/batch-plan-preflight",
+        lora_name="",
+        use_environment=False,
+    )
+    result = await asyncio.to_thread(backend.preflight_workflow, workflow)
+    return {"workflow_path": path, "environment_mode": "frozen", **result}
 
 
 def _compile_item(
@@ -260,7 +285,7 @@ def _compile_item(
         raise ValueError(f"items[{index}] prompt lint failed: {lint['issues']}")
     prompt = lint["prompt"]
     merged["negative_prompt"] = lint["negative_prompt"]
-    _validate_quality_recipe(merged, label=f"items[{index}]")
+    settings = _resolve_quality_recipe(merged, label=f"items[{index}]")
 
     return {
         "id": item_id,
@@ -268,6 +293,7 @@ def _compile_item(
         "prompt_source": source,
         "prompt_quality": lint,
         "generation_options": merged,
+        "resolved_quality": settings.as_dict(),
         "output_subdir": str(item.get("output_subdir") or item_id),
     }
 
@@ -299,7 +325,7 @@ def validate_plan(
     default_options = _options(payload.get("defaults"), label="defaults")
     if "workflow_path" in default_options:
         default_options["workflow_path"] = _resolve_workflow(plan_path.parent, default_options["workflow_path"])
-    _validate_quality_recipe(default_options, label="defaults")
+    default_quality = _resolve_quality_recipe(default_options, label="defaults")
 
     concurrency_raw = concurrency_override if concurrency_override is not None else payload.get("concurrency", 1)
     concurrency = _integer(concurrency_raw, "concurrency", 1, MAX_CONCURRENCY)
@@ -344,7 +370,10 @@ def validate_plan(
         "wait": wait,
         "wait_timeout": wait_timeout,
         "output_root": str(output_root),
+        "environment_mode": "frozen",
+        "environment_policy": "versioned batch plans ignore ambient EVAVO_IMAGE_* profile/LoRA overrides; ambient workflow injection fails closed",
         "defaults": default_options,
+        "resolved_default_quality": default_quality.as_dict(),
         "items": compiled,
     }
 
@@ -386,7 +415,7 @@ async def execute(
                 "message": "custom workflow plan items require native ComfyUI",
             }
         try:
-            workflow_checks[workflow] = await batch.preflight_custom_workflow(
+            workflow_checks[workflow] = await _preflight_custom_workflow(
                 validated["endpoint"], workflow, entry["prompt"]
             )
         except Exception as exc:
@@ -408,6 +437,7 @@ async def execute(
                 "prompt_sha256": entry["prompt_quality"]["prompt_sha256"],
                 "prompt_warnings": entry["prompt_quality"]["issues"],
                 "generation_options": entry["generation_options"],
+                "resolved_quality": entry["resolved_quality"],
                 "output_dir": entry["output_dir"],
                 "status": "pending",
                 "task_id": None,
@@ -418,7 +448,7 @@ async def execute(
     store = batch.BatchRunStore(
         manifest_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "batch_id": f"batch-plan-{uuid.uuid4().hex}",
             "batch_plan": {
                 "source": str(plan_path),
@@ -433,6 +463,9 @@ async def execute(
             "wait": validated["wait"],
             "wait_timeout": validated["wait_timeout"],
             "output_root": validated["output_root"],
+            "environment_mode": validated["environment_mode"],
+            "environment_policy": validated["environment_policy"],
+            "resolved_default_quality": validated["resolved_default_quality"],
             "workflow_preflight": workflow_checks,
             "items": manifest_items,
         },
@@ -443,6 +476,7 @@ async def execute(
     for index, entry in enumerate(validated["items"]):
         options = dict(entry["generation_options"])
         workflow = options.pop("workflow_path", None)
+        options["use_environment"] = False
         tasks.append(
             batch.queue_generation(
                 entry["prompt"],
@@ -479,6 +513,7 @@ async def execute(
         "total": len(results),
         "manifest": str(manifest_path),
         "output_root": validated["output_root"],
+        "environment_mode": validated["environment_mode"],
         "results": results,
     }
     return (0 if summary["ok"] else 1), summary
@@ -492,7 +527,7 @@ def main() -> int:
     parser.add_argument("--manifest", default="")
     parser.add_argument("--queue-timeout", type=float, default=30.0)
     parser.add_argument("--allow-prompt-lint-errors", action="store_true")
-    parser.add_argument("--dry-run", action="store_true", help="Validate and print the resolved plan without queueing")
+    parser.add_argument("--dry-run", action="store_true", help="Validate and print the resolved frozen plan without queueing")
     args = parser.parse_args()
     if args.queue_timeout <= 0:
         parser.error("--queue-timeout must be greater than zero")
