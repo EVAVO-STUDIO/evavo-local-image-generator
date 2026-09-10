@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Quality-first batch image generation for EVAVO mock or native ComfyUI.
 
-Batch jobs preserve the same quality/profile/LoRA controls as single-image
+Batch jobs preserve the same quality/profile/LoRA/VAE controls as single-image
 calls and write an atomic run manifest so the requested recipe and per-task
 receipts are durable even when console output is lost.
 """
@@ -49,6 +49,7 @@ RECEIPT_FIELDS = (
     "output_width",
     "output_height",
     "lora",
+    "vae",
 )
 
 
@@ -179,6 +180,7 @@ def _generation_options(args: argparse.Namespace) -> Dict[str, Any]:
         "lora_name": args.lora,
         "lora_model_strength": args.lora_model_strength,
         "lora_clip_strength": args.lora_clip_strength,
+        "vae_name": args.vae,
         "checkpoint": args.checkpoint,
     }
     return {key: value for key, value in mapping.items() if value is not None}
@@ -210,6 +212,8 @@ def _validate_quality_options(args: argparse.Namespace) -> None:
         raise ValueError("custom workflow batches cannot use automatic two-pass/hero expansion; encode that pass in the custom workflow")
     if args.workflow and (args.lora or os.getenv("EVAVO_IMAGE_LORA")):
         raise ValueError("custom workflow batches cannot use automatic LoRA insertion; encode LoraLoader in the custom workflow")
+    if args.workflow and (args.vae or os.getenv("EVAVO_IMAGE_VAE")):
+        raise ValueError("custom workflow batches cannot use automatic VAE insertion; encode VAELoader in the custom workflow")
     for name, value in (
         ("lora_model_strength", args.lora_model_strength),
         ("lora_clip_strength", args.lora_clip_strength),
@@ -642,6 +646,7 @@ def main() -> int:
     parser.add_argument("--lora")
     parser.add_argument("--lora-model-strength", type=float)
     parser.add_argument("--lora-clip-strength", type=float)
+    parser.add_argument("--vae", help="Exact live ComfyUI VAELoader inventory name; omitted uses the checkpoint's baked VAE")
     parser.add_argument("--seed", type=int, help="Base deterministic seed. Omit for a random seed per render.")
     parser.add_argument("--seed-strategy", choices=["same", "increment"], default="increment", help="When --seed is set, reuse it or increment once per prompt")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
