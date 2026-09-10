@@ -20,7 +20,7 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 def request(url: str, *, method: str = "GET", payload: Dict[str, Any] | None = None, timeout: float = 10.0) -> Tuple[int, bytes, Dict[str, str], float]:
     body = json.dumps(payload).encode("utf-8") if payload is not None else None
-    headers = {"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Smoke/3"}
+    headers = {"Accept": "application/json", "User-Agent": "EVAVO-Gateway-Smoke/4"}
     if body is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=body, headers=headers, method=method)
@@ -79,8 +79,15 @@ async def websocket_probe(base: str, task_id: str) -> Dict[str, Any]:
         return {"ok": False, "latency_ms": round((time.perf_counter() - started) * 1000, 1), "error": str(exc)}
 
 
-def quality_receipt_ok(task: Dict[str, Any], *, requested_profile: str, requested_seed: int) -> tuple[bool, list[str]]:
-    failures = []
+def quality_receipt_ok(
+    task: Dict[str, Any],
+    *,
+    requested_profile: str,
+    requested_seed: int,
+    requested_vae: str | None,
+    frozen: bool,
+) -> tuple[bool, list[str]]:
+    failures: list[str] = []
     if task.get("quality_profile") != requested_profile:
         failures.append(f"quality_profile={task.get('quality_profile')!r}, expected {requested_profile!r}")
     if task.get("seed") != requested_seed:
@@ -101,6 +108,19 @@ def quality_receipt_ok(task: Dict[str, Any], *, requested_profile: str, requeste
         failures.append("output_width is missing or invalid")
     if not isinstance(task.get("output_height"), int) or task["output_height"] <= 0:
         failures.append("output_height is missing or invalid")
+
+    expected_environment = not frozen
+    if task.get("use_environment") is not expected_environment:
+        failures.append(
+            f"use_environment={task.get('use_environment')!r}, expected {expected_environment!r}"
+        )
+
+    vae = task.get("vae")
+    if requested_vae:
+        if not isinstance(vae, dict) or vae.get("name") != requested_vae:
+            failures.append(f"vae={vae!r}, expected name {requested_vae!r}")
+    elif vae not in {None, {}}:
+        failures.append(f"vae={vae!r}, expected baked checkpoint VAE")
     return not failures, failures
 
 
@@ -116,6 +136,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--lora", default=None)
     parser.add_argument("--lora-strength", type=float, default=0.7)
+    parser.add_argument("--vae", default=None, help="Optional exact live VAELoader inventory name")
+    parser.add_argument("--frozen", action="store_true", help="Send use_environment=false and verify the frozen recipe receipt")
     parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument("--output", default=".evavo/gateway/smoke-test-result.png")
     args = parser.parse_args()
@@ -123,14 +145,18 @@ def main() -> int:
         parser.error("--timeout must be greater than zero")
     if not finite_number(args.lora_strength) or not -4 <= args.lora_strength <= 4:
         parser.error("--lora-strength must be finite and between -4 and 4")
+    if args.vae is not None and not str(args.vae).strip():
+        parser.error("--vae must not be empty")
 
     base = args.base.rstrip("/")
     report: Dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "base": base,
         "requested_profile": args.profile,
         "requested_seed": args.seed,
         "requested_lora": args.lora,
+        "requested_vae": args.vae,
+        "frozen_recipe_requested": bool(args.frozen),
         "started_at": time.time(),
         "checks": {},
     }
@@ -164,13 +190,27 @@ def main() -> int:
         image_cap = capabilities.get("image") if isinstance(capabilities.get("image"), dict) else {}
         profiles = image_cap.get("quality_profiles") if isinstance(image_cap.get("quality_profiles"), list) else []
         receipt_fields = image_cap.get("reproducible_receipt") if isinstance(image_cap.get("reproducible_receipt"), list) else []
-        required_receipt = {"seed", "workflow_sha256", "workflow_node_count", "checkpoint", "quality_profile", "render_passes", "output_width", "output_height", "lora"}
+        required_receipt = {
+            "seed",
+            "workflow_sha256",
+            "workflow_node_count",
+            "checkpoint",
+            "quality_profile",
+            "render_passes",
+            "output_width",
+            "output_height",
+            "lora",
+            "vae",
+            "use_environment",
+        }
         capabilities_ok = (
             status == 200
             and image_cap.get("ready") is True
             and image_cap.get("per_request_quality") is True
+            and image_cap.get("frozen_recipe") is True
             and image_cap.get("hero_two_pass") is True
             and image_cap.get("lora") is True
+            and image_cap.get("vae_override") is True
             and args.profile in profiles
             and required_receipt.issubset(set(receipt_fields))
             and all(isinstance(capabilities.get(kind), dict) for kind in ("video", "audio", "3d"))
@@ -182,7 +222,7 @@ def main() -> int:
             "response": capabilities,
         }
         if not capabilities_ok:
-            raise RuntimeError("Gateway does not advertise the required image-quality contract")
+            raise RuntimeError("Gateway does not advertise the required image-quality/frozen/VAE contract")
 
         status, openapi, latency = json_request(base + "/openapi.json")
         required_paths = {
@@ -211,12 +251,16 @@ def main() -> int:
             "quality_profile": args.profile,
             "seed": args.seed,
         }
+        if args.frozen:
+            image_request["use_environment"] = False
         if args.lora:
             image_request.update(
                 lora_name=args.lora,
                 lora_model_strength=args.lora_strength,
                 lora_clip_strength=args.lora_strength,
             )
+        if args.vae:
+            image_request["vae_name"] = args.vae
 
         status, queued, latency = json_request(base + "/generate/image", method="POST", payload=image_request)
         task_id = str(queued.get("task_id", ""))
@@ -245,12 +289,24 @@ def main() -> int:
             poll_latencies.append(latency)
             if latest.get("workflow_sha256"):
                 receipt_checked = True
-                _, receipt_failures = quality_receipt_ok(latest, requested_profile=args.profile, requested_seed=args.seed)
+                _, receipt_failures = quality_receipt_ok(
+                    latest,
+                    requested_profile=args.profile,
+                    requested_seed=args.seed,
+                    requested_vae=args.vae,
+                    frozen=args.frozen,
+                )
             if latest.get("status") in {"completed", "failed"}:
                 break
             time.sleep(0.5)
 
-        receipt_ok, final_receipt_failures = quality_receipt_ok(latest, requested_profile=args.profile, requested_seed=args.seed)
+        receipt_ok, final_receipt_failures = quality_receipt_ok(
+            latest,
+            requested_profile=args.profile,
+            requested_seed=args.seed,
+            requested_vae=args.vae,
+            frozen=args.frozen,
+        )
         if final_receipt_failures:
             receipt_failures = final_receipt_failures
         lora_ok = True
@@ -279,6 +335,8 @@ def main() -> int:
             "receipt_seen_before_completion": receipt_checked,
             "receipt_failures": receipt_failures,
             "lora_ok": lora_ok,
+            "vae_ok": not any(failure.startswith("vae=") for failure in receipt_failures),
+            "frozen_recipe_ok": not any(failure.startswith("use_environment=") for failure in receipt_failures),
             "average_poll_latency_ms": round(sum(poll_latencies) / max(1, len(poll_latencies)), 1),
             "final": latest,
         }
