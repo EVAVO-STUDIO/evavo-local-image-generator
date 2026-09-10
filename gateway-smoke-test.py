@@ -59,6 +59,10 @@ def finite_number(value: Any) -> bool:
         return False
 
 
+def optional_receipt_empty(value: Any) -> bool:
+    return value is None or value == {}
+
+
 async def websocket_probe(base: str, task_id: str) -> Dict[str, Any]:
     try:
         import websockets
@@ -119,7 +123,7 @@ def quality_receipt_ok(
     if requested_vae:
         if not isinstance(vae, dict) or vae.get("name") != requested_vae:
             failures.append(f"vae={vae!r}, expected name {requested_vae!r}")
-    elif vae not in {None, {}}:
+    elif not optional_receipt_empty(vae):
         failures.append(f"vae={vae!r}, expected baked checkpoint VAE")
     return not failures, failures
 
@@ -319,7 +323,7 @@ def main() -> int:
                 and finite_number(lora.get("clip_strength"))
                 and abs(float(lora["clip_strength"]) - args.lora_strength) < 1e-9
             )
-        elif latest.get("lora") not in {None, {}}:
+        elif not optional_receipt_empty(latest.get("lora")):
             lora_ok = False
 
         task_ok = (
