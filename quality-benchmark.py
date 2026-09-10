@@ -100,7 +100,18 @@ def main() -> int:
         "sha256": corpus["sha256"],
     }
     if args.dry_run:
-        print(json.dumps({"ok": True, "prompt_corpus": corpus_receipt, "render_count": len(plan), "plan": plan}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "environment_mode": "frozen",
+                    "prompt_corpus": corpus_receipt,
+                    "render_count": len(plan),
+                    "plan": plan,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     backend = ComfyUIBackend(args.endpoint)
@@ -114,9 +125,11 @@ def main() -> int:
     run_dir = Path(args.output).expanduser().resolve() / now_stamp()
     run_dir.mkdir(parents=True, exist_ok=False)
     manifest: Dict[str, Any] = {
-        "schema_version": 4,
+        "schema_version": 5,
         "started_at": datetime.now().astimezone().isoformat(),
         "endpoint": backend.endpoint,
+        "environment_mode": "frozen",
+        "environment_policy": "EVAVO_IMAGE_* profile/LoRA/workflow overrides are ignored for controlled comparisons",
         "health": health,
         "sampling_inventory": sampling,
         "checkpoint": args.checkpoint,
@@ -141,6 +154,7 @@ def main() -> int:
                 seed=item["seed"],
                 checkpoint=args.checkpoint,
                 quality_profile=item["profile"],
+                use_environment=False,
             )
             target = run_dir / "images" / item["prompt_id"] / item["profile"] / str(item["seed"])
             files = backend.wait_and_download(queued["task_id"], target, timeout=args.timeout)
@@ -182,6 +196,8 @@ def main() -> int:
                 raise RuntimeError(
                     f"QUALITY_SEED_MISMATCH:requested {item['seed']}, submitted {submitted_seed}"
                 )
+            if queued.get("lora") is not None:
+                raise RuntimeError("QUALITY_AMBIENT_LORA_LEAK:controlled benchmark unexpectedly applied a LoRA")
             result = {
                 **item,
                 "status": "completed",
@@ -217,6 +233,7 @@ def main() -> int:
 
     print(f"\nQuality benchmark manifest: {run_dir / 'manifest.json'}")
     print(f"Prompt corpus: {corpus_receipt['prompt_set_version']} {corpus_receipt['sha256']}")
+    print("Environment mode: frozen (ambient image profile/LoRA/workflow overrides ignored)")
     print(f"Completed: {len(manifest['results'])}/{len(plan)}")
     return 0 if manifest["ok"] else 1
 
