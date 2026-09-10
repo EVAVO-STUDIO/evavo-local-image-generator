@@ -10,6 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
+
 
 ROOT = Path(__file__).resolve().parent
 
@@ -86,6 +88,23 @@ class GatewayQualityContractTests(unittest.TestCase):
             for key, expected in request.items():
                 self.assertEqual(kwargs[key], expected, f"gateway dropped {key}")
             self.assertIsNone(kwargs["workflow_path"])
+
+    def test_image_request_rejects_string_false_for_frozen_mode(self):
+        with tempfile.TemporaryDirectory() as value:
+            module = _load_gateway(Path(value))
+            with self.assertRaises(HTTPException) as caught:
+                module._validate_image_request_payload({"use_environment": "false"})
+            self.assertEqual(caught.exception.status_code, 422)
+            self.assertIn("JSON boolean", str(caught.exception.detail))
+
+    def test_image_request_rejects_empty_or_non_string_vae_name(self):
+        with tempfile.TemporaryDirectory() as value:
+            module = _load_gateway(Path(value))
+            for invalid in ("", "   ", 123, False, None):
+                with self.subTest(value=invalid):
+                    with self.assertRaises(HTTPException) as caught:
+                        module._validate_image_request_payload({"vae_name": invalid})
+                    self.assertEqual(caught.exception.status_code, 422)
 
     def test_image_receipt_fields_retains_reproducibility_and_quality_metadata(self):
         with tempfile.TemporaryDirectory() as value:
@@ -176,7 +195,7 @@ class GatewayQualityContractTests(unittest.TestCase):
 
     def test_gateway_version_and_capabilities_advertise_additive_quality_surface(self):
         source = (ROOT / "EVAVO-GATEWAY.py").read_text(encoding="utf-8-sig")
-        self.assertIn('version="2.7.0"', source)
+        self.assertIn('version="2.7.1"', source)
         self.assertIn('"quality_profiles": profile_names()', source)
         self.assertIn('"per_request_quality": True', source)
         self.assertIn('"frozen_recipe": True', source)
@@ -186,6 +205,7 @@ class GatewayQualityContractTests(unittest.TestCase):
         self.assertIn('"workflow_sha256"', source)
         self.assertIn('"vae"', source)
         self.assertIn('"use_environment"', source)
+        self.assertIn("use_environment must be a JSON boolean", source)
 
 
 if __name__ == "__main__":
