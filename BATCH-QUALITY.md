@@ -57,6 +57,46 @@ python generate-batch.py `
 
 Evaluate a LoRA with `RUN-LORA-SWEEP.ps1` before using it broadly.
 
+## Versioned mixed-quality batch plans
+
+Use `batch-plan.py` when different items need different quality profiles, LoRAs, seeds, prompt specs or output folders.
+
+Example:
+
+```powershell
+python batch-plan.py `
+  --plan .\examples\batch-plan-mixed-quality-v1.json `
+  --dry-run
+
+python batch-plan.py `
+  --plan .\examples\batch-plan-mixed-quality-v1.json
+```
+
+The input contract is versioned in:
+
+```text
+config/batch-plan-v1.schema.json
+```
+
+The checked-in example demonstrates a normal 1024 quality item and 1536-class hero items using both commercial product direction and an 1871 engraved game-art brief.
+
+### Frozen recipe rule
+
+Versioned batch plans run in **frozen environment mode**. This is different from ordinary interactive generation.
+
+For a plan run:
+
+- ambient `EVAVO_IMAGE_QUALITY_PROFILE` is ignored
+- ambient width/height/steps/CFG/sampler/scheduler overrides are ignored
+- ambient LoRA and LoRA-strength overrides are ignored
+- the resolved quality recipe is written into the run manifest for every item
+- child wrappers receive `use_environment=false`
+- an unexpected ambient `EVAVO_COMFYUI_WORKFLOW` cannot silently replace a canonical plan render; frozen generation fails closed unless the plan explicitly supplies a workflow path
+
+This means a versioned plan cannot silently render differently because the workstation happened to have an old quality or LoRA environment variable set.
+
+`quality-benchmark.py` and `lora-sweep.py` use the same frozen policy for controlled A/B work.
+
 ## Explicit controls
 
 Batch generation exposes:
@@ -93,7 +133,7 @@ Use `PROMPT-QUALITY.md` and `prompt-quality.py` for structured prompt design.
 
 ## Durable evidence
 
-Each batch manifest records:
+Each normal batch manifest records:
 
 - endpoint and project
 - concurrency / wait policy
@@ -105,6 +145,16 @@ Each batch manifest records:
 - per-item status and task ID
 - full wrapper/backend result including seed, workflow SHA, profile, pass count, output dimensions and LoRA receipt
 
+A versioned batch-plan manifest additionally records:
+
+- source plan path and SHA-256
+- schema identity/version
+- frozen-environment policy
+- resolved default quality recipe
+- resolved quality recipe per item
+- per-item prompt source and fingerprint
+- custom-workflow preflight receipts
+
 `task_history.json` stores the important recipe in `generation_receipt` so task listings do not lose reproducibility metadata.
 
 ## Recovery and resume
@@ -114,6 +164,8 @@ Start with reconciliation only:
 ```powershell
 python batch-resume.py --manifest ".evavo\batch-runs\<run>.json"
 ```
+
+The same recovery tool accepts normal batch manifests and versioned batch-plan manifests.
 
 Default recovery policy is deliberately non-duplicating:
 
@@ -161,4 +213,4 @@ Do not commit:
 - task history
 - machine-specific logs
 
-Track source, prompt/config schemas, model manifests/hashes and reviewed production defaults instead.
+Track source, versioned prompt/batch schemas, model manifests/hashes and reviewed production defaults instead.
