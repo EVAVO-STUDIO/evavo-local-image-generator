@@ -112,9 +112,12 @@ task_statistics
 stop_managed_backend
 ```
 
-Ask a connected agent to call `open_comfyui_ui` to start or reuse native
-ComfyUI, prove HTTP readiness, and open the interface in the workstation's
-default browser. The equivalent direct Windows command is:
+Ask a connected ChatGPT agent to call `open_comfyui_ui`. It starts or reuses
+native ComfyUI, proves HTTP readiness, and renders an embedded EVAVO control
+panel in the conversation. From that panel you can generate and preview images,
+check backend health, or open the complete native node editor in the
+workstation's default browser. The private ComfyUI port is never embedded or
+published. The equivalent direct Windows command is:
 
 ```powershell
 .\OPEN-COMFYUI.ps1

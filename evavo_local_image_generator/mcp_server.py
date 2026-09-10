@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     from mcp.server import MCPServer
+    from mcp.server.apps import Apps
     from mcp.server.mcpserver.utilities.types import Image
     from mcp.server.transport_security import TransportSecuritySettings
 except ImportError as exc:  # pragma: no cover
@@ -33,8 +34,65 @@ from .comfyui_runtime import (
     stop_managed_comfyui,
 )
 from .comfyui_status import prompt_status
+from .comfyui_app import COMFYUI_APP_HTML, COMFYUI_APP_URI
 
-mcp = MCPServer("EVAVO Local Image Generator")
+apps = Apps()
+
+
+@apps.tool(
+    resource_uri=COMFYUI_APP_URI,
+    visibility=["model", "app"],
+    name="open_comfyui_ui",
+    title="Open ComfyUI",
+    description="Start or reuse local ComfyUI and render its EVAVO control panel inside ChatGPT.",
+    meta={
+        "openai/outputTemplate": COMFYUI_APP_URI,
+        "openai/widgetAccessible": True,
+        "openai/toolInvocation/invoking": "Starting ComfyUI…",
+        "openai/toolInvocation/invoked": "ComfyUI is ready",
+    },
+)
+async def open_comfyui_ui(auto_start: bool = True, wait_seconds: float = 90.0) -> Dict[str, Any]:
+    """Start or reuse ComfyUI and provide embedded and native workstation controls."""
+    app = {
+        "resource_uri": COMFYUI_APP_URI,
+        "presentation": "embedded-chat-control-and-native-workstation",
+        "embedded_native_graph_editor": False,
+    }
+    try:
+        backend = await _ensure(auto_start=auto_start, wait_seconds=wait_seconds)
+    except ValueError as exc:
+        return {"ok": False, "status": "failed", "error_code": "INVALID_WAIT_SECONDS", "message": str(exc), "chat_ui": app}
+    except RuntimeError as exc:
+        message = str(exc)
+        error_code = message.split(":", 1)[0] if ":" in message else "COMFYUI_START_FAILED"
+        return {"ok": False, "status": "failed", "error_code": error_code, "message": message, "chat_ui": app}
+
+    result = {"ok": True, "status": "ready", "backend": backend, "chat_ui": app}
+    try:
+        presentation = await asyncio.to_thread(present_comfyui_ui, _endpoint())
+    except RuntimeError as exc:
+        result.update({
+            "status": "ready_in_chat",
+            "native_ui_opened": False,
+            "native_ui_warning": str(exc),
+            "ui_url": f"{_endpoint()}/",
+        })
+        return result
+    result.update(presentation)
+    result["native_ui_opened"] = True
+    return result
+
+
+apps.add_html_resource(
+    COMFYUI_APP_URI,
+    COMFYUI_APP_HTML,
+    title="EVAVO ComfyUI",
+    description="Start ComfyUI, generate images, and preview results directly in ChatGPT.",
+    prefers_border=True,
+)
+
+mcp = MCPServer("EVAVO Local Image Generator", extensions=[apps])
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 MAX_MCP_IMAGE_BYTES = 32 * 1024 * 1024
 
@@ -359,33 +417,6 @@ async def ensure_backend(auto_start: bool = True, wait_seconds: float = 90.0) ->
         return await _ensure(auto_start=auto_start, wait_seconds=wait_seconds)
     except ValueError as exc:
         return {"ok": False, "status": "failed", "error_code": "INVALID_WAIT_SECONDS", "message": str(exc)}
-
-
-@mcp.tool()
-async def open_comfyui_ui(auto_start: bool = True, wait_seconds: float = 90.0) -> Dict[str, Any]:
-    """Start or reuse native ComfyUI, verify readiness, then open its UI on the connected workstation."""
-    try:
-        backend = await _ensure(auto_start=auto_start, wait_seconds=wait_seconds)
-    except ValueError as exc:
-        return {"ok": False, "status": "failed", "error_code": "INVALID_WAIT_SECONDS", "message": str(exc)}
-    except RuntimeError as exc:
-        message = str(exc)
-        error_code = message.split(":", 1)[0] if ":" in message else "COMFYUI_START_FAILED"
-        return {"ok": False, "status": "failed", "error_code": error_code, "message": message}
-    try:
-        presentation = await asyncio.to_thread(present_comfyui_ui, _endpoint())
-    except RuntimeError as exc:
-        message = str(exc)
-        error_code = message.split(":", 1)[0] if ":" in message else "COMFYUI_UI_OPEN_FAILED"
-        return {
-            "ok": False,
-            "status": "backend_ready_ui_not_opened",
-            "error_code": error_code,
-            "message": message,
-            "ui_url": f"{_endpoint()}/",
-            "backend": backend,
-        }
-    return {"ok": True, "status": "ready", **presentation, "backend": backend}
 
 
 @mcp.tool()
