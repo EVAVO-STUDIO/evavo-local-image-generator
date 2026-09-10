@@ -95,10 +95,12 @@ def main() -> int:
     run_dir = Path(args.output).expanduser().resolve() / f"{stamp}-{safe_name}"
     run_dir.mkdir(parents=True, exist_ok=False)
     manifest: dict[str, Any] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "benchmark_type": "lora_strength_sweep",
         "started_at": datetime.now().astimezone().isoformat(),
         "endpoint": backend.endpoint,
+        "environment_mode": "frozen",
+        "environment_policy": "ambient EVAVO_IMAGE_* profile/LoRA/workflow overrides are ignored",
         "health": health,
         "lora_name": args.lora,
         "quality_profile": args.profile,
@@ -124,6 +126,7 @@ def main() -> int:
                 "seed": args.seed,
                 "checkpoint": args.checkpoint,
                 "quality_profile": args.profile,
+                "use_environment": False,
             }
             if not base:
                 kwargs.update(
@@ -131,10 +134,16 @@ def main() -> int:
                     lora_model_strength=strength,
                     lora_clip_strength=args.clip_strength if args.clip_strength is not None else strength,
                 )
+            else:
+                # Explicitly prove that the baseline cannot inherit an ambient
+                # EVAVO_IMAGE_LORA from the workstation.
+                kwargs["lora_name"] = ""
             queued = backend.queue_image(args.prompt, **kwargs)
             submitted_seed = queued.get("seed")
             if submitted_seed is not None and int(submitted_seed) != int(args.seed):
                 raise RuntimeError(f"LORA_SWEEP_SEED_MISMATCH:requested {args.seed}, submitted {submitted_seed}")
+            if base and queued.get("lora") is not None:
+                raise RuntimeError("LORA_SWEEP_AMBIENT_LORA_LEAK:base render unexpectedly applied a LoRA")
 
             target = run_dir / "images" / label
             files = backend.wait_and_download(queued["task_id"], target, timeout=args.timeout)
