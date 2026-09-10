@@ -56,6 +56,7 @@ OPTION_KEYS = {
     "lora_name",
     "lora_model_strength",
     "lora_clip_strength",
+    "vae_name",
     "seed",
     "workflow_path",
 }
@@ -151,6 +152,7 @@ def _options(value: Any, *, label: str) -> Dict[str, Any]:
         "latent_upscale_method",
         "checkpoint",
         "lora_name",
+        "vae_name",
         "workflow_path",
     ):
         if key in options:
@@ -189,6 +191,8 @@ def _resolve_quality_recipe(options: Dict[str, Any], *, label: str):
         raise ValueError(f"{label}: custom workflows cannot use automatic hero/two-pass expansion")
     if workflow and options.get("lora_name"):
         raise ValueError(f"{label}: custom workflows cannot use automatic LoRA insertion")
+    if workflow and options.get("vae_name"):
+        raise ValueError(f"{label}: custom workflows cannot use automatic VAE insertion")
     return settings
 
 
@@ -230,6 +234,7 @@ async def _preflight_custom_workflow(endpoint: str, workflow_path: str, sample_p
         workflow_path=path,
         filename_prefix="EVAVO/batch-plan-preflight",
         lora_name="",
+        vae_name="",
         use_environment=False,
     )
     result = await asyncio.to_thread(backend.preflight_workflow, workflow)
@@ -371,7 +376,7 @@ def validate_plan(
         "wait_timeout": wait_timeout,
         "output_root": str(output_root),
         "environment_mode": "frozen",
-        "environment_policy": "versioned batch plans ignore ambient EVAVO_IMAGE_* profile/LoRA overrides; ambient workflow injection fails closed",
+        "environment_policy": "versioned batch plans ignore ambient EVAVO_IMAGE_* profile/LoRA/VAE overrides; ambient workflow injection fails closed",
         "defaults": default_options,
         "resolved_default_quality": default_quality.as_dict(),
         "items": compiled,
