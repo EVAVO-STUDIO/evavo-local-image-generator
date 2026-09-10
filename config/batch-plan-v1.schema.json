@@ -46,6 +46,7 @@
         "lora_name": {"type": "string", "minLength": 1},
         "lora_model_strength": {"type": "number", "minimum": -4, "maximum": 4},
         "lora_clip_strength": {"type": "number", "minimum": -4, "maximum": 4},
+        "vae_name": {"type": "string", "minLength": 1},
         "seed": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
         "workflow_path": {"type": "string", "minLength": 1}
       }
